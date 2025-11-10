@@ -1,14 +1,10 @@
 package botbooter
 
 import (
-	"fmt"
-
 	"github.com/bwmarrin/discordgo"
 )
 
 func (b *Bot) connectDiscord() error {
-	fmt.Println("Connecting Discord...")
-
 	b.DiscordSession.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if m.Author.ID == s.State.User.ID {
 			return
@@ -26,23 +22,19 @@ func (b *Bot) connectDiscord() error {
 
 	err := b.DiscordSession.Open()
 	if err != nil {
-		fmt.Println("Error opening Discord session:", err)
 		return err
 	}
 
-	fmt.Println("Discord bot is now running. Press CTRL-C to exit.")
 	return nil
 }
 
 func (b *Bot) disconnectDiscord() error {
-	fmt.Println("Disconnecting Discord...")
 	return b.DiscordSession.Close()
 }
 
 func InitAsDiscordBot(token string) *Bot {
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
-		fmt.Println("Error creating Discord session:", err)
 		return nil
 	}
 

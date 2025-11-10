@@ -64,7 +64,7 @@ func (b *Bot) Connect() error {
 	case DiscordBotType:
 		return b.connectDiscord()
 	default:
-		return fmt.Errorf("Unknown bot type")
+		return fmt.Errorf("unknown bot type")
 	}
 }
 
@@ -75,7 +75,7 @@ func (b *Bot) Disconnect() error {
 	case DiscordBotType:
 		return b.disconnectDiscord()
 	default:
-		return fmt.Errorf("Unknown bot type")
+		return fmt.Errorf("unknown bot type")
 	}
 }
 
@@ -86,7 +86,7 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 	case DiscordBotType:
 		return getAttachmentsFromDiscordMessage(message.DiscordData.Message), nil
 	default:
-		return nil, errors.New("Unknown bot type")
+		return nil, errors.New("unknown bot type")
 	}
 }
 
@@ -102,12 +102,11 @@ func (b *Bot) SendMessage(channelID string, message string) error {
 		_, err := b.DiscordSession.ChannelMessageSend(channelID, message)
 		return err
 	default:
-		return fmt.Errorf("Unknown bot type")
+		return fmt.Errorf("unknown bot type")
 	}
 }
 
 func (b *Bot) AddHandler(handler Command) {
-	fmt.Println("Adding handler:", handler)
 	b.Commands = append(b.Commands, handler)
 }
 
