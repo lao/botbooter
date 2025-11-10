@@ -2,8 +2,6 @@ package botbooter
 
 import (
 	"context"
-	"fmt"
-	"log"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -27,28 +25,22 @@ func InitAsSlackBot(appToken, botToken string) *Bot {
 }
 
 func (b *Bot) connectSlack() error {
-	fmt.Println("Connecting...")
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func(ctx context.Context) {
-		fmt.Println("Listening for events...")
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Println("Done")
 				return
 			case evt := <-b.SlackSocketClient.Events:
 				switch evt.Type {
 				case socketmode.EventTypeEventsAPI:
 					payload, ok := evt.Data.(slackevents.EventsAPIEvent)
 					if !ok {
-						fmt.Println("Ignored")
 						continue
 					}
 					b.SlackSocketClient.Ack(*evt.Request)
-					log.Println("Event received: ", payload.Type)
 					b.handleSlackEventsApi(payload)
 				}
 			}
@@ -93,28 +85,15 @@ func isSlackBotMessage(event slackevents.EventsAPIEvent) bool {
 	return false
 }
 
-func logMessageEvent(ev *slackevents.MessageEvent) {
-	log.Println(ev.Text)
-	log.Println(ev.Files)
-	log.Println(ev.User)
-	log.Println(ev.Channel)
-	log.Println(ev.BotID)
-	log.Println(ev.SubType)
-	log.Println(ev.ClientMsgID)
-}
-
 func (b *Bot) handleSlackEventsApi(e slackevents.EventsAPIEvent) {
 
 	if isSlackBotMessage(e) {
 		return
 	}
 
-	switch ev := e.InnerEvent.Data.(type) {
+	switch e.InnerEvent.Data.(type) {
 	case *slackevents.MessageEvent:
-		logMessageEvent(ev)
 		msg := e.InnerEvent.Data.(*slackevents.MessageEvent)
-
-		fmt.Println("Handlers:", b.Commands)
 
 		message := &Message{
 			UserID:    msg.User,
