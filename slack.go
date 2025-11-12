@@ -24,6 +24,18 @@ func InitAsSlackBot(appToken, botToken string) *Bot {
 	}
 }
 
+func (b *Bot) handleSlackSocketEvent(evt socketmode.Event) {
+	switch evt.Type {
+	case socketmode.EventTypeEventsAPI:
+		payload, ok := evt.Data.(slackevents.EventsAPIEvent)
+		if !ok {
+			return
+		}
+		b.SlackSocketClient.Ack(*evt.Request)
+		b.handleSlackEventsApi(payload)
+	}
+}
+
 func (b *Bot) connectSlack() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -34,15 +46,7 @@ func (b *Bot) connectSlack() error {
 			case <-ctx.Done():
 				return
 			case evt := <-b.SlackSocketClient.Events:
-				switch evt.Type {
-				case socketmode.EventTypeEventsAPI:
-					payload, ok := evt.Data.(slackevents.EventsAPIEvent)
-					if !ok {
-						continue
-					}
-					b.SlackSocketClient.Ack(*evt.Request)
-					b.handleSlackEventsApi(payload)
-				}
+				b.handleSlackSocketEvent(evt)
 			}
 		}
 	}(ctx)
