@@ -24,8 +24,8 @@ func TestCommand_matchFallback(t *testing.T) {
 }
 
 func TestConnectSlack_StartsAndStops(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skips real Slack network I/O performed by RunContext")
+	if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
+		t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; performs real Slack network I/O via RunContext")
 	}
 	bot := InitAsSlackBot("xapp-test", "xoxb-test")
 	ctx, cancel := context.WithCancel(context.Background())

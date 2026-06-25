@@ -34,6 +34,16 @@ func TestDisconnectDiscord(t *testing.T) {
 	assertNoError(t, bot.disconnectDiscord(), "Disconnect should not fail")
 }
 
+func TestDisconnectDiscord_RemovesMessageHandler(t *testing.T) {
+	bot := newDiscordBot(t)
+	removed := false
+	bot.removeDiscordHandler = func() { removed = true }
+
+	assertNoError(t, bot.disconnectDiscord(), "Disconnect should not fail")
+	assertTrue(t, removed, "Disconnect should remove the registered message handler")
+	assertTrue(t, bot.removeDiscordHandler == nil, "remove func should be cleared after disconnect")
+}
+
 func TestGetAttachmentsFromDiscordMessage(t *testing.T) {
 	tests := []struct {
 		name        string
