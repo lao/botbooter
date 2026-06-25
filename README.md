@@ -138,13 +138,19 @@ if err := bot.Run(ctx); err != nil { // connect, serve, and shut down on cancel
 
 ### Slack
 
-1. Create a Slack app with **Socket Mode** enabled.
-2. Add an app-level token (`xapp-…`) and a bot token (`xoxb-…`).
-3. Subscribe to the `message.channels` (and/or `message.im`) events and invite the bot to a channel.
+1. Create a Slack app and enable **Socket Mode** (*Settings → Socket Mode*). This generates an **app-level token** (`xapp-…`) with the `connections:write` scope.
+2. Add the **bot token scopes** under *Features → **OAuth & Permissions** → Scopes → Bot Token Scopes*:
+   - `chat:write` — required to send replies.
+   - `channels:history` (and `im:history`, `groups:history`, `mpim:history` as needed) — required to *receive* message events from those channel types.
+3. Subscribe to the matching message events under *Features → Event Subscriptions → Subscribe to bot events*: `message.channels` (and/or `message.im`, …).
+4. Install the app to your workspace (*OAuth & Permissions → Install*) and copy the **bot token** (`xoxb-…`). Re-install whenever you change scopes.
+5. Invite the bot to a channel (`/invite @your-bot`) and post from a **human** account (the bot ignores its own and other bots' messages).
 
 ```go
 bot := botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
 ```
+
+> **No response?** It's almost always missing bot token scopes (no `*:history` ⇒ no events delivered even when subscribed; no `chat:write` ⇒ can't reply), the bot not being invited to the channel, or re-install skipped after a scope change.
 
 ### Discord
 
