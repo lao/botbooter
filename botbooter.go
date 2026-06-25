@@ -157,6 +157,8 @@ type Bot struct {
 	cliIn  io.Reader
 	cliOut io.Writer
 
+	removeDiscordHandler func()
+
 	commands              []Command
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware

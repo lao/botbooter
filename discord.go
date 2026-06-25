@@ -29,13 +29,15 @@ func InitAsDiscordBot(token string) (*Bot, error) {
 // returns once the connection is established; the session runs in the
 // background until ctx is canceled.
 func (b *Bot) connectDiscord(ctx context.Context) error {
-	b.DiscordSession.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+	remove := b.DiscordSession.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		b.onDiscordMessage(ctx, s, m)
 	})
 
 	if err := b.DiscordSession.Open(); err != nil {
+		remove()
 		return err
 	}
+	b.removeDiscordHandler = remove
 
 	go func() {
 		<-ctx.Done()
@@ -71,6 +73,10 @@ func (b *Bot) onDiscordMessage(ctx context.Context, s *discordgo.Session, m *dis
 }
 
 func (b *Bot) disconnectDiscord() error {
+	if b.removeDiscordHandler != nil {
+		b.removeDiscordHandler()
+		b.removeDiscordHandler = nil
+	}
 	if b.DiscordSession == nil {
 		return nil
 	}
