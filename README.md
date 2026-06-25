@@ -165,7 +165,7 @@ make cover      # coverage report
 make run-cli    # run the example bot in CLI mode
 ```
 
-The suite runs under the race detector and is hermetic with `go test -short` (skips the one test that touches the Slack network).
+The suite runs under the race detector and is hermetic by default. The single test that touches the Slack network is opt-in, enabled by setting the `BOTBOOTER_SLACK_NETWORK_TEST` environment variable (see `lifecycle_test.go`).
 
 ## DEMO
 

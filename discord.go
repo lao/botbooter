@@ -37,7 +37,9 @@ func (b *Bot) connectDiscord(ctx context.Context) error {
 		remove()
 		return err
 	}
+	b.mu.Lock()
 	b.removeDiscordHandler = remove
+	b.mu.Unlock()
 
 	go func() {
 		<-ctx.Done()
@@ -73,9 +75,12 @@ func (b *Bot) onDiscordMessage(ctx context.Context, s *discordgo.Session, m *dis
 }
 
 func (b *Bot) disconnectDiscord() error {
-	if b.removeDiscordHandler != nil {
-		b.removeDiscordHandler()
-		b.removeDiscordHandler = nil
+	b.mu.Lock()
+	remove := b.removeDiscordHandler
+	b.removeDiscordHandler = nil
+	b.mu.Unlock()
+	if remove != nil {
+		remove()
 	}
 	if b.DiscordSession == nil {
 		return nil
