@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -134,6 +135,33 @@ func TestBot_dispatch_RecoversFromPanic(t *testing.T) {
 	// dispatch must recover; the call should return normally rather than
 	// propagating the panic and crashing the event loop.
 	bot.dispatch(context.Background(), &Message{Content: "boom"})
+}
+
+func TestBot_ReconnectAndConcurrentDisconnect(t *testing.T) {
+	// A pipe that never reaches EOF keeps the CLI reader blocked so the
+	// connection stays alive until we disconnect it.
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	bot := InitAsCLIBot(pr, &syncBuffer{})
+
+	for i := 0; i < 20; i++ {
+		// Reconnecting after a clean disconnect must succeed: each Connect
+		// installs its own stop closure rather than reusing a shared one.
+		assertNoError(t, bot.Connect(context.Background()), "reconnect should succeed after disconnect")
+
+		// Several goroutines race to tear down the same connection. Only one
+		// performs the teardown, and the per-connection stop state must be
+		// accessed without a data race (verified under go test -race).
+		var wg sync.WaitGroup
+		for j := 0; j < 4; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_ = bot.Disconnect()
+			}()
+		}
+		wg.Wait()
+	}
 }
 
 func TestBot_Start_GracefulShutdownOnSignal(t *testing.T) {
