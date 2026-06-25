@@ -310,9 +310,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	case loopErr = <-done:
 	}
 
-	if err := b.Disconnect(); err != nil && loopErr == nil {
-		loopErr = err
-	}
+	disconnectErr := b.Disconnect()
 
 	// Canceling the run context is the normal graceful-shutdown signal. The
 	// event loop (e.g. socketmode.RunContext) reports it back through done as
@@ -320,6 +318,14 @@ func (b *Bot) Run(ctx context.Context) error {
 	// log.Fatal(bot.Run(ctx)) and would exit non-zero on a clean Ctrl-C.
 	if ctx.Err() != nil && errors.Is(loopErr, ctx.Err()) {
 		loopErr = nil
+	}
+
+	if disconnectErr != nil {
+		if ctx.Err() != nil {
+			log.Printf("botbooter: error disconnecting during shutdown: %v", disconnectErr)
+		} else if loopErr == nil {
+			loopErr = disconnectErr
+		}
 	}
 	return loopErr
 }
