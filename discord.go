@@ -17,7 +17,7 @@ func InitAsDiscordBot(token string) (*Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	dg.Identify.Intents = discordgo.IntentsAllWithoutPrivileged | discordgo.IntentMessageContent
+	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
 	return &Bot{
 		BotType:        DiscordBotType,

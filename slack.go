@@ -92,7 +92,7 @@ func (b *Bot) handleSlackEventsApi(ctx context.Context, e slackevents.EventsAPIE
 func isSlackBotMessage(event slackevents.EventsAPIEvent) bool {
 	switch ev := event.InnerEvent.Data.(type) {
 	case *slackevents.MessageEvent:
-		return ev.BotID != "" || ev.SubType == "bot_message" || ev.Text == ""
+		return ev.BotID != "" || ev.SubType == "bot_message" || (ev.Text == "" && len(ev.Files) == 0)
 	case *slackevents.AppMentionEvent:
 		return ev.BotID != ""
 	case *slackevents.MessageMetadataPostedEvent:
