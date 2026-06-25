@@ -19,6 +19,16 @@ const (
 // writes replies to out. It requires no external credentials, which makes it
 // ideal for local development and tests. When in or out is nil, os.Stdin and
 // os.Stdout are used respectively.
+//
+// The adapter is intended for trusted, local input only: whitespace-separated
+// tokens in a message that resolve to existing local files are opened and
+// attached (see parseCLIMessage), so it must not be wired to untrusted input.
+//
+// Because the package does not own in, the background reader blocks inside a
+// read until the next line or EOF. If in never reaches EOF (e.g. os.Stdin),
+// that goroutine stays blocked after Disconnect/context cancellation until more
+// input arrives, so repeated Connect/Disconnect cycles can leak one goroutine
+// per cycle.
 func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 	if in == nil {
 		in = os.Stdin

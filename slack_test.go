@@ -38,6 +38,11 @@ func TestIsSlackBotMessage(t *testing.T) {
 			expectedIsBotMessage: true,
 		},
 		{
+			name:                 "caption-less file upload",
+			event:                slackEvent(&slackevents.MessageEvent{Text: "", User: "U123", Files: []slackevents.File{{Mimetype: "image/png"}}}),
+			expectedIsBotMessage: false,
+		},
+		{
 			name:                 "user message",
 			event:                slackEvent(&slackevents.MessageEvent{Text: "Hello from user"}),
 			expectedIsBotMessage: false,
