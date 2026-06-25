@@ -163,10 +163,10 @@ type Bot struct {
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
 
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	done     chan error
-	stopOnce sync.Once
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	done   chan error
+	stop   func() error
 }
 
 // AddHandler registers a command. It compiles the command's pattern and
@@ -213,7 +213,28 @@ func (b *Bot) Connect(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel
 	b.done = make(chan error, 1)
-	b.stopOnce = sync.Once{}
+
+	// Each connection gets its own stop closure guarded by a fresh sync.Once.
+	// A reconnect installs a new closure rather than resetting a shared Once,
+	// so a lingering disconnect goroutine from a previous connection can never
+	// race a Once that the new connection has reset.
+	var once sync.Once
+	b.stop = func() error {
+		var err error
+		once.Do(func() {
+			switch b.BotType {
+			case SlackBotType:
+				err = b.disconnectSlack()
+			case DiscordBotType:
+				err = b.disconnectDiscord()
+			case CLIBotType:
+				err = b.disconnectCLI()
+			default:
+				err = ErrUnknownBotType
+			}
+		})
+		return err
+	}
 	b.mu.Unlock()
 
 	var err error
@@ -231,6 +252,7 @@ func (b *Bot) Connect(ctx context.Context) error {
 		cancel()
 		b.mu.Lock()
 		b.cancel = nil
+		b.stop = nil
 		b.mu.Unlock()
 		return err
 	}
@@ -243,25 +265,25 @@ func (b *Bot) Disconnect() error {
 	b.mu.Lock()
 	cancel := b.cancel
 	b.cancel = nil
+	stop := b.stop
+	b.stop = nil
 	b.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 
-	var err error
-	b.stopOnce.Do(func() {
-		switch b.BotType {
-		case SlackBotType:
-			err = b.disconnectSlack()
-		case DiscordBotType:
-			err = b.disconnectDiscord()
-		case CLIBotType:
-			err = b.disconnectCLI()
-		default:
-			err = ErrUnknownBotType
-		}
-	})
-	return err
+	if stop != nil {
+		return stop()
+	}
+
+	// Not connected: nothing to tear down. Still validate the bot type so a
+	// misconfigured bot reports the same error it would on connect.
+	switch b.BotType {
+	case SlackBotType, DiscordBotType, CLIBotType:
+		return nil
+	default:
+		return ErrUnknownBotType
+	}
 }
 
 // Run connects the bot and blocks until ctx is canceled or the underlying
@@ -290,6 +312,14 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	if err := b.Disconnect(); err != nil && loopErr == nil {
 		loopErr = err
+	}
+
+	// Canceling the run context is the normal graceful-shutdown signal. The
+	// event loop (e.g. socketmode.RunContext) reports it back through done as
+	// context.Canceled; don't surface that to callers, which commonly do
+	// log.Fatal(bot.Run(ctx)) and would exit non-zero on a clean Ctrl-C.
+	if ctx.Err() != nil && errors.Is(loopErr, ctx.Err()) {
+		loopErr = nil
 	}
 	return loopErr
 }
