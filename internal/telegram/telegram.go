@@ -18,12 +18,12 @@ import (
 
 // adapter is the Telegram implementation of core.Adapter.
 //
-// tg and selfID are set once in New and never mutated, so they need no
+// client and selfID are set once in New and never mutated, so they need no
 // synchronization. deps is installed per-connection by Connect and read by the
 // library's handler goroutines, which can outlive the Start call that spawned
 // them (see Connect); it is therefore held in an atomic pointer.
 type adapter struct {
-	tg     *bot.Bot
+	client *bot.Bot
 	selfID int64
 	deps   atomic.Pointer[core.AdapterDeps]
 }
@@ -38,13 +38,13 @@ func New(token string) (*core.Bot, error) {
 	a := &adapter{}
 
 	// WithSkipGetMe keeps New offline. WithDefaultHandler is given a.onUpdate as a
-	// method value bound to a; a.tg and a.selfID are populated just below, before
+	// method value bound to a; a.client and a.selfID are populated just below, before
 	// any update can be delivered (that only starts in Connect).
 	tg, err := bot.New(token, bot.WithDefaultHandler(a.onUpdate), bot.WithSkipGetMe())
 	if err != nil {
 		return nil, err
 	}
-	a.tg = tg
+	a.client = tg
 	// ID parses the bot's numeric id from the "<id>:<secret>" token prefix with no
 	// network call. It returns 0 for a non-integer prefix, which only degrades the
 	// self-message filter to the IsBot check below — and Telegram never delivers a
@@ -71,7 +71,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		// socketmode.RunContext's error) so Run can recognize and swallow the clean
 		// shutdown. Do not add a "Start exited unexpectedly" guard — Start has no
 		// other exit.
-		a.tg.Start(ctx)
+		a.client.Start(ctx)
 		deps.Done(ctx.Err())
 	}()
 
@@ -87,7 +87,7 @@ func (a *adapter) Disconnect() error {
 
 // Send delivers text to the chat identified by channelID.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	_, err := a.tg.SendMessage(ctx, &bot.SendMessageParams{
+	_, err := a.client.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: chatID(channelID),
 		Text:   text,
 	})
