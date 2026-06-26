@@ -146,19 +146,8 @@ documentation for each live in **[docs/platforms.md](docs/platforms.md)**.
 |---|---|---|
 | Slack | `xapp-…` app-level token + `xoxb-…` bot token | [docs/platforms.md](docs/platforms.md#slack) |
 | Discord | bot token + Message Content Intent | [docs/platforms.md](docs/platforms.md#discord) |
+| Telegram | BotFather bot token | [docs/platforms.md](docs/platforms.md#telegram) |
 | CLI | nothing (local stdin/stdout) | [docs/platforms.md](docs/platforms.md#cli) |
-
-### Telegram
-
-1. Message [@BotFather](https://t.me/BotFather), create a bot with `/newbot`, and copy the token.
-2. (Optional) `/setprivacy` → **Disable** so the bot receives all group messages, not only commands addressed to it. In private chats it always receives messages.
-3. Start a chat with the bot (or add it to a group) and message it from a **human** account — the bot ignores its own and other bots' messages.
-
-```go
-bot, err := botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
-```
-
-Telegram uses **long polling** (`getUpdates`): like Slack Socket Mode and the Discord Gateway, the bot dials out, so there is no public endpoint, port, or webhook to host. An empty token is rejected at construction; an otherwise-invalid token surfaces later as the poll loop's own authentication errors.
 
 ## Development
 
