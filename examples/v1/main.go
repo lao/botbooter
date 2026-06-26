@@ -85,7 +85,7 @@ func main() {
 	})
 
 	if botType == "cli" {
-		fmt.Println(`Type "echo <text>" and press enter (Ctrl-D to quit).`)
+		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
