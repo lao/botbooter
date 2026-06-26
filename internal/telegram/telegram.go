@@ -146,6 +146,7 @@ func toMessage(u *models.Update) *core.Message {
 	if m.ReplyToMessage != nil {
 		msg.ReplyToID = strconv.Itoa(m.ReplyToMessage.ID)
 	}
+	msg.Mentions = telegramMentions(m)
 	return msg
 }
 
@@ -158,6 +159,25 @@ func telegramAuthorName(u *models.User) string {
 		return u.Username
 	}
 	return u.FirstName
+}
+
+// telegramMentions collects user ids from text_mention entities — the only
+// entity kind that carries a numeric user id (a plain @username "mention"
+// entity references a name, not an id, so it is skipped). It reads the message
+// entities, falling back to the caption entities for media. Returns nil when
+// there are none.
+func telegramMentions(m *models.Message) []string {
+	entities := m.Entities
+	if len(entities) == 0 {
+		entities = m.CaptionEntities
+	}
+	var ids []string
+	for _, e := range entities {
+		if e.Type == models.MessageEntityTypeTextMention && e.User != nil {
+			ids = append(ids, strconv.FormatInt(e.User.ID, 10))
+		}
+	}
+	return ids
 }
 
 func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {

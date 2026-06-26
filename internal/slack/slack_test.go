@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	slackapi "github.com/slack-go/slack"
@@ -319,4 +320,12 @@ func TestClientAccessors(t *testing.T) {
 	bot := New("xapp-test", "xoxb-test")
 	asserts.NotNil(t, Client(bot), "Client accessor returns the web client")
 	asserts.NotNil(t, SocketClient(bot), "SocketClient accessor returns the socket client")
+}
+
+func TestSlackMentions(t *testing.T) {
+	got := toMessage(&slackevents.MessageEvent{Text: "hi <@U2> and <@U3|carol> there"})
+	asserts.Equal(t, strings.Join(got.Mentions, ","), "U2,U3", "parsed mention ids")
+
+	none := toMessage(&slackevents.MessageEvent{Text: "no mentions"})
+	asserts.Equal(t, len(none.Mentions), 0, "no mentions -> nil")
 }

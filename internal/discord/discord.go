@@ -87,6 +87,11 @@ func toMessage(m *discordgo.MessageCreate) *core.Message {
 	if m.MessageReference != nil {
 		msg.ReplyToID = m.MessageReference.MessageID
 	}
+	for _, u := range m.Mentions {
+		if u != nil {
+			msg.Mentions = append(msg.Mentions, u.ID)
+		}
+	}
 	return msg
 }
 
