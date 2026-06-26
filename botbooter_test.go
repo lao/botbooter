@@ -205,7 +205,7 @@ func TestBot_GetAttachments(t *testing.T) {
 	t.Run("SlackBot", func(t *testing.T) {
 		bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
 		message := &botbooter.Message{
-			SlackData: &slackevents.MessageEvent{
+			Raw: &slackevents.MessageEvent{
 				Files: []slackevents.File{
 					{Mimetype: "image/png", URLPrivate: "https://example.com/image.png"},
 				},
