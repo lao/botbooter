@@ -7,6 +7,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -37,6 +38,7 @@ const (
 	SlackBotType BotType = iota
 	DiscordBotType
 	CLIBotType
+	WhatsAppBotType
 )
 
 // String returns the lowercase platform name (e.g. "slack"), or a
@@ -49,6 +51,8 @@ func (t BotType) String() string {
 		return "discord"
 	case CLIBotType:
 		return "cli"
+	case WhatsAppBotType:
+		return "whatsapp"
 	default:
 		return fmt.Sprintf("BotType(%d)", int(t))
 	}
@@ -63,9 +67,10 @@ type Message struct {
 	ChannelID string
 	Content   string
 
-	DiscordData *discordgo.MessageCreate
-	SlackData   *slackevents.MessageEvent
-	CLIData     *CLIMessage
+	DiscordData  *discordgo.MessageCreate
+	SlackData    *slackevents.MessageEvent
+	CLIData      *CLIMessage
+	WhatsAppData *WhatsAppMessage
 }
 
 // CLIMessage is the raw payload of a message read from the CLI adapter: the
@@ -73,6 +78,29 @@ type Message struct {
 type CLIMessage struct {
 	Text        string
 	Attachments []Attachment
+}
+
+// WhatsAppMessage is the parsed payload of a message received from the WhatsApp
+// Cloud API webhook: the sender (From, which is also the reply target), the
+// message id and type, the text (or media caption), and any attached media. Raw
+// holds the original message JSON object for callers that need more.
+type WhatsAppMessage struct {
+	From  string
+	ID    string
+	Type  string
+	Text  string
+	Media *WhatsAppMedia
+	Raw   json.RawMessage
+}
+
+// WhatsAppMedia identifies a media object attached to a WhatsApp message. The
+// Cloud API delivers media by ID rather than URL: fetch the bytes with
+// GET /{ID} to obtain a short-lived download URL, then GET that URL with your
+// access token.
+type WhatsAppMedia struct {
+	ID       string
+	MimeType string
+	Filename string
 }
 
 // CommandHandler handles a dispatched message for a matched command.
