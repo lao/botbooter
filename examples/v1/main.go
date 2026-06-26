@@ -40,7 +40,13 @@ func echoHandler(ctx context.Context, bot *botbooter.Bot, message *botbooter.Mes
 }
 
 func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message, next botbooter.CommandHandler) {
-	log.Printf("user %s in channel %s: %s", message.UserID, message.ChannelID, message.Content)
+	// AuthorName is a best-effort normalized field; it falls back to the user id
+	// on platforms (like Slack) that deliver only an id.
+	author := message.AuthorName
+	if author == "" {
+		author = message.UserID
+	}
+	log.Printf("%s in channel %s: %s", author, message.ChannelID, message.Content)
 	next(ctx, bot, message)
 }
 
