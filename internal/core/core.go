@@ -17,6 +17,8 @@ import (
 	"syscall"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
@@ -37,6 +39,7 @@ const (
 	SlackBotType BotType = iota
 	DiscordBotType
 	CLIBotType
+	TelegramBotType
 )
 
 // String returns the lowercase platform name (e.g. "slack"), or a
@@ -49,6 +52,8 @@ func (t BotType) String() string {
 		return "discord"
 	case CLIBotType:
 		return "cli"
+	case TelegramBotType:
+		return "telegram"
 	default:
 		return fmt.Sprintf("BotType(%d)", int(t))
 	}
@@ -63,9 +68,10 @@ type Message struct {
 	ChannelID string
 	Content   string
 
-	DiscordData *discordgo.MessageCreate
-	SlackData   *slackevents.MessageEvent
-	CLIData     *CLIMessage
+	DiscordData  *discordgo.MessageCreate
+	SlackData    *slackevents.MessageEvent
+	TelegramData *models.Update
+	CLIData      *CLIMessage
 }
 
 // CLIMessage is the raw payload of a message read from the CLI adapter: the
@@ -153,6 +159,7 @@ type Bot struct {
 	DiscordSession    *discordgo.Session
 	SlackClient       *slack.Client
 	SlackSocketClient *socketmode.Client
+	TelegramBot       *bot.Bot
 
 	adapter Adapter
 
