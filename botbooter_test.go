@@ -393,6 +393,14 @@ func TestSessionAccessors(t *testing.T) {
 	asserts.NotNil(t, botbooter.SlackClient(slackBot), "SlackClient")
 	asserts.NotNil(t, botbooter.SlackSocketClient(slackBot), "SlackSocketClient")
 
+	discordBot, err := botbooter.InitAsDiscordBot("test-token")
+	asserts.NoError(t, err, "InitAsDiscordBot")
+	asserts.NotNil(t, botbooter.DiscordSession(discordBot), "DiscordSession")
+
+	telegramBot, err := botbooter.InitAsTelegramBot("123456:test-token")
+	asserts.NoError(t, err, "InitAsTelegramBot")
+	asserts.NotNil(t, botbooter.TelegramClient(telegramBot), "TelegramClient")
+
 	cliBot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
 	asserts.True(t, botbooter.SlackClient(cliBot) == nil, "SlackClient nil for non-Slack bot")
 }
