@@ -1,10 +1,6 @@
 // Package botbooter is a small framework for building chat bots that behave the
-// same way across Slack, Discord and a local CLI. A single [Bot] abstracts over
-// the platforms; you register [Command] handlers and optional [Middleware],
-// then run the bot.
-//
-// This package is a thin facade over the implementation in the internal
-// packages, so that consumers keep a single import path.
+// same way across Slack, Discord and a local CLI. It is a thin facade over the
+// internal packages, so consumers keep a single import path.
 package botbooter
 
 import (
@@ -34,8 +30,6 @@ const (
 	TelegramBotType = core.TelegramBotType
 )
 
-// These are aliases re-exported from the internal core package, so values are
-// interchangeable with that package.
 type (
 	// Bot is the platform-agnostic chat bot. See [core.Bot].
 	Bot = core.Bot
@@ -53,29 +47,19 @@ type (
 	Middleware = core.Middleware
 )
 
-// InitAsSlackBot creates a Slack bot that connects via Socket Mode. appToken is
-// the app-level token (xapp-...) and botToken is the bot token (xoxb-...).
+// InitAsSlackBot creates a Slack bot that connects via Socket Mode.
 func InitAsSlackBot(appToken, botToken string) *Bot {
 	return slack.New(appToken, botToken)
 }
 
-// InitAsDiscordBot creates a Discord bot from a bot token. It returns an error
-// if the token cannot be used to construct a session.
 func InitAsDiscordBot(token string) (*Bot, error) {
 	return discord.New(token)
 }
 
-// InitAsTelegramBot creates a Telegram bot from a BotFather token that connects
-// via the Bot API getUpdates long-poll loop. It returns an error only if the
-// token is empty; an otherwise-invalid token surfaces later as the loop's own
-// authentication errors rather than at construction.
 func InitAsTelegramBot(token string) (*Bot, error) {
 	return telegram.New(token)
 }
 
-// InitAsCLIBot creates a bot that reads newline-delimited messages from in and
-// writes replies to out. When in or out is nil, os.Stdin and os.Stdout are used
-// respectively. It is intended for trusted, local input only.
 func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 	return cli.New(in, out)
 }
