@@ -11,7 +11,13 @@ linters:
     - bodyclose
     - errorlint
     - misspell
+    - revive
     - unconvert
+  settings:
+    revive:
+      rules:
+        # Require doc comments on exported identifiers (godoc coverage gate).
+        - name: exported
 
 formatters:
   enable:
