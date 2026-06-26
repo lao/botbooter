@@ -308,8 +308,11 @@ func TestToMessage(t *testing.T) {
 
 func TestParseSlackTimestamp(t *testing.T) {
 	asserts.True(t, parseSlackTimestamp("").IsZero(), "empty ts is zero time")
-	asserts.True(t, parseSlackTimestamp("not-a-ts").IsZero(), "malformed ts is zero time")
+	asserts.True(t, parseSlackTimestamp("not-a-ts").IsZero(), "non-numeric seconds is zero time")
 	asserts.Equal(t, parseSlackTimestamp("1700000000.000100").Unix(), int64(1700000000), "seconds parsed")
+	asserts.Equal(t, parseSlackTimestamp("1700000000.000100").UnixMicro(), int64(1700000000000100), "microsecond precision")
+	asserts.Equal(t, parseSlackTimestamp("1700000000.1").UnixMicro(), int64(1700000000100000), "short fraction padded to microseconds")
+	asserts.Equal(t, parseSlackTimestamp("1700000000.-1").UnixNano(), int64(1700000000)*1_000_000_000, "malformed fraction kept at second precision, not shifted")
 }
 
 func TestClientAccessors(t *testing.T) {
