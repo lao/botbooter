@@ -92,7 +92,9 @@ func TestOnUpdate(t *testing.T) {
 		asserts.Equal(t, got.UserID, "7", "message user id")
 		asserts.Equal(t, got.ChannelID, "100", "message chat id")
 		asserts.Equal(t, got.Content, "hello", "message content")
-		asserts.True(t, got.TelegramData == u, "raw update should be carried on TelegramData")
+		raw, ok := RawUpdate(got)
+		asserts.True(t, ok, "raw update should be recoverable")
+		asserts.True(t, raw == u, "raw update carried on Raw")
 	})
 
 	t.Run("CaptionUsedWhenTextEmpty", func(t *testing.T) {
@@ -118,7 +120,9 @@ func TestOnUpdate(t *testing.T) {
 
 		asserts.NotNil(t, got, "photo-only message should still be dispatched (pass-through)")
 		asserts.Equal(t, got.Content, "", "photo-only message has empty content")
-		asserts.True(t, got.TelegramData == u, "raw update carried so handlers can read the photo")
+		raw, ok := RawUpdate(got)
+		asserts.True(t, ok, "raw update should be recoverable")
+		asserts.True(t, raw == u, "raw update carried so handlers can read the photo")
 	})
 
 	t.Run("NoMessageIgnored", func(t *testing.T) {
@@ -203,6 +207,46 @@ func TestOnUpdate_DispatchIsConnectionScoped(t *testing.T) {
 	a.onUpdate(ctx2, nil, u)
 	asserts.True(t, got2 != nil, "update on connection 2's context reaches deps2")
 	asserts.True(t, got1 == nil, "and not deps1")
+}
+
+func TestToMessage(t *testing.T) {
+	u := &models.Update{Message: &models.Message{
+		ID:             42,
+		From:           &models.User{ID: 7, Username: "bob"},
+		Chat:           models.Chat{ID: 100},
+		Text:           "hey",
+		Date:           1700000000,
+		ReplyToMessage: &models.Message{ID: 41},
+	}}
+
+	got := toMessage(u)
+
+	asserts.Equal(t, got.ID, "42", "ID")
+	asserts.Equal(t, got.UserID, "7", "UserID")
+	asserts.Equal(t, got.AuthorName, "bob", "AuthorName from username")
+	asserts.Equal(t, got.ChannelID, "100", "ChannelID from chat id")
+	asserts.Equal(t, got.Content, "hey", "Content")
+	asserts.Equal(t, got.ReplyToID, "41", "ReplyToID")
+	asserts.Equal(t, got.Timestamp.Unix(), int64(1700000000), "Timestamp")
+	raw, ok := RawUpdate(got)
+	asserts.True(t, ok, "RawUpdate recovers the update")
+	asserts.True(t, raw == u, "RawUpdate returns the same pointer")
+}
+
+func TestToMessageCaptionAndFirstName(t *testing.T) {
+	u := &models.Update{Message: &models.Message{
+		ID:      1,
+		From:    &models.User{ID: 7, FirstName: "Bob"},
+		Chat:    models.Chat{ID: 100},
+		Caption: "a photo",
+		Date:    1700000000,
+	}}
+
+	got := toMessage(u)
+
+	asserts.Equal(t, got.Content, "a photo", "Content falls back to caption")
+	asserts.Equal(t, got.AuthorName, "Bob", "AuthorName falls back to first name")
+	asserts.Equal(t, got.ReplyToID, "", "no reply")
 }
 
 func TestChatID(t *testing.T) {

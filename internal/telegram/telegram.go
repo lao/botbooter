@@ -6,6 +6,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -99,10 +100,62 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 
 // Attachments returns the files attached to the message's Telegram update.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	if m.TelegramData == nil {
+	u, ok := m.Raw.(*models.Update)
+	if !ok || u == nil {
 		return nil, nil
 	}
-	return attachmentsFromMessage(m.TelegramData.Message), nil
+	return attachmentsFromMessage(u.Message), nil
+}
+
+// RawUpdate returns the raw Telegram update carried on m, reporting whether m
+// originated from Telegram.
+func RawUpdate(m *core.Message) (*models.Update, bool) {
+	u, ok := m.Raw.(*models.Update)
+	return u, ok
+}
+
+// Client returns the go-telegram bot client backing b, or nil if b is not a
+// Telegram bot.
+func Client(b *core.Bot) *bot.Bot {
+	if a, ok := core.AdapterAs[*adapter](b); ok {
+		return a.client
+	}
+	return nil
+}
+
+// toMessage maps a Telegram update's message onto a platform-agnostic Message.
+// onUpdate guarantees a non-nil Message and From. Content is the text, or the
+// caption for media-only messages.
+func toMessage(u *models.Update) *core.Message {
+	m := u.Message
+	content := m.Text
+	if content == "" {
+		content = m.Caption
+	}
+	msg := &core.Message{
+		ID:         strconv.Itoa(m.ID),
+		UserID:     strconv.FormatInt(m.From.ID, 10),
+		AuthorName: telegramAuthorName(m.From),
+		ChannelID:  strconv.FormatInt(m.Chat.ID, 10),
+		Content:    content,
+		Timestamp:  time.Unix(int64(m.Date), 0).UTC(),
+		Raw:        u,
+	}
+	if m.ReplyToMessage != nil {
+		msg.ReplyToID = strconv.Itoa(m.ReplyToMessage.ID)
+	}
+	return msg
+}
+
+// telegramAuthorName prefers the @username, falling back to the first name.
+func telegramAuthorName(u *models.User) string {
+	if u == nil {
+		return ""
+	}
+	if u.Username != "" {
+		return u.Username
+	}
+	return u.FirstName
 }
 
 func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
@@ -126,17 +179,7 @@ func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 
-	content := m.Text
-	if content == "" {
-		content = m.Caption
-	}
-
-	deps.Dispatch(ctx, &core.Message{
-		UserID:       strconv.FormatInt(m.From.ID, 10),
-		ChannelID:    strconv.FormatInt(m.Chat.ID, 10),
-		Content:      content,
-		TelegramData: u,
-	})
+	deps.Dispatch(ctx, toMessage(u))
 }
 
 func chatID(s string) any {
