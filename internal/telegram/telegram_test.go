@@ -38,11 +38,14 @@ func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapt
 	t.Cleanup(srv.Close)
 
 	a := &adapter{selfID: selfID}
-	tg, err := bot.New("123:test-token",
-		bot.WithDefaultHandler(a.onUpdate),
-		bot.WithServerURL(srv.URL),
-		bot.WithSkipGetMe(),
-	)
+	a.newClient = func() (*bot.Bot, error) {
+		return bot.New("123:test-token",
+			bot.WithDefaultHandler(a.onUpdate),
+			bot.WithServerURL(srv.URL),
+			bot.WithSkipGetMe(),
+		)
+	}
+	tg, err := a.newClient()
 	asserts.NoError(t, err, "bot.New for stub server")
 	a.client = tg
 	return a
@@ -326,6 +329,37 @@ func TestConnect_StartsAndStops(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Done was not called after the context was canceled")
 	}
+}
+
+// TestConnect_FreshClientPerConnection proves each Connect builds its own *bot.Bot,
+// so a canceled run's buffered updates die with its client instead of being drained,
+// and dispatched, by the next connection.
+func TestConnect_FreshClientPerConnection(t *testing.T) {
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+
+	base := a.newClient
+	var clients []*bot.Bot
+	a.newClient = func() (*bot.Bot, error) {
+		c, err := base()
+		clients = append(clients, c)
+		return c, err
+	}
+
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(error) {},
+	}
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail")
+		cancel()
+	}
+
+	asserts.Equal(t, len(clients), 2, "each Connect builds its own client")
+	asserts.True(t, clients[0] != clients[1], "connections use distinct *bot.Bot instances")
 }
 
 func TestConnect_DispatchesUpdate(t *testing.T) {
