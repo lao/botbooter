@@ -1,9 +1,10 @@
 // Command v1 is a small demo of botbooter. It runs an "echo" bot on Slack,
-// Discord or the local CLI.
+// Discord, Telegram or the local CLI.
 //
 //	go run ./examples/v1            # CLI mode (no credentials needed)
 //	go run ./examples/v1 slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 //	go run ./examples/v1 discord    # reads DISCORD_BOT_TOKEN
+//	go run ./examples/v1 telegram   # reads TELEGRAM_BOT_TOKEN
 package main
 
 import (
@@ -19,8 +20,6 @@ import (
 	"github.com/lao/botbooter"
 )
 
-// echoHandler logs any attachments, then replies with the message text minus
-// the leading "echo " prefix.
 func echoHandler(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message) {
 	if attachments, err := bot.GetAttachments(message); err != nil {
 		log.Println("failed to get attachments:", err)
@@ -40,24 +39,23 @@ func echoHandler(ctx context.Context, bot *botbooter.Bot, message *botbooter.Mes
 	}
 }
 
-// loggingMiddleware logs each incoming message before passing it to next.
 func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message, next botbooter.CommandHandler) {
 	log.Printf("user %s in channel %s: %s", message.UserID, message.ChannelID, message.Content)
 	next(ctx, bot, message)
 }
 
-// newBot builds a bot for the named platform ("slack", "discord" or "cli"),
-// reading credentials from the environment, and errors on an unknown type.
 func newBot(botType string) (*botbooter.Bot, error) {
 	switch botType {
 	case "slack":
 		return botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN")), nil
 	case "discord":
 		return botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
+	case "telegram":
+		return botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	case "cli":
 		return botbooter.InitAsCLIBot(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram or cli)", botType)
 	}
 }
 

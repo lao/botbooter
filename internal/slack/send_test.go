@@ -13,11 +13,9 @@ import (
 	"github.com/lao/botbooter/internal/asserts"
 )
 
-// stubRoundTripper is an http.RoundTripper that returns a canned response
-// without any network I/O, so the Send path can be exercised against a
-// simulated Slack Web API reply. slack-go's Client takes its http client only
-// at construction (OptionHTTPClient), which a white-box test in this package
-// can wire in; an external test cannot, since the field is unexported.
+// slack-go only accepts the http client at construction (OptionHTTPClient), so
+// only a white-box test in this package can inject a stub; an external test
+// cannot, since the field is unexported.
 type stubRoundTripper struct {
 	status int
 	body   string
@@ -37,10 +35,7 @@ func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// TestSend_SurfacesError verifies that adapter.Send returns the error reported
-// by the Slack Web API. The http client is stubbed so no real network call is
-// made (the external botbooter_test gates this path behind a network env var
-// because it cannot inject the client through the public facade).
+// TestSend_SurfacesError verifies adapter.Send returns the Slack API's error.
 func TestSend_SurfacesError(t *testing.T) {
 	httpStub := &http.Client{Transport: stubRoundTripper{
 		status: http.StatusOK,

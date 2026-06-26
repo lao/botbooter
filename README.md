@@ -6,15 +6,15 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/lao/botbooter)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
-Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, or stdin.
+Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, or stdin.
 
 > ⚠️ **Pre-1.0** — the public API may still change.
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
@@ -63,6 +63,7 @@ Or run the bundled example directly:
 go run ./examples/v1            # CLI mode (default, no credentials)
 go run ./examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 go run ./examples/v1 discord    # uses DISCORD_BOT_TOKEN
+go run ./examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
 ```
 
 ## Concepts
@@ -74,6 +75,7 @@ go run ./examples/v1 discord    # uses DISCORD_BOT_TOKEN
 | `InitAsCLIBot(in io.Reader, out io.Writer)` | `*Bot` | Local adapter; `nil` defaults to stdin/stdout. |
 | `InitAsSlackBot(appToken, botToken string)` | `*Bot` | Socket Mode (`xapp-…` + `xoxb-…`). |
 | `InitAsDiscordBot(token string)` | `(*Bot, error)` | Enables the message-content intent (see below). |
+| `InitAsTelegramBot(token string)` | `(*Bot, error)` | Long polling via `getUpdates`; BotFather token. |
 
 ### Handlers, commands and middleware
 
@@ -144,6 +146,7 @@ documentation for each live in **[docs/platforms.md](docs/platforms.md)**.
 |---|---|---|
 | Slack | `xapp-…` app-level token + `xoxb-…` bot token | [docs/platforms.md](docs/platforms.md#slack) |
 | Discord | bot token + Message Content Intent | [docs/platforms.md](docs/platforms.md#discord) |
+| Telegram | BotFather bot token | [docs/platforms.md](docs/platforms.md#telegram) |
 | CLI | nothing (local stdin/stdout) | [docs/platforms.md](docs/platforms.md#cli) |
 
 ## Development
@@ -179,9 +182,9 @@ Alternatives:
 
 ## Roadmap
 
-- [x] Slack, Discord and CLI adapters
+- [x] Slack, Discord, Telegram and CLI adapters
 - [x] Middleware and attachment abstraction
-- [ ] Microsoft Teams, Telegram, WhatsApp adapters
+- [ ] Microsoft Teams, WhatsApp adapters
 - [ ] Richer message types (blocks, embeds)
 
 ## Contributing

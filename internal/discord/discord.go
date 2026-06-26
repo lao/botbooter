@@ -1,5 +1,4 @@
-// Package discord is the Discord adapter for botbooter. It connects via the
-// Gateway and implements core.Adapter.
+// Package discord is the Discord adapter for botbooter.
 package discord
 
 import (
@@ -11,7 +10,6 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// adapter is the Discord implementation of core.Adapter.
 type adapter struct {
 	session *discordgo.Session
 
@@ -19,12 +17,7 @@ type adapter struct {
 	removeHandler func()
 }
 
-// New creates a Discord bot from a bot token. It returns an error if the token
-// cannot be used to construct a session.
-//
-// The message-content intent is enabled so handlers receive message text. That
-// intent is privileged and must also be enabled for the application in the
-// Discord developer portal, otherwise Discord delivers empty message content.
+// New creates a Discord bot that connects via the Gateway.
 func New(token string) (*core.Bot, error) {
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -37,9 +30,6 @@ func New(token string) (*core.Bot, error) {
 	return bot, nil
 }
 
-// Connect opens the gateway and registers the message handler. It returns once
-// the connection is established; the session runs in the background until ctx
-// is canceled.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	remove := a.session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		a.onMessage(ctx, s, m, deps)
@@ -61,9 +51,6 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// onMessage converts an incoming Discord message into a platform-agnostic
-// Message and dispatches it, ignoring messages without an author and the bot's
-// own messages (to avoid reply loops).
 func (a *adapter) onMessage(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate, deps core.AdapterDeps) {
 	if m.Author == nil {
 		return
@@ -86,8 +73,7 @@ func (a *adapter) onMessage(ctx context.Context, s *discordgo.Session, m *discor
 	})
 }
 
-// Disconnect removes the message handler and closes the gateway session. It is
-// safe to call when never connected.
+// Disconnect removes the message handler and closes the gateway session.
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	remove := a.removeHandler
@@ -102,13 +88,11 @@ func (a *adapter) Disconnect() error {
 	return a.session.Close()
 }
 
-// Send sends text to channelID over the gateway, honoring ctx.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	_, err := a.session.ChannelMessageSend(channelID, text, discordgo.WithContext(ctx))
 	return err
 }
 
-// Attachments returns the files attached to the message's Discord event.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	if m.DiscordData == nil {
 		return nil, nil
@@ -116,8 +100,6 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	return attachmentsFromMessage(m.DiscordData.Message), nil
 }
 
-// attachmentsFromMessage converts a Discord message's attachments into
-// platform-agnostic attachments, returning nil for a nil message.
 func attachmentsFromMessage(m *discordgo.Message) []core.Attachment {
 	if m == nil {
 		return nil
