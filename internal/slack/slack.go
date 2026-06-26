@@ -114,8 +114,9 @@ func toMessage(msg *slackevents.MessageEvent) *core.Message {
 }
 
 // parseSlackTimestamp converts a Slack ts ("1700000000.000100", seconds with a
-// 6-digit microsecond fraction) into a UTC time, returning the zero time for an
-// empty or malformed value.
+// 6-digit microsecond fraction) into a UTC time. It returns the zero time when
+// ts is empty or its seconds component is non-numeric; a malformed fraction is
+// ignored and second precision is kept.
 func parseSlackTimestamp(ts string) time.Time {
 	if ts == "" {
 		return time.Time{}
@@ -127,11 +128,11 @@ func parseSlackTimestamp(ts string) time.Time {
 	}
 	var nsec int64
 	if frac != "" {
-		for len(frac) < 6 {
-			frac += "0"
-		}
-		if micros, err := strconv.ParseInt(frac[:6], 10, 64); err == nil {
-			nsec = micros * 1000
+		// Slack's fraction is microseconds; pad/truncate to 6 digits. ParseUint
+		// rejects a sign, so a malformed fraction leaves nsec at 0 instead of
+		// shifting the whole time backward.
+		if micros, err := strconv.ParseUint((frac + "000000")[:6], 10, 64); err == nil {
+			nsec = int64(micros) * 1000
 		}
 	}
 	return time.Unix(s, nsec).UTC()
