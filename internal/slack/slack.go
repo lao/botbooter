@@ -1,5 +1,4 @@
-// Package slack is the Slack adapter for botbooter. It connects via Socket Mode
-// and implements core.Adapter.
+// Package slack is the Slack adapter for botbooter, connecting via Socket Mode.
 package slack
 
 import (
@@ -13,14 +12,12 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// adapter is the Slack implementation of core.Adapter.
 type adapter struct {
 	client *slackapi.Client
 	socket *socketmode.Client
 }
 
-// New creates a Slack bot that connects via Socket Mode. appToken is the
-// app-level token (xapp-...) and botToken is the bot token (xoxb-...).
+// New creates a Slack bot that connects via Socket Mode.
 func New(appToken, botToken string) *core.Bot {
 	client := slackapi.New(
 		botToken,
@@ -34,8 +31,6 @@ func New(appToken, botToken string) *core.Bot {
 	return bot
 }
 
-// Connect starts the Socket Mode event loop in the background. It returns
-// immediately; the loop runs until ctx is canceled.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	go func() {
 		for {
@@ -58,9 +53,8 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// Disconnect stops the Socket Mode loop. The loop is driven by the run context,
-// so canceling it (via Bot.Disconnect) is what actually stops the connection;
-// there is nothing else to close.
+// Disconnect is a no-op: the loop is driven by the run context, so canceling it
+// is what stops the connection.
 func (a *adapter) Disconnect() error {
 	return nil
 }
@@ -76,8 +70,6 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	return attachmentsFromMessage(m.SlackData), nil
 }
 
-// handleSocketEvent acknowledges and routes a single Socket Mode event,
-// handling only Events API payloads.
 func (a *adapter) handleSocketEvent(ctx context.Context, evt socketmode.Event, deps core.AdapterDeps) {
 	switch evt.Type {
 	case socketmode.EventTypeEventsAPI:
@@ -92,8 +84,6 @@ func (a *adapter) handleSocketEvent(ctx context.Context, evt socketmode.Event, d
 	}
 }
 
-// handleEventsAPI dispatches a user message from an Events API payload,
-// dropping events that originate from a bot to avoid reply loops.
 func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent, deps core.AdapterDeps) {
 	if isBotMessage(e) {
 		return
@@ -109,9 +99,6 @@ func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEv
 	}
 }
 
-// isBotMessage reports whether an event originated from a bot (or is otherwise
-// not a user message we should handle), so we can ignore it and avoid reply
-// loops.
 func isBotMessage(event slackevents.EventsAPIEvent) bool {
 	switch ev := event.InnerEvent.Data.(type) {
 	case *slackevents.MessageEvent:
@@ -129,8 +116,6 @@ func isBotMessage(event slackevents.EventsAPIEvent) bool {
 	}
 }
 
-// attachmentsFromMessage converts a Slack message event's files into
-// platform-agnostic attachments, returning nil for a nil event.
 func attachmentsFromMessage(m *slackevents.MessageEvent) []core.Attachment {
 	if m == nil {
 		return nil
