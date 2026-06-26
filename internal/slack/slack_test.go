@@ -1,22 +1,41 @@
-package botbooter
+package slack
 
 import (
 	"context"
 	"testing"
 
+	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
+
+	"github.com/lao/botbooter/internal/asserts"
+	"github.com/lao/botbooter/internal/core"
 )
 
-func TestInitAsSlackBot(t *testing.T) {
-	bot := InitAsSlackBot("app_token", "bot_token")
-
-	assertNotNil(t, bot, "Bot should be initialized")
-	assertEqual(t, bot.BotType, SlackBotType, "Bot type should be Slack")
-	assertNotNil(t, bot.SlackClient, "Slack client should be initialized")
-	assertNotNil(t, bot.SlackSocketClient, "Slack socket client should be initialized")
+// newTestAdapter builds an adapter with real (unconnected) Slack clients, which
+// is enough for the message-handling paths exercised below.
+func newTestAdapter() *adapter {
+	client := slackapi.New("xoxb-test", slackapi.OptionAppLevelToken("xapp-test"))
+	return &adapter{client: client, socket: socketmode.New(client)}
 }
 
-func TestIsSlackBotMessage(t *testing.T) {
+// captureDeps returns AdapterDeps that record the dispatched message in *got.
+func captureDeps(got **core.Message) core.AdapterDeps {
+	return core.AdapterDeps{
+		Dispatch: func(ctx context.Context, m *core.Message) { *got = m },
+	}
+}
+
+func TestNew(t *testing.T) {
+	bot := New("app_token", "bot_token")
+
+	asserts.NotNil(t, bot, "Bot should be initialized")
+	asserts.Equal(t, bot.BotType, core.SlackBotType, "Bot type should be Slack")
+	asserts.NotNil(t, bot.SlackClient, "Slack client should be initialized")
+	asserts.NotNil(t, bot.SlackSocketClient, "Slack socket client should be initialized")
+}
+
+func TestIsBotMessage(t *testing.T) {
 	tests := []struct {
 		name                 string
 		event                slackevents.EventsAPIEvent
@@ -96,12 +115,12 @@ func TestIsSlackBotMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assertEqual(t, isSlackBotMessage(tt.event), tt.expectedIsBotMessage, "isSlackBotMessage result")
+			asserts.Equal(t, isBotMessage(tt.event), tt.expectedIsBotMessage, "isBotMessage result")
 		})
 	}
 }
 
-func TestGetAttachmentsFromSlackMessage(t *testing.T) {
+func TestAttachmentsFromMessage(t *testing.T) {
 	tests := []struct {
 		name        string
 		message     *slackevents.MessageEvent
@@ -153,78 +172,112 @@ func TestGetAttachmentsFromSlackMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			attachments := getAttachmentsFromSlackMessage(tt.message)
+			attachments := attachmentsFromMessage(tt.message)
 
-			assertEqual(t, len(attachments), tt.wantCount, "Number of attachments")
+			asserts.Equal(t, len(attachments), tt.wantCount, "Number of attachments")
 			for i := 0; i < len(attachments) && i < len(tt.wantIsImage); i++ {
-				assertEqual(t, attachments[i].IsImage, tt.wantIsImage[i], "IsImage property for attachment")
+				asserts.Equal(t, attachments[i].IsImage, tt.wantIsImage[i], "IsImage property for attachment")
 			}
 			for i := 0; i < len(attachments) && i < len(tt.wantURLs); i++ {
-				assertEqual(t, attachments[i].URL, tt.wantURLs[i], "URL for attachment")
+				asserts.Equal(t, attachments[i].URL, tt.wantURLs[i], "URL for attachment")
 			}
 		})
 	}
 }
 
-func TestGetAttachmentsFromSlackMessage_Nil(t *testing.T) {
-	assertEqual(t, len(getAttachmentsFromSlackMessage(nil)), 0, "nil message yields no attachments")
+func TestAttachmentsFromMessage_Nil(t *testing.T) {
+	asserts.Equal(t, len(attachmentsFromMessage(nil)), 0, "nil message yields no attachments")
 }
 
-func TestHandleSlackEventsApi(t *testing.T) {
+func TestHandleEventsAPI(t *testing.T) {
 	t.Run("BotMessage", func(t *testing.T) {
-		bot := InitAsSlackBot("xapp-test", "xoxb-test")
-		handlerCalled := false
-		mustAddHandler(t, bot, "^hello$", func(ctx context.Context, b *Bot, m *Message) {
-			handlerCalled = true
-		})
+		a := newTestAdapter()
+		var got *core.Message
 
-		bot.handleSlackEventsApi(context.Background(), slackEvent(&slackevents.MessageEvent{
+		a.handleEventsAPI(context.Background(), slackEvent(&slackevents.MessageEvent{
 			BotID: "B01",
 			Text:  "hello",
-		}))
+		}), captureDeps(&got))
 
-		assertFalse(t, handlerCalled, "Handler should not be called for bot message")
+		asserts.True(t, got == nil, "Handler should not be called for bot message")
 	})
 
 	t.Run("UserMessage", func(t *testing.T) {
-		bot := InitAsSlackBot("xapp-test", "xoxb-test")
-		var got *Message
-		mustAddHandler(t, bot, "^hello$", func(ctx context.Context, b *Bot, m *Message) {
-			got = m
-		})
+		a := newTestAdapter()
+		var got *core.Message
 
-		bot.handleSlackEventsApi(context.Background(), slackEvent(&slackevents.MessageEvent{
+		a.handleEventsAPI(context.Background(), slackEvent(&slackevents.MessageEvent{
 			Text:    "hello",
 			User:    "U123",
 			Channel: "C456",
-		}))
+		}), captureDeps(&got))
 
-		assertNotNil(t, got, "Handler should be called for user message")
-		assertEqual(t, got.UserID, "U123", "message user")
-		assertEqual(t, got.ChannelID, "C456", "message channel")
+		asserts.NotNil(t, got, "Handler should be called for user message")
+		asserts.Equal(t, got.UserID, "U123", "message user")
+		asserts.Equal(t, got.ChannelID, "C456", "message channel")
 	})
 
 	t.Run("NonMessageEvent", func(t *testing.T) {
-		bot := InitAsSlackBot("xapp-test", "xoxb-test")
-		handlerCalled := false
-		mustAddHandler(t, bot, ".*", func(ctx context.Context, b *Bot, m *Message) {
-			handlerCalled = true
-		})
+		a := newTestAdapter()
+		var got *core.Message
 
-		bot.handleSlackEventsApi(context.Background(), slackEvent(&slackevents.AppMentionEvent{
+		a.handleEventsAPI(context.Background(), slackEvent(&slackevents.AppMentionEvent{
 			Text:    "mention",
 			User:    "U123",
 			Channel: "C456",
-		}))
+		}), captureDeps(&got))
 
-		assertFalse(t, handlerCalled, "Handler should not be called for non-MessageEvent")
+		asserts.True(t, got == nil, "Handler should not be called for non-MessageEvent")
 	})
 }
 
-func TestDisconnectSlack(t *testing.T) {
-	bot := InitAsSlackBot("xapp-test", "xoxb-test")
+func TestHandleSocketEvent(t *testing.T) {
+	t.Run("ValidEventsAPIEvent", func(t *testing.T) {
+		a := newTestAdapter()
+		var got *core.Message
 
-	assertNoError(t, bot.disconnectSlack(), "Disconnect Slack should not fail")
+		evt := socketmode.Event{
+			Type:    socketmode.EventTypeEventsAPI,
+			Data:    slackEvent(&slackevents.MessageEvent{Text: "hello", User: "U123", Channel: "C456"}),
+			Request: &socketmode.Request{EnvelopeID: "test-envelope"},
+		}
+
+		a.handleSocketEvent(context.Background(), evt, captureDeps(&got))
+
+		asserts.NotNil(t, got, "Handler should be called for valid message event")
+	})
+
+	t.Run("InvalidTypeAssertion", func(t *testing.T) {
+		a := newTestAdapter()
+		var got *core.Message
+
+		evt := socketmode.Event{
+			Type:    socketmode.EventTypeEventsAPI,
+			Data:    "invalid data type", // fails the type assertion
+			Request: &socketmode.Request{EnvelopeID: "test-envelope"},
+		}
+
+		a.handleSocketEvent(context.Background(), evt, captureDeps(&got))
+
+		asserts.True(t, got == nil, "Handler should not be called for invalid event data")
+	})
+
+	t.Run("NonEventsAPIEventType", func(t *testing.T) {
+		a := newTestAdapter()
+		var got *core.Message
+
+		evt := socketmode.Event{Type: socketmode.EventTypeConnecting, Data: nil}
+
+		a.handleSocketEvent(context.Background(), evt, captureDeps(&got))
+
+		asserts.True(t, got == nil, "Handler should not be called for non-EventsAPI event types")
+	})
+}
+
+func TestDisconnect(t *testing.T) {
+	a := newTestAdapter()
+
+	asserts.NoError(t, a.Disconnect(), "Disconnect Slack should not fail")
 }
 
 // slackEvent wraps inner event data in an EventsAPIEvent for tests.
