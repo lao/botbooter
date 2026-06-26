@@ -24,8 +24,6 @@ func TestNewAdapter_DefaultsToStdIO(t *testing.T) {
 	asserts.NotNil(t, a.out, "default output should be set")
 }
 
-// pngMagic is the 8-byte PNG signature; http.DetectContentType reports
-// image/png for any content beginning with it.
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
 
 func writeFile(t *testing.T, path string, data []byte) {

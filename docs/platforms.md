@@ -1,7 +1,8 @@
 # Platform setup
 
-How to provision credentials for each platform botbooter supports. Slack and
-Discord need an app + tokens; the CLI needs nothing.
+How to provision credentials for each platform botbooter supports. Slack,
+Discord and Telegram need tokens (from their app portals or BotFather); the
+CLI needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/docs/platforms.md) — pkg.go.dev renders the README but not this file.
 
@@ -9,6 +10,7 @@ Discord need an app + tokens; the CLI needs nothing.
 
 - Slack — [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)
 - Discord — [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway)
+- Telegram — [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api)
 - CLI — [`examples/v1`](../examples/v1) and the [README Quickstart](../README.md#quickstart)
 
 ---
@@ -93,6 +95,40 @@ bot, err := botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
 | `DISCORD_BOT_TOKEN` | bot token from step 1 |
 
 **Official docs:** [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway) · [What are Privileged Intents?](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents)
+
+---
+
+## Telegram
+
+botbooter connects over the Bot API **getUpdates long-poll loop** — outbound
+HTTPS only, so there's no public endpoint, port, or webhook to host (the
+dial-out model of Slack Socket Mode and the Discord Gateway).
+
+1. **Create a bot** by messaging [@BotFather](https://t.me/BotFather) and
+   sending `/newbot`. Follow the prompts (a display name, then a username
+   ending in `bot`) and copy the **bot token** it returns (`123456:ABC-…`).
+2. **(Optional) Disable privacy mode** (*BotFather → `/setprivacy` → pick the
+   bot → Disable*) so the bot receives **all** group messages, not only those
+   that start with `/` or @-mention it. Private chats always deliver every
+   message; this setting only affects groups.
+3. **Message the bot** — open a private chat (or add it to a group) and post
+   from a **human** account. The bot ignores its own and other bots' messages.
+
+```go
+bot, err := botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
+```
+
+An empty token is rejected at construction; an otherwise-invalid token is not —
+it surfaces later as the long-poll loop's own authentication errors (the loop
+logs and retries rather than failing fast).
+
+**Environment variables** (read by the bundled example):
+
+| Variable | Value |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | bot token from step 1 (`123456:ABC-…`) |
+
+**Official docs:** [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api) · [getUpdates / long polling](https://core.telegram.org/bots/api#getupdates)
 
 ---
 
