@@ -14,6 +14,7 @@ import (
 	"github.com/lao/botbooter/internal/core"
 	"github.com/lao/botbooter/internal/discord"
 	"github.com/lao/botbooter/internal/slack"
+	"github.com/lao/botbooter/internal/telegram"
 )
 
 // Errors returned by [Bot] methods.
@@ -27,9 +28,10 @@ type BotType = core.BotType
 
 // Supported bot types.
 const (
-	SlackBotType   = core.SlackBotType
-	DiscordBotType = core.DiscordBotType
-	CLIBotType     = core.CLIBotType
+	SlackBotType    = core.SlackBotType
+	DiscordBotType  = core.DiscordBotType
+	CLIBotType      = core.CLIBotType
+	TelegramBotType = core.TelegramBotType
 )
 
 // These are aliases re-exported from the internal core package, so values are
@@ -61,6 +63,14 @@ func InitAsSlackBot(appToken, botToken string) *Bot {
 // if the token cannot be used to construct a session.
 func InitAsDiscordBot(token string) (*Bot, error) {
 	return discord.New(token)
+}
+
+// InitAsTelegramBot creates a Telegram bot from a BotFather token that connects
+// via the Bot API getUpdates long-poll loop. It returns an error only if the
+// token is empty; an otherwise-invalid token surfaces later as the loop's own
+// authentication errors rather than at construction.
+func InitAsTelegramBot(token string) (*Bot, error) {
+	return telegram.New(token)
 }
 
 // InitAsCLIBot creates a bot that reads newline-delimited messages from in and

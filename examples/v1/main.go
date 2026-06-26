@@ -1,9 +1,10 @@
 // Command v1 is a small demo of botbooter. It runs an "echo" bot on Slack,
-// Discord or the local CLI.
+// Discord, Telegram or the local CLI.
 //
 //	go run ./examples/v1            # CLI mode (no credentials needed)
 //	go run ./examples/v1 slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 //	go run ./examples/v1 discord    # reads DISCORD_BOT_TOKEN
+//	go run ./examples/v1 telegram   # reads TELEGRAM_BOT_TOKEN
 package main
 
 import (
@@ -54,10 +55,12 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		return botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN")), nil
 	case "discord":
 		return botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
+	case "telegram":
+		return botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	case "cli":
 		return botbooter.InitAsCLIBot(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram or cli)", botType)
 	}
 }
 
