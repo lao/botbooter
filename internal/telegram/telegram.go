@@ -13,12 +13,14 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// adapter holds no per-connection state: dispatch callbacks ride on the context
-// Connect hands the poll loop, so a handler goroutine that outlives its Start
-// still dispatches through its own run's deps, not a later reconnect's.
+// adapter owns a client factory plus a long-lived client used for outbound Send
+// and the exported escape hatch. It holds no per-connection poll state: Connect
+// builds a fresh client per run (so a canceled run's buffered updates can't carry
+// over), and dispatch callbacks ride on the context Connect hands that poll loop.
 type adapter struct {
-	client *bot.Bot
-	selfID int64
+	newClient func() (*bot.Bot, error)
+	client    *bot.Bot
+	selfID    int64
 }
 
 // depsContextKey keys the per-connection deps on the poll loop context; a
@@ -37,8 +39,13 @@ func depsFrom(ctx context.Context) *core.AdapterDeps {
 // New creates a Telegram bot from a BotFather token.
 func New(token string) (*core.Bot, error) {
 	a := &adapter{}
+	// WithSkipGetMe avoids a network round-trip; the bot id comes from the token
+	// prefix instead. The factory lets Connect build a fresh client per run.
+	a.newClient = func() (*bot.Bot, error) {
+		return bot.New(token, bot.WithDefaultHandler(a.onUpdate), bot.WithSkipGetMe())
+	}
 
-	tg, err := bot.New(token, bot.WithDefaultHandler(a.onUpdate), bot.WithSkipGetMe())
+	tg, err := a.newClient()
 	if err != nil {
 		return nil, err
 	}
@@ -52,19 +59,24 @@ func New(token string) (*core.Bot, error) {
 
 // Connect starts the getUpdates long-poll loop in the background; it returns immediately.
 //
-// Dispatch callbacks ride on the context handed to Start, so each connection owns
-// its own: a straggling update dispatches through its run's deps and is dropped
-// once the run is canceled. Caveat from reusing one *bot.Bot across reconnects: an
-// update already buffered in the library's shared channel at cancel time may be
-// drained by the next connection; a fresh *bot.Bot per connection would close that.
+// Each connection builds its own *bot.Bot, so its update channel — and anything the
+// library buffered in it — dies when the run is canceled. A shared client would let an
+// update buffered at cancel time be drained, and dispatched, by the next connection.
+// Dispatch callbacks likewise ride on the context handed to Start, so a straggling
+// update reaches its own run's deps and is dropped once that run is canceled.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	ctx = withDeps(ctx, &deps)
+
+	tg, err := a.newClient()
+	if err != nil {
+		return err
+	}
 
 	go func() {
 		// Start blocks until ctx is canceled (getUpdates retries every non-context
 		// error forever), so ctx.Err() is always non-nil here; report it like Slack
 		// so Run can swallow the clean shutdown. Start has no other exit — no guard.
-		a.client.Start(ctx)
+		tg.Start(ctx)
 		deps.Done(ctx.Err())
 	}()
 
