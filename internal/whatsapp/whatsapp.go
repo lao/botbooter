@@ -15,11 +15,13 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -35,6 +37,11 @@ const (
 	graphBaseURL        = "https://graph.facebook.com"
 	signatureHeader     = "X-Hub-Signature-256"
 	signaturePrefix     = "sha256="
+
+	// maxRequestBytes caps the inbound webhook body. The endpoint is public, so
+	// this defends against memory-exhaustion from oversized/never-ending bodies;
+	// real Cloud API payloads are a few KB.
+	maxRequestBytes = 1 << 20 // 1 MiB
 )
 
 // ErrMissingConfig is returned by New when a required Config field is empty.
@@ -61,8 +68,8 @@ type Config struct {
 	Path string
 	// GraphVersion is the Graph API version. Defaults to "v23.0".
 	GraphVersion string
-	// HTTPClient is used for outbound Cloud API calls. Defaults to
-	// http.DefaultClient.
+	// HTTPClient is used for outbound Cloud API calls. Defaults to an
+	// http.Client with a 30s timeout.
 	HTTPClient *http.Client
 }
 
@@ -102,7 +109,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: httpClient}, nil
 }
@@ -129,7 +136,13 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		return err
 	}
 
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       20 * time.Second,
+		WriteTimeout:      20 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	a.mu.Lock()
 	a.srv = srv
 	a.mu.Unlock()
@@ -152,7 +165,8 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 // token matches, it echoes hub.challenge; otherwise it returns 403.
 func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if q.Get("hub.mode") == "subscribe" && q.Get("hub.verify_token") == a.cfg.VerifyToken {
+	tokenOK := subtle.ConstantTimeCompare([]byte(q.Get("hub.verify_token")), []byte(a.cfg.VerifyToken)) == 1
+	if q.Get("hub.mode") == "subscribe" && tokenOK {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, q.Get("hub.challenge"))
 		return
@@ -160,11 +174,14 @@ func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusForbidden)
 }
 
-// handleWebhook verifies the request signature, parses inbound messages and
-// dispatches each one. It acknowledges an authentic request with 200 so Meta
-// does not retry; an unauthenticated request gets 403.
+// handleWebhook verifies the request signature, then acknowledges the request
+// with 200 BEFORE dispatching, so a slow handler can never delay the ack and
+// trigger Meta's webhook retry (which would re-deliver the same message). The
+// parsed messages are dispatched off the request path using the run context;
+// an unauthenticated request gets 403. The body is size-capped because the
+// endpoint is public.
 func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -174,20 +191,22 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 		return
 	}
 
-	messages, err := parseWebhook(body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+	messages := parseWebhook(body)
+	w.WriteHeader(http.StatusOK)
+	if len(messages) == 0 {
 		return
 	}
-	for _, m := range messages {
-		deps.Dispatch(ctx, &core.Message{
-			UserID:       m.From,
-			ChannelID:    m.From,
-			Content:      m.Text,
-			WhatsAppData: m,
-		})
-	}
-	w.WriteHeader(http.StatusOK)
+
+	go func() {
+		for _, m := range messages {
+			deps.Dispatch(ctx, &core.Message{
+				UserID:       m.From,
+				ChannelID:    m.From,
+				Content:      m.Text,
+				WhatsAppData: m,
+			})
+		}
+	}()
 }
 
 // Disconnect shuts the webhook server down. It is safe to call when the server
@@ -200,7 +219,9 @@ func (a *adapter) Disconnect() error {
 	if srv == nil {
 		return nil
 	}
-	return srv.Shutdown(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return srv.Shutdown(ctx)
 }
 
 // Send delivers text to channelID (a WhatsApp wa_id / phone number) via the
@@ -238,6 +259,8 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("whatsapp: send failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
+	// Drain the success body so the connection can be reused (keep-alive).
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -251,7 +274,7 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	}
 	media := m.WhatsAppData.Media
 	return []core.Attachment{{
-		IsImage:   strings.HasPrefix(media.MimeType, "image"),
+		IsImage:   strings.HasPrefix(media.MimeType, "image/"),
 		URL:       "",
 		ExtraData: media,
 	}}, nil
@@ -330,10 +353,14 @@ func (in inboundMessage) media() *mediaObject {
 }
 
 // parseWebhook extracts inbound user messages from a Cloud API webhook payload.
-func parseWebhook(body []byte) ([]*core.WhatsAppMessage, error) {
+// An individual message that fails to parse is logged and skipped rather than
+// failing the whole batch, so one bad entry never drops its valid siblings (and
+// the request can still be acked with 200 to stop Meta retrying).
+func parseWebhook(body []byte) []*core.WhatsAppMessage {
 	var env webhookEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, err
+		log.Printf("whatsapp: discarding webhook with unparseable body: %v", err)
+		return nil
 	}
 
 	var out []*core.WhatsAppMessage
@@ -342,13 +369,14 @@ func parseWebhook(body []byte) ([]*core.WhatsAppMessage, error) {
 			for _, raw := range change.Value.Messages {
 				m, err := parseMessage(raw)
 				if err != nil {
-					return nil, err
+					log.Printf("whatsapp: skipping unparseable message: %v", err)
+					continue
 				}
 				out = append(out, m)
 			}
 		}
 	}
-	return out, nil
+	return out
 }
 
 // parseMessage converts one raw value.messages[] object into a WhatsAppMessage,

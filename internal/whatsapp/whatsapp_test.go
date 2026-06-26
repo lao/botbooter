@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lao/botbooter/internal/asserts"
 	"github.com/lao/botbooter/internal/core"
@@ -43,9 +44,28 @@ func sign(secret string, body []byte) string {
 }
 
 // captureDeps returns AdapterDeps that append every dispatched message to *got.
-func captureDeps(got *[]*core.Message) core.AdapterDeps {
+// When done is non-nil it receives a signal after each dispatch, so tests can
+// synchronize with the adapter's asynchronous (off-request-path) dispatch.
+func captureDeps(got *[]*core.Message, done chan<- struct{}) core.AdapterDeps {
 	return core.AdapterDeps{
-		Dispatch: func(_ context.Context, m *core.Message) { *got = append(*got, m) },
+		Dispatch: func(_ context.Context, m *core.Message) {
+			*got = append(*got, m)
+			if done != nil {
+				done <- struct{}{}
+			}
+		},
+	}
+}
+
+// awaitDispatch waits for n dispatch signals, failing the test on timeout.
+func awaitDispatch(t *testing.T, done <-chan struct{}, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for dispatch %d of %d", i+1, n)
+		}
 	}
 }
 
@@ -54,6 +74,10 @@ const textWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA"
 const imageWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"messages":[{"from":"123","id":"wamid.2","type":"image","image":{"id":"MID","mime_type":"image/jpeg","caption":"a cat","sha256":"abc"}}]}}]}]}`
 
 const statusWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"statuses":[{"id":"wamid.1","status":"delivered","recipient_id":"123"}]}}]}]}`
+
+// mixedBatchWebhook holds one valid text message followed by one whose "text"
+// field is a string (not an object), which fails to unmarshal into inboundMessage.
+const mixedBatchWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"messages":[{"from":"123","id":"wamid.1","type":"text","text":{"body":"ok"}},{"from":"456","id":"wamid.2","type":"text","text":"oops"}]}}]}]}`
 
 func TestNew(t *testing.T) {
 	bot, err := New(validConfig())
@@ -134,8 +158,10 @@ func TestHandleWebhook_DispatchesText(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
 	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
 	w := httptest.NewRecorder()
+	done := make(chan struct{}, 1)
 
-	a.handleWebhook(context.Background(), w, r, captureDeps(&got))
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, done))
+	awaitDispatch(t, done, 1)
 
 	asserts.Equal(t, w.Code, http.StatusOK, "authentic request should be 200")
 	asserts.Equal(t, len(got), 1, "one message should be dispatched")
@@ -154,7 +180,7 @@ func TestHandleWebhook_BadSignature(t *testing.T) {
 	r.Header.Set(signatureHeader, sign("wrong-secret", []byte(textWebhook)))
 	w := httptest.NewRecorder()
 
-	a.handleWebhook(context.Background(), w, r, captureDeps(&got))
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, nil))
 
 	asserts.Equal(t, w.Code, http.StatusForbidden, "bad signature should be 403")
 	asserts.Equal(t, len(got), 0, "no message should be dispatched")
@@ -169,16 +195,15 @@ func TestHandleWebhook_StatusOnlyIgnored(t *testing.T) {
 	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
 	w := httptest.NewRecorder()
 
-	a.handleWebhook(context.Background(), w, r, captureDeps(&got))
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, nil))
 
 	asserts.Equal(t, w.Code, http.StatusOK, "status callback should be acked 200")
 	asserts.Equal(t, len(got), 0, "status callback should dispatch nothing")
 }
 
 func TestParseWebhook_Image(t *testing.T) {
-	messages, err := parseWebhook([]byte(imageWebhook))
+	messages := parseWebhook([]byte(imageWebhook))
 
-	asserts.NoError(t, err, "image payload should parse")
 	asserts.Equal(t, len(messages), 1, "one message expected")
 	m := messages[0]
 	asserts.Equal(t, m.Type, "image", "type should be image")
@@ -186,6 +211,13 @@ func TestParseWebhook_Image(t *testing.T) {
 	asserts.NotNil(t, m.Media, "media should be set")
 	asserts.Equal(t, m.Media.ID, "MID", "media id")
 	asserts.Equal(t, m.Media.MimeType, "image/jpeg", "media mime type")
+}
+
+func TestParseWebhook_SkipsUnparseable(t *testing.T) {
+	messages := parseWebhook([]byte(mixedBatchWebhook))
+
+	asserts.Equal(t, len(messages), 1, "the valid message survives; the bad one is skipped")
+	asserts.Equal(t, messages[0].From, "123", "the surviving message is the valid one")
 }
 
 func TestSend(t *testing.T) {
