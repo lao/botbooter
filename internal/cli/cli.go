@@ -33,6 +33,7 @@ func newAdapter(in io.Reader, out io.Writer) *adapter {
 	return &adapter{in: in, out: out}
 }
 
+// New creates a CLI bot backed by the given reader and writer.
 func New(in io.Reader, out io.Writer) *core.Bot {
 	return core.New(core.CLIBotType, newAdapter(in, out))
 }

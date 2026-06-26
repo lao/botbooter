@@ -52,14 +52,17 @@ func InitAsSlackBot(appToken, botToken string) *Bot {
 	return slack.New(appToken, botToken)
 }
 
+// InitAsDiscordBot creates a Discord bot that connects via the Gateway.
 func InitAsDiscordBot(token string) (*Bot, error) {
 	return discord.New(token)
 }
 
+// InitAsTelegramBot creates a Telegram bot that connects via the Bot API.
 func InitAsTelegramBot(token string) (*Bot, error) {
 	return telegram.New(token)
 }
 
+// InitAsCLIBot creates a local CLI bot.
 func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 	return cli.New(in, out)
 }
