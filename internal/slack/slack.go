@@ -3,6 +3,7 @@ package slack
 
 import (
 	"context"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -109,8 +110,26 @@ func toMessage(msg *slackevents.MessageEvent) *core.Message {
 		Content:   msg.Text,
 		Timestamp: parseSlackTimestamp(msg.TimeStamp),
 		ReplyToID: msg.ThreadTimeStamp,
+		Mentions:  slackMentions(msg.Text),
 		Raw:       msg,
 	}
+}
+
+// slackMentionRE matches "<@U123>" and "<@U123|label>" mention tokens.
+var slackMentionRE = regexp.MustCompile(`<@([A-Z0-9]+)(?:\|[^>]*)?>`)
+
+// slackMentions extracts mentioned user ids from message text, returning nil
+// when there are none.
+func slackMentions(text string) []string {
+	matches := slackMentionRE.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(matches))
+	for _, m := range matches {
+		ids = append(ids, m[1])
+	}
+	return ids
 }
 
 // parseSlackTimestamp converts a Slack ts ("1700000000.000100", seconds with a

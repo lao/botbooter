@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,4 +226,13 @@ func TestSessionAccessor(t *testing.T) {
 	bot, err := New("test_token")
 	asserts.NoError(t, err, "New")
 	asserts.NotNil(t, Session(bot), "Session accessor returns the gateway session")
+}
+
+func TestToMessageMentions(t *testing.T) {
+	mc := &discordgo.MessageCreate{Message: &discordgo.Message{
+		Author:   &discordgo.User{ID: "U1"},
+		Mentions: []*discordgo.User{{ID: "U2"}, {ID: "U3"}},
+	}}
+	got := toMessage(mc)
+	asserts.Equal(t, strings.Join(got.Mentions, ","), "U2,U3", "mention ids")
 }

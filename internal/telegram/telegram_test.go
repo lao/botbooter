@@ -260,6 +260,20 @@ func TestToMessageNilSender(t *testing.T) {
 	asserts.Equal(t, got.ChannelID, "100", "chat id still mapped")
 }
 
+func TestTelegramMentions(t *testing.T) {
+	u := &models.Update{Message: &models.Message{
+		From: &models.User{ID: 1},
+		Chat: models.Chat{ID: 1},
+		Text: "hi Bob",
+		Entities: []models.MessageEntity{
+			{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 99}},
+			{Type: models.MessageEntityTypeMention}, // @username — no id, skipped
+		},
+	}}
+	got := toMessage(u)
+	asserts.Equal(t, strings.Join(got.Mentions, ","), "99", "text_mention id only")
+}
+
 func TestChatID(t *testing.T) {
 	t.Run("numeric", func(t *testing.T) {
 		got, ok := chatID("12345").(int64)
