@@ -87,15 +87,20 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
+// Disconnect is a no-op: the reader loop stops on context cancellation, so there
+// is nothing to tear down.
 func (a *adapter) Disconnect() error {
 	return nil
 }
 
+// Send writes text as a line to the adapter's output. The channel and context
+// are ignored; the CLI has a single output stream.
 func (a *adapter) Send(_ context.Context, _, text string) error {
 	_, err := fmt.Fprintln(a.out, text)
 	return err
 }
 
+// Attachments returns the attachments parsed from the message's typed line.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	if m.CLIData == nil {
 		return nil, nil

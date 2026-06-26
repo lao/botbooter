@@ -22,18 +22,25 @@ import (
 	"github.com/slack-go/slack/socketmode"
 )
 
+// ErrUnknownBotType is returned by Bot methods when the Bot has no adapter,
+// which happens when it was not built through one of the platform constructors.
 var ErrUnknownBotType = errors.New("botbooter: unknown bot type")
 
+// ErrAlreadyConnected is returned by Connect when the Bot is already connected.
 var ErrAlreadyConnected = errors.New("botbooter: already connected")
 
+// BotType identifies the messaging platform a Bot is connected to.
 type BotType int
 
+// The supported bot types.
 const (
 	SlackBotType BotType = iota
 	DiscordBotType
 	CLIBotType
 )
 
+// String returns the lowercase platform name (e.g. "slack"), or a
+// BotType(<n>) placeholder for an unknown value.
 func (t BotType) String() string {
 	switch t {
 	case SlackBotType:
@@ -47,6 +54,10 @@ func (t BotType) String() string {
 	}
 }
 
+// Message is a platform-agnostic incoming message handed to command handlers.
+// UserID, ChannelID and Content are always set; the platform-specific *Data
+// field carries the raw event for callers that need it, and only the field for
+// the originating platform is non-nil.
 type Message struct {
 	UserID    string
 	ChannelID string
@@ -57,15 +68,23 @@ type Message struct {
 	CLIData     *CLIMessage
 }
 
+// CLIMessage is the raw payload of a message read from the CLI adapter: the
+// typed line and any attachments resolved from file paths in it.
 type CLIMessage struct {
 	Text        string
 	Attachments []Attachment
 }
 
+// CommandHandler handles a dispatched message for a matched command.
 type CommandHandler func(ctx context.Context, b *Bot, m *Message)
 
+// Middleware wraps message dispatch. It runs before the matched handler and
+// must call next to continue the chain (or omit it to short-circuit).
 type Middleware func(ctx context.Context, b *Bot, m *Message, next CommandHandler)
 
+// Command pairs a regular-expression Pattern with the Handler to run when an
+// incoming message matches it. Register one with Bot.AddHandler, which compiles
+// and caches the pattern.
 type Command struct {
 	Pattern string
 	Handler CommandHandler
@@ -73,6 +92,9 @@ type Command struct {
 	re *regexp.Regexp
 }
 
+// match reports whether content matches the command's pattern, using the
+// pre-compiled regexp when present and falling back to compiling Pattern for
+// commands built without AddHandler.
 func (c *Command) match(content string) bool {
 	if c.re != nil {
 		return c.re.MatchString(content)
@@ -82,6 +104,8 @@ func (c *Command) match(content string) bool {
 	return err == nil && matched
 }
 
+// Attachment is a platform-agnostic file attached to a message. ExtraData holds
+// the raw platform-specific attachment for callers that need more than URL.
 type Attachment struct {
 	IsImage   bool
 	URL       string
@@ -119,6 +143,10 @@ type AdapterDeps struct {
 	Disconnect func() error
 }
 
+// Bot is the platform-agnostic chat bot. It holds the registered commands,
+// middleware and unknown-command handler, drives a single Adapter through the
+// connection lifecycle, and exposes the raw platform clients (DiscordSession,
+// SlackClient, ...) as escape hatches. A Bot is safe for concurrent use.
 type Bot struct {
 	BotType BotType
 
@@ -145,6 +173,9 @@ func New(botType BotType, adapter Adapter) *Bot {
 	return &Bot{BotType: botType, adapter: adapter}
 }
 
+// AddHandler registers cmd, compiling and caching its Pattern. It returns an
+// error if the pattern is not a valid regular expression. Commands are matched
+// in registration order, first match wins.
 func (b *Bot) AddHandler(cmd Command) error {
 	re, err := regexp.Compile(cmd.Pattern)
 	if err != nil {
@@ -155,18 +186,27 @@ func (b *Bot) AddHandler(cmd Command) error {
 	return nil
 }
 
+// HandleFunc is a convenience wrapper around AddHandler that registers handler
+// for the given pattern.
 func (b *Bot) HandleFunc(pattern string, handler CommandHandler) error {
 	return b.AddHandler(Command{Pattern: pattern, Handler: handler})
 }
 
+// SetUnknownCommandHandler sets the handler invoked when an incoming message
+// matches no registered command. If unset, unmatched messages are ignored.
 func (b *Bot) SetUnknownCommandHandler(handler CommandHandler) {
 	b.unknownCommandHandler = handler
 }
 
+// AddMiddleware appends middleware to the dispatch chain. Middleware runs in
+// registration order, each wrapping the next, around the matched handler.
 func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }
 
+// Connect starts the adapter's event loop and returns without blocking. It
+// returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
+// if the Bot has no adapter, or any error from the adapter's own Connect.
 func (b *Bot) Connect(ctx context.Context) error {
 	b.mu.Lock()
 	if b.cancel != nil {
@@ -222,6 +262,9 @@ func (b *Bot) clearConnection() {
 	b.mu.Unlock()
 }
 
+// Disconnect tears down the active connection: it cancels the run context and
+// runs the adapter's Disconnect exactly once. It is safe to call when not
+// connected, returning ErrUnknownBotType only if the Bot has no adapter.
 func (b *Bot) Disconnect() error {
 	b.mu.Lock()
 	cancel := b.cancel
@@ -245,6 +288,9 @@ func (b *Bot) Disconnect() error {
 	return nil
 }
 
+// Run connects the Bot and blocks until ctx is canceled or the event loop ends,
+// then disconnects. A clean shutdown via ctx cancellation returns nil rather
+// than ctx.Err(), so callers can safely do log.Fatal(bot.Run(ctx)).
 func (b *Bot) Run(ctx context.Context) error {
 	if err := b.Connect(ctx); err != nil {
 		return err
@@ -280,16 +326,22 @@ func (b *Bot) Run(ctx context.Context) error {
 	return loopErr
 }
 
+// Start runs the Bot until the process receives an interrupt or SIGTERM,
+// wiring up signal handling for callers that do not manage their own context.
 func (b *Bot) Start() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return b.Run(ctx)
 }
 
+// SendMessage sends text to channelID using a background context. See
+// SendMessageContext to supply your own.
 func (b *Bot) SendMessage(channelID, text string) error {
 	return b.SendMessageContext(context.Background(), channelID, text)
 }
 
+// SendMessageContext sends text to channelID, honoring ctx for cancellation and
+// deadlines. It returns ErrUnknownBotType if the Bot has no adapter.
 func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) error {
 	if b.adapter == nil {
 		return ErrUnknownBotType
@@ -297,6 +349,8 @@ func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) er
 	return b.adapter.Send(ctx, channelID, text)
 }
 
+// GetAttachments returns the platform-agnostic attachments of message. It
+// returns ErrUnknownBotType if the Bot has no adapter.
 func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 	if b.adapter == nil {
 		return nil, ErrUnknownBotType
@@ -304,6 +358,9 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 	return b.adapter.Attachments(message)
 }
 
+// dispatch routes message through the middleware chain to the first matching
+// command, or the unknown-command handler. A panic in any handler or middleware
+// is recovered and logged so it cannot take down the event loop.
 func (b *Bot) dispatch(ctx context.Context, message *Message) {
 	defer func() {
 		if r := recover(); r != nil {

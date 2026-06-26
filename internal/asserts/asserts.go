@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+// Equal fails the test with message if got is not equal to expected.
 func Equal[T comparable](t *testing.T, got, expected T, message string) {
 	t.Helper()
 	if got != expected {
@@ -14,6 +15,7 @@ func Equal[T comparable](t *testing.T, got, expected T, message string) {
 	}
 }
 
+// NotNil fails the test with message if got is nil.
 func NotNil(t *testing.T, got any, message string) {
 	t.Helper()
 	if got == nil {
@@ -21,6 +23,7 @@ func NotNil(t *testing.T, got any, message string) {
 	}
 }
 
+// Error fails the test with message if err is nil.
 func Error(t *testing.T, err error, message string) {
 	t.Helper()
 	if err == nil {
@@ -28,6 +31,8 @@ func Error(t *testing.T, err error, message string) {
 	}
 }
 
+// ErrorIs fails the test with message if err does not match target under
+// errors.Is.
 func ErrorIs(t *testing.T, err, target error, message string) {
 	t.Helper()
 	if !errors.Is(err, target) {
@@ -35,6 +40,7 @@ func ErrorIs(t *testing.T, err, target error, message string) {
 	}
 }
 
+// NoError fails the test with message if err is non-nil.
 func NoError(t *testing.T, err error, message string) {
 	t.Helper()
 	if err != nil {
@@ -42,6 +48,7 @@ func NoError(t *testing.T, err error, message string) {
 	}
 }
 
+// True fails the test with message if got is false.
 func True(t *testing.T, got bool, message string) {
 	t.Helper()
 	if !got {
@@ -49,6 +56,7 @@ func True(t *testing.T, got bool, message string) {
 	}
 }
 
+// False fails the test with message if got is true.
 func False(t *testing.T, got bool, message string) {
 	t.Helper()
 	if got {

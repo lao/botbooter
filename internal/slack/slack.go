@@ -65,15 +65,19 @@ func (a *adapter) Disconnect() error {
 	return nil
 }
 
+// Send posts text to channelID via the Web API.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	_, _, err := a.client.PostMessageContext(ctx, channelID, slackapi.MsgOptionText(text, false))
 	return err
 }
 
+// Attachments returns the files attached to the message's Slack event.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	return attachmentsFromMessage(m.SlackData), nil
 }
 
+// handleSocketEvent acknowledges and routes a single Socket Mode event,
+// handling only Events API payloads.
 func (a *adapter) handleSocketEvent(ctx context.Context, evt socketmode.Event, deps core.AdapterDeps) {
 	switch evt.Type {
 	case socketmode.EventTypeEventsAPI:
@@ -88,6 +92,8 @@ func (a *adapter) handleSocketEvent(ctx context.Context, evt socketmode.Event, d
 	}
 }
 
+// handleEventsAPI dispatches a user message from an Events API payload,
+// dropping events that originate from a bot to avoid reply loops.
 func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent, deps core.AdapterDeps) {
 	if isBotMessage(e) {
 		return
@@ -123,6 +129,8 @@ func isBotMessage(event slackevents.EventsAPIEvent) bool {
 	}
 }
 
+// attachmentsFromMessage converts a Slack message event's files into
+// platform-agnostic attachments, returning nil for a nil event.
 func attachmentsFromMessage(m *slackevents.MessageEvent) []core.Attachment {
 	if m == nil {
 		return nil
