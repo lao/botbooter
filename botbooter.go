@@ -14,6 +14,7 @@ import (
 	"github.com/lao/botbooter/internal/core"
 	"github.com/lao/botbooter/internal/discord"
 	"github.com/lao/botbooter/internal/slack"
+	"github.com/lao/botbooter/internal/whatsapp"
 )
 
 // Errors returned by [Bot] methods.
@@ -27,9 +28,10 @@ type BotType = core.BotType
 
 // Supported bot types.
 const (
-	SlackBotType   = core.SlackBotType
-	DiscordBotType = core.DiscordBotType
-	CLIBotType     = core.CLIBotType
+	SlackBotType    = core.SlackBotType
+	DiscordBotType  = core.DiscordBotType
+	CLIBotType      = core.CLIBotType
+	WhatsAppBotType = core.WhatsAppBotType
 )
 
 // These are aliases re-exported from the internal core package, so values are
@@ -49,6 +51,12 @@ type (
 	CommandHandler = core.CommandHandler
 	// Middleware wraps message dispatch. See [core.Middleware].
 	Middleware = core.Middleware
+	// WhatsAppMessage is the raw payload of a WhatsApp message. See [core.WhatsAppMessage].
+	WhatsAppMessage = core.WhatsAppMessage
+	// WhatsAppMedia identifies media attached to a WhatsApp message. See [core.WhatsAppMedia].
+	WhatsAppMedia = core.WhatsAppMedia
+	// WhatsAppConfig configures a WhatsApp Cloud API bot. See [whatsapp.Config].
+	WhatsAppConfig = whatsapp.Config
 )
 
 // InitAsSlackBot creates a Slack bot that connects via Socket Mode. appToken is
@@ -68,4 +76,14 @@ func InitAsDiscordBot(token string) (*Bot, error) {
 // respectively. It is intended for trusted, local input only.
 func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 	return cli.New(in, out)
+}
+
+// InitAsWhatsAppBot creates a WhatsApp bot backed by the Meta Cloud API. It runs
+// an inbound webhook HTTP server at cfg.Addr, so put a TLS-terminating proxy in
+// front and register the public HTTPS URL in Meta's webhook settings. Inbound
+// media arrives as an id in Attachment.ExtraData (not a URL); resolve the bytes
+// with GET /{media-id} using your access token. It returns an error if a
+// required config field is missing.
+func InitAsWhatsAppBot(cfg WhatsAppConfig) (*Bot, error) {
+	return whatsapp.New(cfg)
 }
