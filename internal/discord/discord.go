@@ -69,8 +69,9 @@ func (a *adapter) onMessage(ctx context.Context, s *discordgo.Session, m *discor
 }
 
 // toMessage maps a Discord message-create event onto a platform-agnostic
-// Message. onMessage guarantees a non-nil Author, but the guards keep toMessage
-// safe in isolation.
+// Message. onMessage passes only fully-formed gateway events; the Author guard
+// tolerates a missing author. Other fields read the embedded *Message, which
+// discordgo always allocates when decoding an event.
 func toMessage(m *discordgo.MessageCreate) *core.Message {
 	msg := &core.Message{
 		ID:        m.ID,
@@ -110,8 +111,8 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 }
 
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	mc, ok := m.Raw.(*discordgo.MessageCreate)
-	if !ok || mc == nil {
+	mc, _ := m.Raw.(*discordgo.MessageCreate)
+	if mc == nil {
 		return nil, nil
 	}
 	return attachmentsFromMessage(mc.Message), nil

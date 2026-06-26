@@ -249,6 +249,17 @@ func TestToMessageCaptionAndFirstName(t *testing.T) {
 	asserts.Equal(t, got.ReplyToID, "", "no reply")
 }
 
+func TestToMessageNilSender(t *testing.T) {
+	// toMessage must not panic on a sender-less message; UserID/AuthorName stay empty.
+	got := toMessage(&models.Update{Message: &models.Message{
+		ID: 1, Chat: models.Chat{ID: 100}, Text: "hi", Date: 1700000000,
+	}})
+
+	asserts.Equal(t, got.UserID, "", "no sender yields empty UserID")
+	asserts.Equal(t, got.AuthorName, "", "no sender yields empty AuthorName")
+	asserts.Equal(t, got.ChannelID, "100", "chat id still mapped")
+}
+
 func TestChatID(t *testing.T) {
 	t.Run("numeric", func(t *testing.T) {
 		got, ok := chatID("12345").(int64)
