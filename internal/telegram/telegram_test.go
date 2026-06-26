@@ -23,12 +23,12 @@ func captureDeps(got **core.Message) core.AdapterDeps {
 	}
 }
 
-// newCaptureAdapter bypasses New and the network so onUpdate can be tested directly.
-func newCaptureAdapter(selfID int64, got **core.Message) *adapter {
+// newCaptureAdapter bypasses New and the network so onUpdate can be tested
+// directly; deps is connection-scoped, so onUpdate must get the returned ctx.
+func newCaptureAdapter(selfID int64, got **core.Message) (*adapter, context.Context) {
 	a := &adapter{selfID: selfID}
 	deps := captureDeps(got)
-	a.deps.Store(&deps)
-	return a
+	return a, withDeps(context.Background(), &deps)
 }
 
 // newStubAdapter wires an adapter to an httptest Bot API server, mirroring New without real network I/O.
@@ -80,10 +80,10 @@ func TestOnUpdate(t *testing.T) {
 
 	t.Run("UserMessageDispatched", func(t *testing.T) {
 		var got *core.Message
-		a := newCaptureAdapter(selfID, &got)
+		a, ctx := newCaptureAdapter(selfID, &got)
 
 		u := userMessage("hello", "")
-		a.onUpdate(context.Background(), nil, u)
+		a.onUpdate(ctx, nil, u)
 
 		asserts.NotNil(t, got, "user message should be dispatched")
 		asserts.Equal(t, got.UserID, "7", "message user id")
@@ -94,9 +94,9 @@ func TestOnUpdate(t *testing.T) {
 
 	t.Run("CaptionUsedWhenTextEmpty", func(t *testing.T) {
 		var got *core.Message
-		a := newCaptureAdapter(selfID, &got)
+		a, ctx := newCaptureAdapter(selfID, &got)
 
-		a.onUpdate(context.Background(), nil, userMessage("", "a caption"))
+		a.onUpdate(ctx, nil, userMessage("", "a caption"))
 
 		asserts.NotNil(t, got, "captioned message should be dispatched")
 		asserts.Equal(t, got.Content, "a caption", "caption used as content when text is empty")
@@ -104,14 +104,14 @@ func TestOnUpdate(t *testing.T) {
 
 	t.Run("PhotoOnlyDispatchedWithEmptyContent", func(t *testing.T) {
 		var got *core.Message
-		a := newCaptureAdapter(selfID, &got)
+		a, ctx := newCaptureAdapter(selfID, &got)
 
 		u := &models.Update{Message: &models.Message{
 			From:  &models.User{ID: 7},
 			Chat:  models.Chat{ID: 100},
 			Photo: []models.PhotoSize{{FileID: "f1"}},
 		}}
-		a.onUpdate(context.Background(), nil, u)
+		a.onUpdate(ctx, nil, u)
 
 		asserts.NotNil(t, got, "photo-only message should still be dispatched (pass-through)")
 		asserts.Equal(t, got.Content, "", "photo-only message has empty content")
@@ -120,27 +120,27 @@ func TestOnUpdate(t *testing.T) {
 
 	t.Run("NoMessageIgnored", func(t *testing.T) {
 		var got *core.Message
-		a := newCaptureAdapter(selfID, &got)
+		a, ctx := newCaptureAdapter(selfID, &got)
 
-		a.onUpdate(context.Background(), nil, &models.Update{})
+		a.onUpdate(ctx, nil, &models.Update{})
 
 		asserts.True(t, got == nil, "update without a message should be ignored")
 	})
 
 	t.Run("NoSenderIgnored", func(t *testing.T) {
 		var got *core.Message
-		a := newCaptureAdapter(selfID, &got)
+		a, ctx := newCaptureAdapter(selfID, &got)
 
-		a.onUpdate(context.Background(), nil, &models.Update{Message: &models.Message{Text: "hi"}})
+		a.onUpdate(ctx, nil, &models.Update{Message: &models.Message{Text: "hi"}})
 
 		asserts.True(t, got == nil, "message without a sender should be ignored")
 	})
 
 	t.Run("OtherBotIgnored", func(t *testing.T) {
 		var got *core.Message
-		a := newCaptureAdapter(selfID, &got)
+		a, ctx := newCaptureAdapter(selfID, &got)
 
-		a.onUpdate(context.Background(), nil, &models.Update{Message: &models.Message{
+		a.onUpdate(ctx, nil, &models.Update{Message: &models.Message{
 			From: &models.User{ID: 9, IsBot: true}, Chat: models.Chat{ID: 1}, Text: "hi",
 		}})
 
@@ -149,14 +149,57 @@ func TestOnUpdate(t *testing.T) {
 
 	t.Run("OwnMessageIgnored", func(t *testing.T) {
 		var got *core.Message
-		a := newCaptureAdapter(selfID, &got)
+		a, ctx := newCaptureAdapter(selfID, &got)
 
-		a.onUpdate(context.Background(), nil, &models.Update{Message: &models.Message{
+		a.onUpdate(ctx, nil, &models.Update{Message: &models.Message{
 			From: &models.User{ID: selfID}, Chat: models.Chat{ID: 1}, Text: "hi",
 		}})
 
 		asserts.True(t, got == nil, "the bot's own message should be ignored")
 	})
+
+	t.Run("NoDepsIgnored", func(t *testing.T) {
+		// An update with no deps on its context (delivered outside Connect) must be
+		// dropped, not panic — exercises the depsFrom == nil guard.
+		(&adapter{selfID: selfID}).onUpdate(context.Background(), nil, userMessage("hi", ""))
+	})
+}
+
+// TestOnUpdate_DropsAfterShutdown checks an update on a canceled run context is dropped.
+func TestOnUpdate_DropsAfterShutdown(t *testing.T) {
+	var got *core.Message
+	deps := captureDeps(&got)
+	ctx, cancel := context.WithCancel(withDeps(context.Background(), &deps))
+	cancel()
+
+	(&adapter{selfID: 42}).onUpdate(ctx, nil, &models.Update{Message: &models.Message{
+		From: &models.User{ID: 7}, Chat: models.Chat{ID: 100}, Text: "late",
+	}})
+
+	asserts.True(t, got == nil, "update on a canceled run context should be dropped")
+}
+
+// TestOnUpdate_DispatchIsConnectionScoped checks onUpdate routes through the deps
+// on its own context, so each connection reaches only its own deps.
+func TestOnUpdate_DispatchIsConnectionScoped(t *testing.T) {
+	var got1, got2 *core.Message
+	deps1, deps2 := captureDeps(&got1), captureDeps(&got2)
+	ctx1 := withDeps(context.Background(), &deps1)
+	ctx2 := withDeps(context.Background(), &deps2)
+
+	a := &adapter{selfID: 42}
+	u := &models.Update{Message: &models.Message{
+		From: &models.User{ID: 7}, Chat: models.Chat{ID: 100}, Text: "hi",
+	}}
+
+	a.onUpdate(ctx1, nil, u)
+	asserts.True(t, got1 != nil, "update on connection 1's context reaches deps1")
+	asserts.True(t, got2 == nil, "and not deps2")
+
+	got1 = nil
+	a.onUpdate(ctx2, nil, u)
+	asserts.True(t, got2 != nil, "update on connection 2's context reaches deps2")
+	asserts.True(t, got1 == nil, "and not deps1")
 }
 
 func TestChatID(t *testing.T) {

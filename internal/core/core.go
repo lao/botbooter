@@ -21,6 +21,7 @@ import (
 	"github.com/slack-go/slack/socketmode"
 )
 
+// ErrUnknownBotType is returned by Bot methods when the Bot has no adapter.
 var ErrUnknownBotType = errors.New("botbooter: unknown bot type")
 
 // ErrAlreadyConnected is returned by Connect when the Bot is already connected.
@@ -65,6 +66,7 @@ type Message struct {
 	CLIData      *CLIMessage
 }
 
+// CLIMessage is the raw payload of a message read from the CLI adapter.
 type CLIMessage struct {
 	Text        string
 	Attachments []Attachment
@@ -73,8 +75,10 @@ type CLIMessage struct {
 // CommandHandler handles a dispatched message for a matched command.
 type CommandHandler func(ctx context.Context, b *Bot, m *Message)
 
+// Middleware wraps message dispatch; it must call next to continue the chain.
 type Middleware func(ctx context.Context, b *Bot, m *Message, next CommandHandler)
 
+// Command pairs a regular-expression Pattern with the Handler to run on a match.
 type Command struct {
 	Pattern string
 	Handler CommandHandler
@@ -107,12 +111,14 @@ type Adapter interface {
 	Attachments(m *Message) ([]Attachment, error)
 }
 
+// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
 type AdapterDeps struct {
-	Dispatch func(ctx context.Context, m *Message)
-	Done     func(err error)
+	Dispatch   func(ctx context.Context, m *Message)
+	Done       func(err error)
 	Disconnect func() error
 }
 
+// Bot is the platform-agnostic chat bot. A Bot is safe for concurrent use.
 type Bot struct {
 	BotType BotType
 
@@ -133,10 +139,13 @@ type Bot struct {
 	stop   func() error
 }
 
+// New creates a Bot of the given type backed by adapter.
 func New(botType BotType, adapter Adapter) *Bot {
 	return &Bot{BotType: botType, adapter: adapter}
 }
 
+// AddHandler registers cmd, compiling its Pattern and returning an error if it
+// is not valid. Commands are matched in registration order, first match wins.
 func (b *Bot) AddHandler(cmd Command) error {
 	re, err := regexp.Compile(cmd.Pattern)
 	if err != nil {
@@ -147,14 +156,18 @@ func (b *Bot) AddHandler(cmd Command) error {
 	return nil
 }
 
+// HandleFunc is a convenience wrapper around AddHandler.
 func (b *Bot) HandleFunc(pattern string, handler CommandHandler) error {
 	return b.AddHandler(Command{Pattern: pattern, Handler: handler})
 }
 
+// SetUnknownCommandHandler sets the handler invoked when a message matches no
+// registered command; if unset, unmatched messages are ignored.
 func (b *Bot) SetUnknownCommandHandler(handler CommandHandler) {
 	b.unknownCommandHandler = handler
 }
 
+// AddMiddleware appends middleware to the dispatch chain, run in registration order.
 func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }

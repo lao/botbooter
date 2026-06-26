@@ -17,6 +17,7 @@ type adapter struct {
 	socket *socketmode.Client
 }
 
+// New creates a Slack bot that connects via Socket Mode.
 func New(appToken, botToken string) *core.Bot {
 	client := slackapi.New(
 		botToken,

@@ -6,7 +6,6 @@ import (
 	"context"
 	"strconv"
 	"strings"
-	"sync/atomic"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -14,10 +13,25 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
+// adapter holds no per-connection state: dispatch callbacks ride on the context
+// Connect hands the poll loop, so a handler goroutine that outlives its Start
+// still dispatches through its own run's deps, not a later reconnect's.
 type adapter struct {
 	client *bot.Bot
 	selfID int64
-	deps   atomic.Pointer[core.AdapterDeps]
+}
+
+// depsContextKey keys the per-connection deps on the poll loop context; a
+// dedicated type avoids collisions with other context values (SA1029).
+type depsContextKey struct{}
+
+func withDeps(ctx context.Context, deps *core.AdapterDeps) context.Context {
+	return context.WithValue(ctx, depsContextKey{}, deps)
+}
+
+func depsFrom(ctx context.Context) *core.AdapterDeps {
+	deps, _ := ctx.Value(depsContextKey{}).(*core.AdapterDeps)
+	return deps
 }
 
 // New creates a Telegram bot from a BotFather token.
@@ -36,8 +50,15 @@ func New(token string) (*core.Bot, error) {
 	return b, nil
 }
 
+// Connect starts the getUpdates long-poll loop in the background; it returns immediately.
+//
+// Dispatch callbacks ride on the context handed to Start, so each connection owns
+// its own: a straggling update dispatches through its run's deps and is dropped
+// once the run is canceled. Caveat from reusing one *bot.Bot across reconnects: an
+// update already buffered in the library's shared channel at cancel time may be
+// drained by the next connection; a fresh *bot.Bot per connection would close that.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
-	a.deps.Store(&deps)
+	ctx = withDeps(ctx, &deps)
 
 	go func() {
 		// Start blocks until ctx is canceled (getUpdates retries every non-context
@@ -73,6 +94,12 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 }
 
 func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
+	// Drop updates once the run context is canceled: the library can invoke this
+	// on a handler goroutine after Start has returned (see Connect).
+	if ctx.Err() != nil {
+		return
+	}
+
 	m := u.Message
 	if m == nil || m.From == nil {
 		return
@@ -81,7 +108,8 @@ func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 
-	deps := a.deps.Load()
+	// deps rides on this connection's context (see Connect).
+	deps := depsFrom(ctx)
 	if deps == nil {
 		return
 	}

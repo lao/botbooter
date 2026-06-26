@@ -17,6 +17,7 @@ type adapter struct {
 	removeHandler func()
 }
 
+// New creates a Discord bot that connects via the Gateway.
 func New(token string) (*core.Bot, error) {
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
