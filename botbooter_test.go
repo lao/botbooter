@@ -76,7 +76,7 @@ func newDiscordBot(t *testing.T) *botbooter.Bot {
 	bot, err := botbooter.InitAsDiscordBot("test_token")
 	asserts.NoError(t, err, "InitAsDiscordBot")
 	asserts.NotNil(t, bot, "bot should be initialized")
-	bot.DiscordSession.Client.Transport = stubRoundTripper{
+	botbooter.DiscordSession(bot).Client.Transport = stubRoundTripper{
 		status: http.StatusUnauthorized,
 		body:   `{"message":"401: Unauthorized","code":0}`,
 	}

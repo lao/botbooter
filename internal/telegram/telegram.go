@@ -53,9 +53,7 @@ func New(token string) (*core.Bot, error) {
 	a.client = tg
 	a.selfID = tg.ID()
 
-	b := core.New(core.TelegramBotType, a)
-	b.TelegramBot = tg
-	return b, nil
+	return core.New(core.TelegramBotType, a), nil
 }
 
 // Connect starts the getUpdates long-poll loop in the background; it returns immediately.

@@ -58,8 +58,8 @@ func TestNew(t *testing.T) {
 	asserts.NotNil(t, b, "Bot should be initialized")
 	asserts.Equal(t, b.BotType, core.TelegramBotType, "Bot type should be Telegram")
 	asserts.Equal(t, b.BotType.String(), "telegram", "Bot type string")
-	asserts.NotNil(t, b.TelegramBot, "Telegram client escape hatch should be set")
-	asserts.Equal(t, b.TelegramBot.ID(), int64(123456), "self id parsed from token prefix")
+	asserts.NotNil(t, Client(b), "Telegram client escape hatch should be set")
+	asserts.Equal(t, Client(b).ID(), int64(123456), "self id parsed from token prefix")
 }
 
 func TestNew_EmptyToken(t *testing.T) {

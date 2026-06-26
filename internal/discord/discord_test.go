@@ -31,9 +31,9 @@ func TestNew(t *testing.T) {
 	asserts.NoError(t, err, "New should not fail for a well-formed token")
 	asserts.NotNil(t, bot, "Bot should be initialized")
 	asserts.Equal(t, bot.BotType, core.DiscordBotType, "Bot type should be Discord")
-	asserts.NotNil(t, bot.DiscordSession, "Discord session should be initialized")
+	asserts.NotNil(t, Session(bot), "Discord session should be initialized")
 	asserts.True(t,
-		bot.DiscordSession.Identify.Intents&discordgo.IntentMessageContent != 0,
+		Session(bot).Identify.Intents&discordgo.IntentMessageContent != 0,
 		"message-content intent should be enabled")
 }
 
