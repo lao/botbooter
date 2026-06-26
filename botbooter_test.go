@@ -3,6 +3,7 @@ package botbooter_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -60,9 +61,13 @@ type stubRoundTripper struct {
 }
 
 func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// The RoundTripper contract requires closing the request body.
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
 	return &http.Response{
 		StatusCode: s.status,
-		Status:     http.StatusText(s.status),
+		Status:     fmt.Sprintf("%d %s", s.status, http.StatusText(s.status)),
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(s.body)),
 		Request:    req,
