@@ -13,13 +13,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/bwmarrin/discordgo"
-	"github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
-	"github.com/slack-go/slack"
-	"github.com/slack-go/slack/slackevents"
-	"github.com/slack-go/slack/socketmode"
 )
 
 // ErrUnknownBotType is returned by Bot methods when the Bot has no adapter.
@@ -59,6 +52,10 @@ func (t BotType) String() string {
 // are best-effort: a platform that cannot supply one leaves it at its zero
 // value. Raw carries the originating platform's untouched event; read it with
 // the matching typed accessor (e.g. botbooter.DiscordRawEvent).
+//
+// Mentions holds mentioned user ids and is best-effort per platform: Slack and
+// Discord surface every mention, while Telegram contributes only text_mention
+// entities (a plain @username carries no numeric id and is omitted).
 type Message struct {
 	ID         string
 	UserID     string
@@ -70,12 +67,6 @@ type Message struct {
 	Mentions   []string
 
 	Raw any
-
-	// Deprecated: superseded by Raw; removed once all adapters migrate.
-	DiscordData  *discordgo.MessageCreate
-	SlackData    *slackevents.MessageEvent
-	TelegramData *models.Update
-	CLIData      *CLIMessage
 }
 
 // CLIMessage is the raw payload of a message read from the CLI adapter.
@@ -133,11 +124,6 @@ type AdapterDeps struct {
 // Bot is the platform-agnostic chat bot. A Bot is safe for concurrent use.
 type Bot struct {
 	BotType BotType
-
-	DiscordSession    *discordgo.Session
-	SlackClient       *slack.Client
-	SlackSocketClient *socketmode.Client
-	TelegramBot       *bot.Bot
 
 	adapter Adapter
 

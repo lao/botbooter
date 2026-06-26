@@ -25,9 +25,7 @@ func New(token string) (*core.Bot, error) {
 	}
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
-	bot := core.New(core.DiscordBotType, &adapter{session: dg})
-	bot.DiscordSession = dg
-	return bot, nil
+	return core.New(core.DiscordBotType, &adapter{session: dg}), nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {

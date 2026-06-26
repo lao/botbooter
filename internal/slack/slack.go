@@ -28,10 +28,7 @@ func New(appToken, botToken string) *core.Bot {
 	)
 	socket := socketmode.New(client)
 
-	bot := core.New(core.SlackBotType, &adapter{client: client, socket: socket})
-	bot.SlackClient = client
-	bot.SlackSocketClient = socket
-	return bot
+	return core.New(core.SlackBotType, &adapter{client: client, socket: socket})
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {

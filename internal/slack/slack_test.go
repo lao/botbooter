@@ -29,8 +29,8 @@ func TestNew(t *testing.T) {
 
 	asserts.NotNil(t, bot, "Bot should be initialized")
 	asserts.Equal(t, bot.BotType, core.SlackBotType, "Bot type should be Slack")
-	asserts.NotNil(t, bot.SlackClient, "Slack client should be initialized")
-	asserts.NotNil(t, bot.SlackSocketClient, "Slack socket client should be initialized")
+	asserts.NotNil(t, Client(bot), "Slack client should be initialized")
+	asserts.NotNil(t, SocketClient(bot), "Slack socket client should be initialized")
 }
 
 func TestIsBotMessage(t *testing.T) {
