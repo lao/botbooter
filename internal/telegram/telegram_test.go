@@ -49,7 +49,7 @@ func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapt
 		bot.WithSkipGetMe(),
 	)
 	asserts.NoError(t, err, "bot.New for stub server")
-	a.tg = tg
+	a.client = tg
 	return a
 }
 
