@@ -86,6 +86,8 @@ func (a *adapter) onMessage(ctx context.Context, s *discordgo.Session, m *discor
 	})
 }
 
+// Disconnect removes the message handler and closes the gateway session. It is
+// safe to call when never connected.
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	remove := a.removeHandler
@@ -100,11 +102,13 @@ func (a *adapter) Disconnect() error {
 	return a.session.Close()
 }
 
+// Send sends text to channelID over the gateway, honoring ctx.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	_, err := a.session.ChannelMessageSend(channelID, text, discordgo.WithContext(ctx))
 	return err
 }
 
+// Attachments returns the files attached to the message's Discord event.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	if m.DiscordData == nil {
 		return nil, nil
@@ -112,6 +116,8 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	return attachmentsFromMessage(m.DiscordData.Message), nil
 }
 
+// attachmentsFromMessage converts a Discord message's attachments into
+// platform-agnostic attachments, returning nil for a nil message.
 func attachmentsFromMessage(m *discordgo.Message) []core.Attachment {
 	if m == nil {
 		return nil

@@ -32,16 +32,23 @@ const (
 	CLIBotType     = core.CLIBotType
 )
 
-// Core types, re-exported from the internal core package. These are aliases, so
-// values are interchangeable with the internal package.
+// These are aliases re-exported from the internal core package, so values are
+// interchangeable with that package.
 type (
-	Bot            = core.Bot
-	Message        = core.Message
-	CLIMessage     = core.CLIMessage
-	Command        = core.Command
-	Attachment     = core.Attachment
+	// Bot is the platform-agnostic chat bot. See [core.Bot].
+	Bot = core.Bot
+	// Message is an incoming message handed to handlers. See [core.Message].
+	Message = core.Message
+	// CLIMessage is the raw payload of a CLI message. See [core.CLIMessage].
+	CLIMessage = core.CLIMessage
+	// Command pairs a regexp pattern with a handler. See [core.Command].
+	Command = core.Command
+	// Attachment is a platform-agnostic file attachment. See [core.Attachment].
+	Attachment = core.Attachment
+	// CommandHandler handles a matched message. See [core.CommandHandler].
 	CommandHandler = core.CommandHandler
-	Middleware     = core.Middleware
+	// Middleware wraps message dispatch. See [core.Middleware].
+	Middleware = core.Middleware
 )
 
 // InitAsSlackBot creates a Slack bot that connects via Socket Mode. appToken is
