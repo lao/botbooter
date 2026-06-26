@@ -8,7 +8,6 @@ import (
 	"context"
 	"strconv"
 	"strings"
-	"sync/atomic"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -18,14 +17,33 @@ import (
 
 // adapter is the Telegram implementation of core.Adapter.
 //
-// client and selfID are set once in New and never mutated, so they need no
-// synchronization. deps is installed per-connection by Connect and read by the
-// library's handler goroutines, which can outlive the Start call that spawned
-// them (see Connect); it is therefore held in an atomic pointer.
+// client and selfID are set once in New and never mutated, so the adapter holds
+// no per-connection state and needs no synchronization. The dispatch callbacks
+// (core.AdapterDeps) ride per-connection on the context Connect hands to the poll
+// loop instead (see Connect and onUpdate): the go-telegram/bot library threads
+// that context unchanged into every handler call, so a handler goroutine that
+// outlives the Start that spawned it still dispatches through its own run's deps
+// rather than a pointer mutated by a later reconnect.
 type adapter struct {
 	client *bot.Bot
 	selfID int64
-	deps   atomic.Pointer[core.AdapterDeps]
+}
+
+// depsContextKey is the unexported key under which Connect stashes the
+// per-connection core.AdapterDeps on the poll loop's context. A dedicated type
+// avoids collisions with any other context value (go vet / staticcheck SA1029).
+type depsContextKey struct{}
+
+// withDeps returns ctx carrying deps; depsFrom reads it back. onUpdate uses these
+// to reach the dispatch callbacks of its own connection rather than a pointer
+// shared across every connection on the bot.
+func withDeps(ctx context.Context, deps *core.AdapterDeps) context.Context {
+	return context.WithValue(ctx, depsContextKey{}, deps)
+}
+
+func depsFrom(ctx context.Context) *core.AdapterDeps {
+	deps, _ := ctx.Value(depsContextKey{}).(*core.AdapterDeps)
+	return deps
 }
 
 // New creates a Telegram bot from a BotFather token. It returns an error only if
@@ -58,11 +76,18 @@ func New(token string) (*core.Bot, error) {
 
 // Connect starts the getUpdates long-poll loop in the background. It returns
 // immediately; the loop runs until ctx is canceled.
+//
+// The per-connection dispatch callbacks ride on the context handed to Start
+// rather than on adapter state, so each Connect owns its own dispatch context:
+// the library threads this context unchanged into every onUpdate call (including
+// handler goroutines that outlive Start), so a straggling update from this run
+// dispatches through this run's deps, and onUpdate drops it once the run is
+// canceled. One caveat, inherent to reusing a single *bot.Bot across reconnects:
+// an update already buffered in the library's shared updates channel when this
+// run is canceled may be drained and dispatched by the next connection. A fresh
+// *bot.Bot per connection would close that window.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
-	// &deps escapes to the heap (Go escape analysis), so the stored pointer stays
-	// valid for the whole life of the poll loop — including the library's handler
-	// goroutines, which can outlive the Start call below.
-	a.deps.Store(&deps)
+	ctx = withDeps(ctx, &deps)
 
 	go func() {
 		// Start blocks running the poll loop. getUpdates retries every non-context
@@ -114,6 +139,14 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 // pattern. This is the Discord pass-through model, not Slack's empty-message drop
 // (which would swallow image-only messages).
 func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
+	// The poll loop hands handlers their run's context; once it is canceled the
+	// connection is shutting down, so drop the update instead of dispatching after
+	// shutdown. The library can still invoke a handler goroutine after Start has
+	// returned (see Connect), which is exactly when this guard matters.
+	if ctx.Err() != nil {
+		return
+	}
+
 	m := u.Message
 	if m == nil || m.From == nil {
 		return
@@ -122,7 +155,11 @@ func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 
-	deps := a.deps.Load()
+	// deps rides on this connection's context (see Connect), so a handler goroutine
+	// from a prior run dispatches through its own run's deps rather than a later
+	// connection's. (Updates still buffered in the library's shared channel at
+	// cancel time are the documented exception — see Connect.)
+	deps := depsFrom(ctx)
 	if deps == nil {
 		return
 	}
