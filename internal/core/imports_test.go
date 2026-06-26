@@ -3,6 +3,7 @@ package core
 import (
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -14,14 +15,15 @@ import (
 func TestCoreImportsNoPlatformSDK(t *testing.T) {
 	banned := []string{"discordgo", "slack-go/slack", "go-telegram/bot"}
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", nil, parser.ImportsOnly)
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, parser.ImportsOnly)
 	asserts.NoError(t, err, "parse core package")
 
+	checked := 0
 	for _, pkg := range pkgs {
 		for name, file := range pkg.Files {
-			if strings.HasSuffix(name, "_test.go") {
-				continue
-			}
+			checked++
 			for _, imp := range file.Imports {
 				for _, b := range banned {
 					asserts.False(t, strings.Contains(imp.Path.Value, b),
@@ -30,4 +32,5 @@ func TestCoreImportsNoPlatformSDK(t *testing.T) {
 			}
 		}
 	}
+	asserts.True(t, checked > 0, "at least one non-test core file must be inspected")
 }
