@@ -176,7 +176,7 @@ func TestBot_GetAttachments(t *testing.T) {
 	t.Run("DiscordBot", func(t *testing.T) {
 		bot := newDiscordBot(t)
 		message := &botbooter.Message{
-			DiscordData: &discordgo.MessageCreate{
+			Raw: &discordgo.MessageCreate{
 				Message: &discordgo.Message{
 					Attachments: []*discordgo.MessageAttachment{
 						{URL: "https://example.com/image.png", Width: 100, Height: 100},
