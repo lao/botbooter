@@ -17,27 +17,21 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// captureDeps returns AdapterDeps that record the dispatched message in *got.
 func captureDeps(got **core.Message) core.AdapterDeps {
 	return core.AdapterDeps{
 		Dispatch: func(_ context.Context, m *core.Message) { *got = m },
 	}
 }
 
-// newCaptureAdapter builds an adapter with the given self id and a context
-// carrying deps whose Dispatch records into *got, bypassing New (and the network)
-// for onUpdate tests. Dispatch state is connection-scoped on the context, so the
-// returned ctx must be the one passed to onUpdate.
+// newCaptureAdapter bypasses New and the network so onUpdate can be tested
+// directly; deps is connection-scoped, so onUpdate must get the returned ctx.
 func newCaptureAdapter(selfID int64, got **core.Message) (*adapter, context.Context) {
 	a := &adapter{selfID: selfID}
 	deps := captureDeps(got)
 	return a, withDeps(context.Background(), &deps)
 }
 
-// newStubAdapter builds an adapter wired to an httptest server that answers Bot
-// API calls, mirroring how New constructs the real bot (onUpdate registered as
-// the default handler). WithServerURL + WithSkipGetMe keep it free of real
-// network I/O.
+// newStubAdapter wires an adapter to an httptest Bot API server, mirroring New without real network I/O.
 func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -165,15 +159,13 @@ func TestOnUpdate(t *testing.T) {
 	})
 
 	t.Run("NoDepsIgnored", func(t *testing.T) {
-		// A context carrying no deps (an update delivered outside Connect) must be
-		// dropped without panicking; this exercises the depsFrom == nil guard.
-		// Removing that guard makes onUpdate panic on deps.Dispatch, failing here.
+		// An update with no deps on its context (delivered outside Connect) must be
+		// dropped, not panic — exercises the depsFrom == nil guard.
 		(&adapter{selfID: selfID}).onUpdate(context.Background(), nil, userMessage("hi", ""))
 	})
 }
 
-// TestOnUpdate_DropsAfterShutdown verifies a late update whose run context is
-// already canceled is dropped, not dispatched — no dispatch after shutdown.
+// TestOnUpdate_DropsAfterShutdown checks an update on a canceled run context is dropped.
 func TestOnUpdate_DropsAfterShutdown(t *testing.T) {
 	var got *core.Message
 	deps := captureDeps(&got)
@@ -187,10 +179,8 @@ func TestOnUpdate_DropsAfterShutdown(t *testing.T) {
 	asserts.True(t, got == nil, "update on a canceled run context should be dropped")
 }
 
-// TestOnUpdate_DispatchIsConnectionScoped verifies onUpdate routes through the
-// deps carried on its own context, not adapter state: an update delivered with
-// connection 1's context reaches connection 1's deps, and one delivered with
-// connection 2's context reaches connection 2's deps — never the other's.
+// TestOnUpdate_DispatchIsConnectionScoped checks onUpdate routes through the deps
+// on its own context, so each connection reaches only its own deps.
 func TestOnUpdate_DispatchIsConnectionScoped(t *testing.T) {
 	var got1, got2 *core.Message
 	deps1, deps2 := captureDeps(&got1), captureDeps(&got2)
@@ -315,13 +305,8 @@ func TestDisconnect(t *testing.T) {
 	asserts.NoError(t, (&adapter{}).Disconnect(), "Disconnect is a no-op and safe before Connect")
 }
 
-// TestConnect_StartsAndStops verifies that Connect runs the poll loop and reports
-// the clean context cancellation back through deps.Done, all against a stub API
-// server so no real network I/O happens.
 func TestConnect_StartsAndStops(t *testing.T) {
 	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
-		// Any getUpdates poll returns no updates; the loop keeps polling until ctx
-		// is canceled.
 		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
 	})
 
@@ -343,8 +328,6 @@ func TestConnect_StartsAndStops(t *testing.T) {
 	}
 }
 
-// TestConnect_DispatchesUpdate drives one update through the real poll loop and
-// the default handler, confirming the Connect → onUpdate → Dispatch wiring.
 func TestConnect_DispatchesUpdate(t *testing.T) {
 	var served atomic.Bool
 	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
@@ -377,9 +360,7 @@ func TestConnect_DispatchesUpdate(t *testing.T) {
 	}
 }
 
-// TestConnect_DispatchesMultipleUpdates confirms every update in a single
-// getUpdates batch is dispatched (the library fans them out to handler
-// goroutines, so arrival order is not asserted).
+// The library fans updates out to handler goroutines, so arrival order is not asserted.
 func TestConnect_DispatchesMultipleUpdates(t *testing.T) {
 	var served atomic.Bool
 	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {

@@ -12,14 +12,11 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// newTestAdapter builds an adapter with real (unconnected) Slack clients, which
-// is enough for the message-handling paths exercised below.
 func newTestAdapter() *adapter {
 	client := slackapi.New("xoxb-test", slackapi.OptionAppLevelToken("xapp-test"))
 	return &adapter{client: client, socket: socketmode.New(client)}
 }
 
-// captureDeps returns AdapterDeps that record the dispatched message in *got.
 func captureDeps(got **core.Message) core.AdapterDeps {
 	return core.AdapterDeps{
 		Dispatch: func(ctx context.Context, m *core.Message) { *got = m },
@@ -253,7 +250,7 @@ func TestHandleSocketEvent(t *testing.T) {
 
 		evt := socketmode.Event{
 			Type:    socketmode.EventTypeEventsAPI,
-			Data:    "invalid data type", // fails the type assertion
+			Data:    "invalid data type",
 			Request: &socketmode.Request{EnvelopeID: "test-envelope"},
 		}
 
@@ -280,7 +277,6 @@ func TestDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect Slack should not fail")
 }
 
-// slackEvent wraps inner event data in an EventsAPIEvent for tests.
 func slackEvent(data any) slackevents.EventsAPIEvent {
 	return slackevents.EventsAPIEvent{
 		InnerEvent: slackevents.EventsAPIInnerEvent{Data: data},

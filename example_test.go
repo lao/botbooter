@@ -8,8 +8,6 @@ import (
 	"github.com/lao/botbooter"
 )
 
-// Example shows the CLI adapter, which needs no external credentials: it reads
-// messages from an io.Reader and writes replies to an io.Writer.
 func Example() {
 	bot := botbooter.InitAsCLIBot(strings.NewReader("echo hello\n"), os.Stdout)
 

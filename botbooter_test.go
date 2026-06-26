@@ -41,20 +41,17 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// emptyReader is an io.Reader that is immediately at EOF.
 type emptyReader struct{}
 
 func (emptyReader) Read([]byte) (int, error) { return 0, io.EOF }
 
-// errReader is an io.Reader that always fails with a fixed error.
 type errReader struct{ err error }
 
 func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
-// stubRoundTripper is an http.RoundTripper that returns a canned response
-// without any network I/O. It keeps the Discord adapter tests hermetic: the
-// gateway fetch in Connect and the REST call in Send still run through real
-// discordgo request/response handling, but never reach the Discord API.
+// stubRoundTripper returns a canned response so Discord adapter tests stay
+// hermetic: discordgo request/response handling runs but never reaches the
+// Discord API.
 type stubRoundTripper struct {
 	status int
 	body   string
@@ -74,9 +71,6 @@ func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// newDiscordBot constructs a Discord bot for tests, failing the test if
-// construction errors. Its HTTP transport is stubbed to a canned 401 so Connect
-// and Send exercise their error paths without calling the real Discord API.
 func newDiscordBot(t *testing.T) *botbooter.Bot {
 	t.Helper()
 	bot, err := botbooter.InitAsDiscordBot("test_token")
@@ -94,8 +88,6 @@ func mustAddHandler(t *testing.T, bot *botbooter.Bot, pattern string, handler bo
 	asserts.NoError(t, bot.AddHandler(botbooter.Command{Pattern: pattern, Handler: handler}), "AddHandler "+pattern)
 }
 
-// pngMagic is the 8-byte PNG signature; http.DetectContentType reports
-// image/png for any content beginning with it.
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
 
 func writeFile(t *testing.T, path string, data []byte) {
