@@ -44,6 +44,13 @@ token* (`xapp-…`) and a *bot token* (`xoxb-…`).
 bot := botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
 ```
 
+**Environment variables** (read by the bundled example):
+
+| Variable | Value |
+|---|---|
+| `SLACK_APP_TOKEN` | app-level token from step 2 (`xapp-…`) |
+| `SLACK_BOT_TOKEN` | Bot User OAuth Token from step 5 (`xoxb-…`) |
+
 #### No response?
 
 It's almost always one of:
@@ -79,6 +86,12 @@ botbooter connects over the **Gateway** and requests the privileged
 bot, err := botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
 ```
 
+**Environment variables** (read by the bundled example):
+
+| Variable | Value |
+|---|---|
+| `DISCORD_BOT_TOKEN` | bot token from step 1 |
+
 **Official docs:** [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway) · [What are Privileged Intents?](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents)
 
 ---
@@ -91,6 +104,8 @@ writes to stdout, so it's the fastest way to develop and test handlers:
 ```bash
 go run ./examples/v1            # CLI mode (default)
 ```
+
+**Environment variables:** none.
 
 A terminal has no real upload channel, so the CLI treats any local file path
 in a message as an attachment — see [Attachments](../README.md#attachments)
