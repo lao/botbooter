@@ -163,6 +163,8 @@ git commit -m "feat(core): add normalized Message fields, Raw, and AdapterAs"
 
 ### Task 2: Slack adapter — `toMessage`, Raw-backed attachments, accessors
 
+**Audit checkpoint:** yes (covers Inc 1–2)
+
 **Files:**
 - Modify: `internal/slack/slack.go` (imports; `handleEventsAPI`; `Attachments`; add `toMessage`, `parseSlackTimestamp`, `RawEvent`, `Client`, `SocketClient`)
 - Modify: `botbooter_test.go` (the `SlackBot` subtest literal at ~line 208)
@@ -505,6 +507,8 @@ git commit -m "feat(discord): normalize messages, back attachments with Raw, add
 ---
 
 ### Task 4: Telegram adapter — `toMessage`, Raw-backed attachments, accessors
+
+**Audit checkpoint:** yes (covers Inc 3–4)
 
 **Files:**
 - Modify: `internal/telegram/telegram.go` (`onUpdate`; `Attachments`; add `toMessage`, `telegramAuthorName`, `RawUpdate`, `Client`)
@@ -895,6 +899,8 @@ git commit -m "feat(botbooter): expose typed raw-event and session accessors"
 
 ### Task 7: Mentions across all adapters
 
+**Audit checkpoint:** yes (covers Inc 5–7)
+
 Populate `Message.Mentions` (user ids). Discord has structured mentions; Slack is parsed from text; Telegram exposes ids only via `text_mention` entities.
 
 **Files:**
@@ -1137,6 +1143,8 @@ git commit -m "refactor(core): drop SDK-typed Message and Bot fields; core is no
 ---
 
 ### Task 9: Docs, example, and full quality gate
+
+**Audit checkpoint:** yes (covers Inc 8–9)
 
 **Files:**
 - Modify: `README.md`, `docs/platforms.md` (document the accessor functions if escape hatches are mentioned)
