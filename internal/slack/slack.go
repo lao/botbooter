@@ -121,12 +121,8 @@ var slackMentionRE = regexp.MustCompile(`<@([A-Z0-9]+)(?:\|[^>]*)?>`)
 // slackMentions extracts mentioned user ids from message text, returning nil
 // when there are none.
 func slackMentions(text string) []string {
-	matches := slackMentionRE.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(matches))
-	for _, m := range matches {
+	var ids []string
+	for _, m := range slackMentionRE.FindAllStringSubmatch(text, -1) {
 		ids = append(ids, m[1])
 	}
 	return ids

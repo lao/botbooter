@@ -82,13 +82,13 @@ func DiscordRawEvent(m *Message) (*discordgo.MessageCreate, bool) { return disco
 // originated from Slack.
 func SlackRawEvent(m *Message) (*slackevents.MessageEvent, bool) { return slack.RawEvent(m) }
 
-// TelegramRawUpdate returns the raw Telegram update carried on m, reporting
+// TelegramRawEvent returns the raw Telegram update carried on m, reporting
 // whether m originated from Telegram.
-func TelegramRawUpdate(m *Message) (*models.Update, bool) { return telegram.RawUpdate(m) }
+func TelegramRawEvent(m *Message) (*models.Update, bool) { return telegram.RawUpdate(m) }
 
-// CLIRawData returns the parsed CLI line carried on m, reporting whether m
+// CLIRawEvent returns the parsed CLI line carried on m, reporting whether m
 // originated from the CLI adapter.
-func CLIRawData(m *Message) (*CLIMessage, bool) { return cli.RawData(m) }
+func CLIRawEvent(m *Message) (*CLIMessage, bool) { return cli.RawData(m) }
 
 // DiscordSession returns the discordgo session backing b, or nil if b is not a
 // Discord bot.
@@ -102,6 +102,6 @@ func SlackClient(b *Bot) *slackapi.Client { return slack.Client(b) }
 // a Slack bot.
 func SlackSocketClient(b *Bot) *socketmode.Client { return slack.SocketClient(b) }
 
-// TelegramBot returns the go-telegram bot client backing b, or nil if b is not a
-// Telegram bot.
-func TelegramBot(b *Bot) *bot.Bot { return telegram.Client(b) }
+// TelegramClient returns the go-telegram bot client backing b, or nil if b is
+// not a Telegram bot.
+func TelegramClient(b *Bot) *bot.Bot { return telegram.Client(b) }

@@ -163,12 +163,12 @@ func telegramAuthorName(u *models.User) string {
 
 // telegramMentions collects user ids from text_mention entities — the only
 // entity kind that carries a numeric user id (a plain @username "mention"
-// entity references a name, not an id, so it is skipped). It reads the message
-// entities, falling back to the caption entities for media. Returns nil when
-// there are none.
+// entity references a name, not an id, so it is skipped). It reads the entities
+// for whichever field supplied Content: message entities for text, caption
+// entities for media. Returns nil when there are none.
 func telegramMentions(m *models.Message) []string {
 	entities := m.Entities
-	if len(entities) == 0 {
+	if m.Text == "" {
 		entities = m.CaptionEntities
 	}
 	var ids []string

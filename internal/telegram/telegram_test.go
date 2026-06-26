@@ -274,6 +274,20 @@ func TestTelegramMentions(t *testing.T) {
 	asserts.Equal(t, strings.Join(got.Mentions, ","), "99", "text_mention id only")
 }
 
+func TestTelegramMentionsFromCaption(t *testing.T) {
+	// A media message has empty Text, so mentions come from CaptionEntities even
+	// if Entities is non-empty — mirroring how Content falls back to Caption.
+	u := &models.Update{Message: &models.Message{
+		From:            &models.User{ID: 1},
+		Chat:            models.Chat{ID: 1},
+		Caption:         "see Bob",
+		Entities:        []models.MessageEntity{{Type: models.MessageEntityTypeMention}},
+		CaptionEntities: []models.MessageEntity{{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 77}}},
+	}}
+	got := toMessage(u)
+	asserts.Equal(t, strings.Join(got.Mentions, ","), "77", "caption text_mention used when Text is empty")
+}
+
 func TestChatID(t *testing.T) {
 	t.Run("numeric", func(t *testing.T) {
 		got, ok := chatID("12345").(int64)
