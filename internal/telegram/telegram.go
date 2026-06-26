@@ -100,8 +100,8 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 
 // Attachments returns the files attached to the message's Telegram update.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	u, ok := m.Raw.(*models.Update)
-	if !ok || u == nil {
+	u, _ := m.Raw.(*models.Update)
+	if u == nil {
 		return nil, nil
 	}
 	return attachmentsFromMessage(u.Message), nil
@@ -124,8 +124,8 @@ func Client(b *core.Bot) *bot.Bot {
 }
 
 // toMessage maps a Telegram update's message onto a platform-agnostic Message.
-// onUpdate guarantees a non-nil Message and From. Content is the text, or the
-// caption for media-only messages.
+// onUpdate passes only updates with a non-nil Message; the From guard tolerates
+// a missing sender. Content is the text, or the caption for media-only messages.
 func toMessage(u *models.Update) *core.Message {
 	m := u.Message
 	content := m.Text
@@ -133,13 +133,15 @@ func toMessage(u *models.Update) *core.Message {
 		content = m.Caption
 	}
 	msg := &core.Message{
-		ID:         strconv.Itoa(m.ID),
-		UserID:     strconv.FormatInt(m.From.ID, 10),
-		AuthorName: telegramAuthorName(m.From),
-		ChannelID:  strconv.FormatInt(m.Chat.ID, 10),
-		Content:    content,
-		Timestamp:  time.Unix(int64(m.Date), 0).UTC(),
-		Raw:        u,
+		ID:        strconv.Itoa(m.ID),
+		ChannelID: strconv.FormatInt(m.Chat.ID, 10),
+		Content:   content,
+		Timestamp: time.Unix(int64(m.Date), 0).UTC(),
+		Raw:       u,
+	}
+	if m.From != nil {
+		msg.UserID = strconv.FormatInt(m.From.ID, 10)
+		msg.AuthorName = telegramAuthorName(m.From)
 	}
 	if m.ReplyToMessage != nil {
 		msg.ReplyToID = strconv.Itoa(m.ReplyToMessage.ID)
