@@ -1,157 +1,71 @@
+// Package botbooter is a small framework for building chat bots that behave the
+// same way across Slack, Discord and a local CLI. A single [Bot] abstracts over
+// the platforms; you register [Command] handlers and optional [Middleware],
+// then run the bot.
+//
+// This package is a thin facade over the implementation in the internal
+// packages, so that consumers keep a single import path.
 package botbooter
 
 import (
-	"errors"
-	"fmt"
-	"log"
-	"os"
-	"os/signal"
-	"regexp"
-	"syscall"
+	"io"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/slack-go/slack"
-	"github.com/slack-go/slack/slackevents"
-	"github.com/slack-go/slack/socketmode"
+	"github.com/lao/botbooter/internal/cli"
+	"github.com/lao/botbooter/internal/core"
+	"github.com/lao/botbooter/internal/discord"
+	"github.com/lao/botbooter/internal/slack"
 )
 
-type BotType int
+// Errors returned by [Bot] methods.
+var (
+	ErrUnknownBotType   = core.ErrUnknownBotType
+	ErrAlreadyConnected = core.ErrAlreadyConnected
+)
 
+// BotType identifies the messaging platform a [Bot] is connected to.
+type BotType = core.BotType
+
+// Supported bot types.
 const (
-	SlackBotType BotType = iota
-	DiscordBotType
+	SlackBotType   = core.SlackBotType
+	DiscordBotType = core.DiscordBotType
+	CLIBotType     = core.CLIBotType
 )
 
-type Bot struct {
-	BotType               BotType
-	DiscordSession        *discordgo.Session
-	SlackClient           *slack.Client
-	SlackSocketClient     *socketmode.Client
-	Commands              []Command
-	UnknownCommandHandler UnknownCommandHandler
-	Middlewares           []Middleware
+// These are aliases re-exported from the internal core package, so values are
+// interchangeable with that package.
+type (
+	// Bot is the platform-agnostic chat bot. See [core.Bot].
+	Bot = core.Bot
+	// Message is an incoming message handed to handlers. See [core.Message].
+	Message = core.Message
+	// CLIMessage is the raw payload of a CLI message. See [core.CLIMessage].
+	CLIMessage = core.CLIMessage
+	// Command pairs a regexp pattern with a handler. See [core.Command].
+	Command = core.Command
+	// Attachment is a platform-agnostic file attachment. See [core.Attachment].
+	Attachment = core.Attachment
+	// CommandHandler handles a matched message. See [core.CommandHandler].
+	CommandHandler = core.CommandHandler
+	// Middleware wraps message dispatch. See [core.Middleware].
+	Middleware = core.Middleware
+)
+
+// InitAsSlackBot creates a Slack bot that connects via Socket Mode. appToken is
+// the app-level token (xapp-...) and botToken is the bot token (xoxb-...).
+func InitAsSlackBot(appToken, botToken string) *Bot {
+	return slack.New(appToken, botToken)
 }
 
-type Message struct {
-	UserID      string
-	ChannelID   string
-	Content     string
-	DiscordData *discordgo.MessageCreate
-	SlackData   *slackevents.MessageEvent
+// InitAsDiscordBot creates a Discord bot from a bot token. It returns an error
+// if the token cannot be used to construct a session.
+func InitAsDiscordBot(token string) (*Bot, error) {
+	return discord.New(token)
 }
 
-type CommandHandler func(bot *Bot, message *Message)
-
-type Command struct {
-	Pattern string
-	Handler CommandHandler
-}
-
-type UnknownCommandHandler func(bot *Bot, message *Message)
-
-type Middleware func(bot *Bot, message *Message, next CommandHandler)
-
-type Attachment struct {
-	IsImage   bool
-	URL       string
-	ExtraData interface{}
-}
-
-func (b *Bot) Connect() error {
-	switch b.BotType {
-	case SlackBotType:
-		return b.connectSlack()
-	case DiscordBotType:
-		return b.connectDiscord()
-	default:
-		return fmt.Errorf("unknown bot type")
-	}
-}
-
-func (b *Bot) Disconnect() error {
-	switch b.BotType {
-	case SlackBotType:
-		return b.disconnectSlack()
-	case DiscordBotType:
-		return b.disconnectDiscord()
-	default:
-		return fmt.Errorf("unknown bot type")
-	}
-}
-
-func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
-	switch b.BotType {
-	case SlackBotType:
-		return getAttachmentsFromSlackMessage(message.SlackData), nil
-	case DiscordBotType:
-		return getAttachmentsFromDiscordMessage(message.DiscordData.Message), nil
-	default:
-		return nil, errors.New("unknown bot type")
-	}
-}
-
-func (b *Bot) SendMessage(channelID string, message string) error {
-	switch b.BotType {
-	case SlackBotType:
-		_, _, err := b.SlackClient.PostMessage(
-			channelID,
-			slack.MsgOptionText(message, false),
-		)
-		return err
-	case DiscordBotType:
-		_, err := b.DiscordSession.ChannelMessageSend(channelID, message)
-		return err
-	default:
-		return fmt.Errorf("unknown bot type")
-	}
-}
-
-func (b *Bot) AddHandler(handler Command) {
-	b.Commands = append(b.Commands, handler)
-}
-
-func (b *Bot) SetUnknownCommandHandler(handler UnknownCommandHandler) {
-	b.UnknownCommandHandler = handler
-}
-
-func (b *Bot) StartListening() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	<-sigCh
-	log.Println("Bot is shutting down...")
-	err := b.Disconnect()
-	if err != nil {
-		log.Println("Failed to disconnect:", err)
-	}
-}
-
-func (b *Bot) AddMiddleware(middleware Middleware) {
-	b.Middlewares = append(b.Middlewares, middleware)
-}
-
-func (b *Bot) handleMessageWithCommand(message *Message) {
-	handler := func(bot *Bot, message *Message) {
-		for _, command := range bot.Commands {
-			matched, err := regexp.MatchString(command.Pattern, message.Content)
-			if err == nil && matched {
-				command.Handler(bot, message)
-				return
-			}
-		}
-		if bot.UnknownCommandHandler != nil {
-			bot.UnknownCommandHandler(bot, message)
-		}
-	}
-
-	finalHandler := handler
-	for i := len(b.Middlewares) - 1; i >= 0; i-- {
-		middleware := b.Middlewares[i]
-		next := finalHandler
-		finalHandler = func(bot *Bot, message *Message) {
-			middleware(bot, message, next)
-		}
-	}
-
-	finalHandler(b, message)
+// InitAsCLIBot creates a bot that reads newline-delimited messages from in and
+// writes replies to out. When in or out is nil, os.Stdin and os.Stdout are used
+// respectively. It is intended for trusted, local input only.
+func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
+	return cli.New(in, out)
 }

@@ -1,605 +1,376 @@
-package botbooter
+package botbooter_test
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/slack-go/slack/slackevents"
+
+	"github.com/lao/botbooter"
+	"github.com/lao/botbooter/internal/asserts"
 )
 
-// Test helpers to reduce duplication and improve readability
-
-func assertEqual(t *testing.T, got, expected interface{}, message string) {
-	t.Helper()
-	if got != expected {
-		t.Errorf("%s: got %v, expected %v", message, got, expected)
-	}
+// syncBuffer is a concurrency-safe buffer: the CLI adapter writes to its output
+// from a background goroutine while the test reads from the test goroutine.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
 }
 
-func assertNotNil(t *testing.T, got interface{}, message string) {
-	t.Helper()
-	if got == nil {
-		t.Errorf("%s: expected non-nil, got nil", message)
-	}
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
 }
 
-func assertNil(t *testing.T, got interface{}, message string) {
-	t.Helper()
-	if got != nil {
-		// Special handling for slices - check if empty
-		switch v := got.(type) {
-		case []Attachment:
-			if len(v) != 0 {
-				t.Errorf("%s: expected nil or empty slice, got %v", message, got)
-			}
-		default:
-			t.Errorf("%s: expected nil, got %v", message, got)
-		}
-	}
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
-func assertError(t *testing.T, err error, message string) {
-	t.Helper()
-	if err == nil {
-		t.Errorf("%s: expected error, got nil", message)
-	}
+// emptyReader is an io.Reader that is immediately at EOF.
+type emptyReader struct{}
+
+func (emptyReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+// errReader is an io.Reader that always fails with a fixed error.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// stubRoundTripper is an http.RoundTripper that returns a canned response
+// without any network I/O. It keeps the Discord adapter tests hermetic: the
+// gateway fetch in Connect and the REST call in Send still run through real
+// discordgo request/response handling, but never reach the Discord API.
+type stubRoundTripper struct {
+	status int
+	body   string
 }
 
-func assertNoError(t *testing.T, err error, message string) {
-	t.Helper()
-	if err != nil {
-		t.Errorf("%s: expected no error, got %v", message, err)
+func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// The RoundTripper contract requires closing the request body.
+	if req.Body != nil {
+		_ = req.Body.Close()
 	}
+	return &http.Response{
+		StatusCode: s.status,
+		Status:     fmt.Sprintf("%d %s", s.status, http.StatusText(s.status)),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(s.body)),
+		Request:    req,
+	}, nil
 }
 
-func assertTrue(t *testing.T, got bool, message string) {
+// newDiscordBot constructs a Discord bot for tests, failing the test if
+// construction errors. Its HTTP transport is stubbed to a canned 401 so Connect
+// and Send exercise their error paths without calling the real Discord API.
+func newDiscordBot(t *testing.T) *botbooter.Bot {
 	t.Helper()
-	if !got {
-		t.Errorf("%s: expected true, got false", message)
+	bot, err := botbooter.InitAsDiscordBot("test_token")
+	asserts.NoError(t, err, "InitAsDiscordBot")
+	asserts.NotNil(t, bot, "bot should be initialized")
+	bot.DiscordSession.Client.Transport = stubRoundTripper{
+		status: http.StatusUnauthorized,
+		body:   `{"message":"401: Unauthorized","code":0}`,
 	}
+	return bot
 }
 
-func assertFalse(t *testing.T, got bool, message string) {
+func mustAddHandler(t *testing.T, bot *botbooter.Bot, pattern string, handler botbooter.CommandHandler) {
 	t.Helper()
-	if got {
-		t.Errorf("%s: expected false, got true", message)
+	asserts.NoError(t, bot.AddHandler(botbooter.Command{Pattern: pattern, Handler: handler}), "AddHandler "+pattern)
+}
+
+// pngMagic is the 8-byte PNG signature; http.DetectContentType reports
+// image/png for any content beginning with it.
+var pngMagic = []byte("\x89PNG\r\n\x1a\n")
+
+func writeFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestBot_Connect(t *testing.T) {
-	t.Run("SlackBot", func(t *testing.T) {
-		// Arrange
-		bot := InitAsSlackBot("xapp-test", "xoxb-test")
-		bot.BotType = SlackBotType
-		done := make(chan error, 1)
+	t.Run("DiscordBotWithFakeToken", func(t *testing.T) {
+		bot := newDiscordBot(t)
 
-		// Act
-		go func() {
-			done <- bot.Connect()
-		}()
+		err := bot.Connect(context.Background())
 
-		// Assert
-		// Give it a moment to try to connect (it will fail with fake token)
-		time.Sleep(200 * time.Millisecond)
-		// Note: This will fail to connect with fake credentials, but we're testing
-		// that the connection flow works without panicking
+		asserts.Error(t, err, "Connect with fake Discord token should fail")
 	})
 
-	t.Run("DiscordBot", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
+	t.Run("AlreadyConnected", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		bot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
 
-		// Act
-		err := bot.Connect()
+		asserts.NoError(t, bot.Connect(ctx), "first Connect")
+		err := bot.Connect(ctx)
+		asserts.ErrorIs(t, err, botbooter.ErrAlreadyConnected, "second Connect")
 
-		// Assert
-		assertError(t, err, "Connect with fake Discord token should fail")
-	})
-
-	t.Run("UnknownBotType", func(t *testing.T) {
-		// Arrange
-		bot := &Bot{
-			BotType: BotType(999), // Invalid bot type
-		}
-		expectedError := "unknown bot type"
-
-		// Act
-		err := bot.Connect()
-
-		// Assert
-		assertError(t, err, "Connect with unknown bot type should fail")
-		assertEqual(t, err.Error(), expectedError, "Error message for unknown bot type")
+		asserts.NoError(t, bot.Disconnect(), "Disconnect")
 	})
 }
 
 func TestBot_Disconnect(t *testing.T) {
 	t.Run("DiscordBot", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
+		bot := newDiscordBot(t)
 
-		// Act
 		err := bot.Disconnect()
 
-		// Assert
-		assertNoError(t, err, "Disconnect Discord bot should not fail")
+		asserts.NoError(t, err, "Disconnect Discord bot should not fail")
 	})
 
 	t.Run("SlackBot", func(t *testing.T) {
-		// Arrange
-		bot := InitAsSlackBot("xapp-test", "xoxb-test")
-		bot.BotType = SlackBotType
+		bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
 
-		// Act
 		err := bot.Disconnect()
 
-		// Assert
-		assertNoError(t, err, "Disconnect Slack bot should not fail")
-	})
-
-	t.Run("UnknownBotType", func(t *testing.T) {
-		// Arrange
-		bot := &Bot{
-			BotType: BotType(999), // Invalid bot type
-		}
-		expectedError := "unknown bot type"
-
-		// Act
-		err := bot.Disconnect()
-
-		// Assert
-		assertError(t, err, "Disconnect with unknown bot type should fail")
-		assertEqual(t, err.Error(), expectedError, "Error message for unknown bot type")
+		asserts.NoError(t, err, "Disconnect Slack bot should not fail")
 	})
 }
 
 func TestBot_SendMessage(t *testing.T) {
-	t.Run("DiscordBot", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		channelID := "channel123"
-		message := "test message"
+	t.Run("DiscordBotNotConnected", func(t *testing.T) {
+		bot := newDiscordBot(t)
 
-		// Act
-		err := bot.SendMessage(channelID, message)
+		err := bot.SendMessage("channel123", "test message")
 
-		// Assert
-		// We expect an error because we're not actually connected
-		assertError(t, err, "SendMessage without connection should fail")
+		asserts.Error(t, err, "SendMessage without connection should fail")
 	})
 
-	t.Run("SlackBot", func(t *testing.T) {
-		// Arrange
-		bot := InitAsSlackBot("xapp-test", "xoxb-test")
-		bot.BotType = SlackBotType
-		channelID := "channel123"
-		message := "test message"
-
-		// Act
-		err := bot.SendMessage(channelID, message)
-
-		// Assert
-		// We expect an error because we're not actually connected
-		assertError(t, err, "SendMessage without connection should fail")
-	})
-
-	t.Run("UnknownBotType", func(t *testing.T) {
-		// Arrange
-		bot := &Bot{
-			BotType: BotType(999), // Invalid bot type
+	t.Run("SlackBotNotConnected", func(t *testing.T) {
+		// slack-go's Client keeps its http client unexported with no
+		// post-construction setter, so SendMessage makes a real Slack Web API
+		// call. Gate it behind the same env var as the other network test
+		// rather than expand the public API just to inject a transport.
+		if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
+			t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; SendMessage performs a real Slack Web API call")
 		}
-		channelID := "channel123"
-		message := "test message"
-		expectedError := "unknown bot type"
+		bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
 
-		// Act
-		err := bot.SendMessage(channelID, message)
+		err := bot.SendMessage("channel123", "test message")
 
-		// Assert
-		assertError(t, err, "SendMessage with unknown bot type should fail")
-		assertEqual(t, err.Error(), expectedError, "Error message for unknown bot type")
+		asserts.Error(t, err, "SendMessage without connection should fail")
+	})
+
+	t.Run("CLIBot", func(t *testing.T) {
+		out := &syncBuffer{}
+		bot := botbooter.InitAsCLIBot(emptyReader{}, out)
+
+		err := bot.SendMessage("ignored", "hello world")
+
+		asserts.NoError(t, err, "CLI SendMessage should not fail")
+		asserts.Equal(t, out.String(), "hello world\n", "CLI output")
 	})
 }
 
 func TestBot_GetAttachments(t *testing.T) {
 	t.Run("DiscordBot", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "test message",
+		bot := newDiscordBot(t)
+		message := &botbooter.Message{
 			DiscordData: &discordgo.MessageCreate{
 				Message: &discordgo.Message{
 					Attachments: []*discordgo.MessageAttachment{
-						{
-							URL:    "https://example.com/image.png",
-							Width:  100,
-							Height: 100,
-						},
+						{URL: "https://example.com/image.png", Width: 100, Height: 100},
 					},
 				},
 			},
 		}
-		expectedURL := "https://example.com/image.png"
 
-		// Act
 		attachments, err := bot.GetAttachments(message)
 
-		// Assert
-		assertNoError(t, err, "GetAttachments for Discord bot should not fail")
-		assertEqual(t, len(attachments), 1, "Number of attachments")
-		assertTrue(t, attachments[0].IsImage, "Attachment should be an image")
-		assertEqual(t, attachments[0].URL, expectedURL, "Attachment URL")
+		asserts.NoError(t, err, "GetAttachments for Discord bot should not fail")
+		asserts.Equal(t, len(attachments), 1, "Number of attachments")
+		asserts.True(t, attachments[0].IsImage, "Attachment should be an image")
+		asserts.Equal(t, attachments[0].URL, "https://example.com/image.png", "Attachment URL")
+	})
+
+	t.Run("DiscordBotNilData", func(t *testing.T) {
+		bot := newDiscordBot(t)
+
+		attachments, err := bot.GetAttachments(&botbooter.Message{})
+
+		asserts.NoError(t, err, "GetAttachments with nil Discord data should not fail")
+		asserts.Equal(t, len(attachments), 0, "no attachments")
 	})
 
 	t.Run("SlackBot", func(t *testing.T) {
-		// Arrange
-		bot := InitAsSlackBot("xapp-test", "xoxb-test")
-		bot.BotType = SlackBotType
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "test message",
+		bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
+		message := &botbooter.Message{
 			SlackData: &slackevents.MessageEvent{
 				Files: []slackevents.File{
-					{
-						Mimetype:   "image/png",
-						URLPrivate: "https://example.com/image.png",
-					},
+					{Mimetype: "image/png", URLPrivate: "https://example.com/image.png"},
 				},
 			},
 		}
-		expectedURL := "https://example.com/image.png"
 
-		// Act
 		attachments, err := bot.GetAttachments(message)
 
-		// Assert
-		assertNoError(t, err, "GetAttachments for Slack bot should not fail")
-		assertEqual(t, len(attachments), 1, "Number of attachments")
-		assertTrue(t, attachments[0].IsImage, "Attachment should be an image")
-		assertEqual(t, attachments[0].URL, expectedURL, "Attachment URL")
+		asserts.NoError(t, err, "GetAttachments for Slack bot should not fail")
+		asserts.Equal(t, len(attachments), 1, "Number of attachments")
+		asserts.True(t, attachments[0].IsImage, "Attachment should be an image")
+		asserts.Equal(t, attachments[0].URL, "https://example.com/image.png", "Attachment URL")
 	})
 
-	t.Run("UnknownBotType", func(t *testing.T) {
-		// Arrange
-		bot := &Bot{
-			BotType: BotType(999), // Invalid bot type
-		}
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "test message",
-		}
-		expectedError := "unknown bot type"
+	t.Run("CLIBot", func(t *testing.T) {
+		bot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
 
-		// Act
-		attachments, err := bot.GetAttachments(message)
+		attachments, err := bot.GetAttachments(&botbooter.Message{Content: "hi"})
 
-		// Assert
-		assertError(t, err, "GetAttachments with unknown bot type should fail")
-		assertNil(t, attachments, "Attachments should be nil for unknown bot type")
-		assertEqual(t, err.Error(), expectedError, "Error message for unknown bot type")
+		asserts.NoError(t, err, "GetAttachments for CLI bot should not fail")
+		asserts.Equal(t, len(attachments), 0, "CLI has no attachments")
 	})
 }
 
-func TestBot_AddHandler(t *testing.T) {
-	// Arrange
-	bot := InitAsDiscordBot("test_token")
-	handler := Command{
-		Pattern: "^hello$",
-		Handler: func(bot *Bot, message *Message) {},
+func TestCLIBot_Run_ProcessesInput(t *testing.T) {
+	in := strings.NewReader("echo hello\nping\n")
+	out := &syncBuffer{}
+	bot := botbooter.InitAsCLIBot(in, out)
+
+	mustAddHandler(t, bot, "^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
+	})
+	unknown := 0
+	bot.SetUnknownCommandHandler(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+		unknown++
+	})
+
+	err := bot.Run(context.Background())
+
+	asserts.NoError(t, err, "Run should return nil when input reaches EOF")
+	asserts.Equal(t, out.String(), "hello\n", "echoed output")
+	asserts.Equal(t, unknown, 1, "one unknown command (ping)")
+}
+
+func TestCLIBot_GetAttachments_EndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	png := filepath.Join(dir, "cat.png")
+	writeFile(t, png, append(pngMagic, []byte("...")...))
+
+	bot := botbooter.InitAsCLIBot(strings.NewReader("echo "+png+"\n"), &syncBuffer{})
+	var got []botbooter.Attachment
+	mustAddHandler(t, bot, "^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+		atts, err := b.GetAttachments(m)
+		asserts.NoError(t, err, "GetAttachments")
+		got = atts
+	})
+
+	asserts.NoError(t, bot.Run(context.Background()), "Run")
+	asserts.Equal(t, len(got), 1, "one attachment delivered through Run")
+	asserts.True(t, got[0].IsImage, "image detected end-to-end")
+}
+
+func TestCLIBot_Run_PropagatesReadError(t *testing.T) {
+	sentinel := errors.New("read failed")
+	bot := botbooter.InitAsCLIBot(errReader{err: sentinel}, &syncBuffer{})
+
+	err := bot.Run(context.Background())
+
+	asserts.ErrorIs(t, err, sentinel, "Run should surface the input read error")
+}
+
+func TestCLIBot_Run_ContextCancel(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	bot := botbooter.InitAsCLIBot(pr, &syncBuffer{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- bot.Run(ctx) }()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		asserts.NoError(t, err, "Run should return after context cancel")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after context cancel")
 	}
-	initialCount := len(bot.Commands)
-	expectedPattern := "^hello$"
-
-	// Act
-	bot.AddHandler(handler)
-
-	// Assert
-	assertEqual(t, len(bot.Commands), initialCount+1, "Number of commands after adding handler")
-	assertEqual(t, bot.Commands[0].Pattern, expectedPattern, "Handler pattern")
 }
 
-func TestBot_SetUnknownCommandHandler(t *testing.T) {
-	// Arrange
-	bot := InitAsDiscordBot("test_token")
-	handler := func(bot *Bot, message *Message) {}
-
-	// Act
-	bot.SetUnknownCommandHandler(handler)
-
-	// Assert
-	assertNotNil(t, bot.UnknownCommandHandler, "UnknownCommandHandler should be set")
-}
-
-func TestBot_AddMiddleware(t *testing.T) {
-	// Arrange
-	bot := InitAsDiscordBot("test_token")
-	middleware := func(bot *Bot, message *Message, next CommandHandler) {
-		next(bot, message)
+func TestConnectSlack_StartsAndStops(t *testing.T) {
+	if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
+		t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; performs real Slack network I/O via RunContext")
 	}
-	initialCount := len(bot.Middlewares)
+	bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
+	ctx, cancel := context.WithCancel(context.Background())
 
-	// Act
-	bot.AddMiddleware(middleware)
+	asserts.NoError(t, bot.Connect(ctx), "Connect Slack should start the loop")
 
-	// Assert
-	assertEqual(t, len(bot.Middlewares), initialCount+1, "Number of middlewares after adding")
+	cancel()
+	asserts.NoError(t, bot.Disconnect(), "Disconnect Slack should not fail")
 }
 
-func TestBot_handleMessageWithCommand(t *testing.T) {
-	t.Run("MatchingCommand", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		handlerCalled := false
-		handler := Command{
-			Pattern: "^hello$",
-			Handler: func(bot *Bot, message *Message) {
-				handlerCalled = true
-			},
+func TestBot_ReconnectAndConcurrentDisconnect(t *testing.T) {
+	// A pipe that never reaches EOF keeps the CLI reader blocked so the
+	// connection stays alive until we disconnect it.
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	bot := botbooter.InitAsCLIBot(pr, &syncBuffer{})
+
+	for i := 0; i < 20; i++ {
+		// Reconnecting after a clean disconnect must succeed: each Connect
+		// installs its own stop closure rather than reusing a shared one.
+		asserts.NoError(t, bot.Connect(context.Background()), "reconnect should succeed after disconnect")
+
+		// Several goroutines race to tear down the same connection. Only one
+		// performs the teardown, and the per-connection stop state must be
+		// accessed without a data race (verified under go test -race).
+		var wg sync.WaitGroup
+		for j := 0; j < 4; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_ = bot.Disconnect()
+			}()
 		}
-		bot.AddHandler(handler)
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "hello",
-		}
-
-		// Act
-		bot.handleMessageWithCommand(message)
-
-		// Assert
-		assertTrue(t, handlerCalled, "Handler should be called for matching command")
-	})
-
-	t.Run("NoMatchingCommand", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		handlerCalled := false
-		handler := Command{
-			Pattern: "^hello$",
-			Handler: func(bot *Bot, message *Message) {
-				handlerCalled = true
-			},
-		}
-		bot.AddHandler(handler)
-
-		unknownHandlerCalled := false
-		unknownHandler := func(bot *Bot, message *Message) {
-			unknownHandlerCalled = true
-		}
-		bot.SetUnknownCommandHandler(unknownHandler)
-
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "goodbye",
-		}
-
-		// Act
-		bot.handleMessageWithCommand(message)
-
-		// Assert
-		assertFalse(t, handlerCalled, "Handler should not be called for non-matching command")
-		assertTrue(t, unknownHandlerCalled, "Unknown handler should be called")
-	})
-
-	t.Run("WithMiddleware", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		middlewareCalled := false
-		middleware := func(bot *Bot, message *Message, next CommandHandler) {
-			middlewareCalled = true
-			next(bot, message)
-		}
-		bot.AddMiddleware(middleware)
-
-		handlerCalled := false
-		handler := Command{
-			Pattern: "^hello$",
-			Handler: func(bot *Bot, message *Message) {
-				handlerCalled = true
-			},
-		}
-		bot.AddHandler(handler)
-
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "hello",
-		}
-
-		// Act
-		bot.handleMessageWithCommand(message)
-
-		// Assert
-		assertTrue(t, middlewareCalled, "Middleware should be called")
-		assertTrue(t, handlerCalled, "Handler should be called after middleware")
-	})
-
-	t.Run("MultipleMiddlewares", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		var callOrder []int
-
-		middleware1 := func(bot *Bot, message *Message, next CommandHandler) {
-			callOrder = append(callOrder, 1)
-			next(bot, message)
-		}
-		middleware2 := func(bot *Bot, message *Message, next CommandHandler) {
-			callOrder = append(callOrder, 2)
-			next(bot, message)
-		}
-
-		bot.AddMiddleware(middleware1)
-		bot.AddMiddleware(middleware2)
-
-		handler := Command{
-			Pattern: "^hello$",
-			Handler: func(bot *Bot, message *Message) {
-				callOrder = append(callOrder, 3)
-			},
-		}
-		bot.AddHandler(handler)
-
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "hello",
-		}
-
-		// Act
-		bot.handleMessageWithCommand(message)
-
-		// Assert
-		assertEqual(t, len(callOrder), 3, "Number of calls")
-		assertEqual(t, callOrder[0], 1, "First middleware should be called first")
-		assertEqual(t, callOrder[1], 2, "Second middleware should be called second")
-		assertEqual(t, callOrder[2], 3, "Handler should be called last")
-	})
-
-	t.Run("InvalidRegex", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		handler := Command{
-			Pattern: "[invalid(", // Invalid regex
-			Handler: func(bot *Bot, message *Message) {},
-		}
-		bot.AddHandler(handler)
-
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "test",
-		}
-
-		// Act & Assert
-		// Should not panic, just skip the invalid command
-		bot.handleMessageWithCommand(message)
-	})
-
-	t.Run("NoUnknownHandler", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		handler := Command{
-			Pattern: "^hello$",
-			Handler: func(bot *Bot, message *Message) {},
-		}
-		bot.AddHandler(handler)
-
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "goodbye",
-		}
-
-		// Act & Assert
-		// Should not panic even without an unknown command handler
-		bot.handleMessageWithCommand(message)
-	})
-
-	t.Run("MultipleCommands", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		firstHandlerCalled := false
-		secondHandlerCalled := false
-
-		handler1 := Command{
-			Pattern: "^hello$",
-			Handler: func(bot *Bot, message *Message) {
-				firstHandlerCalled = true
-			},
-		}
-
-		handler2 := Command{
-			Pattern: "^goodbye$",
-			Handler: func(bot *Bot, message *Message) {
-				secondHandlerCalled = true
-			},
-		}
-
-		bot.AddHandler(handler1)
-		bot.AddHandler(handler2)
-
-		message := &Message{
-			UserID:    "user123",
-			ChannelID: "channel123",
-			Content:   "goodbye",
-		}
-
-		// Act
-		bot.handleMessageWithCommand(message)
-
-		// Assert
-		assertFalse(t, firstHandlerCalled, "First handler should not be called")
-		assertTrue(t, secondHandlerCalled, "Second handler should be called")
-	})
+		wg.Wait()
+	}
 }
 
-func TestBot_StartListening(t *testing.T) {
-	t.Run("SuccessfulShutdown", func(t *testing.T) {
-		// Arrange
-		bot := InitAsDiscordBot("test_token")
-		started := make(chan struct{})
-		finished := make(chan struct{})
+func TestBot_Start_GracefulShutdownOnSignal(t *testing.T) {
+	// Guard: register our own SIGTERM handler first so that even if the signal
+	// somehow arrives before Start's signal.NotifyContext registers, the
+	// default disposition (terminate the process) cannot kill the test binary.
+	guard := make(chan os.Signal, 1)
+	signal.Notify(guard, syscall.SIGTERM)
+	defer signal.Stop(guard)
 
-		// Act
-		go func() {
-			close(started)
-			bot.StartListening()
-			close(finished)
-		}()
+	// A pipe that never reaches EOF keeps the CLI loop blocked so Start waits
+	// on the signal-bound context rather than returning early.
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	bot := botbooter.InitAsCLIBot(pr, &syncBuffer{})
 
-		// Wait for goroutine to start
-		<-started
-		time.Sleep(100 * time.Millisecond)
+	done := make(chan error, 1)
+	go func() { done <- bot.Start() }()
 
-		// Send interrupt signal
-		process, _ := os.FindProcess(os.Getpid())
-		process.Signal(syscall.SIGTERM)
+	// Give Start time to register the signal handler before we signal.
+	time.Sleep(150 * time.Millisecond)
+	proc, err := os.FindProcess(os.Getpid())
+	asserts.NoError(t, err, "FindProcess")
+	asserts.NoError(t, proc.Signal(syscall.SIGTERM), "send SIGTERM")
 
-		// Assert
-		select {
-		case <-finished:
-			// Successfully finished - bot shut down gracefully
-		case <-time.After(1 * time.Second):
-			t.Error("Timeout waiting for bot to shut down")
-		}
-	})
-
-	t.Run("DisconnectError", func(t *testing.T) {
-		// Arrange - Create a bot with invalid type that will cause disconnect to fail
-		bot := &Bot{
-			BotType: BotType(999), // Invalid bot type causes disconnect to fail
-		}
-		started := make(chan struct{})
-		finished := make(chan struct{})
-
-		// Act
-		go func() {
-			close(started)
-			bot.StartListening()
-			close(finished)
-		}()
-
-		// Wait for goroutine to start
-		<-started
-		time.Sleep(100 * time.Millisecond)
-
-		// Send interrupt signal
-		process, _ := os.FindProcess(os.Getpid())
-		process.Signal(syscall.SIGTERM)
-
-		// Assert
-		select {
-		case <-finished:
-			// Successfully finished - error was logged but bot still shut down
-		case <-time.After(1 * time.Second):
-			t.Error("Timeout waiting for bot to shut down")
-		}
-	})
+	select {
+	case err := <-done:
+		asserts.NoError(t, err, "Start should return after SIGTERM")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not shut down after SIGTERM")
+	}
 }
