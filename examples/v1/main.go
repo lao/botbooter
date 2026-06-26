@@ -8,6 +8,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log"
@@ -40,13 +41,9 @@ func echoHandler(ctx context.Context, bot *botbooter.Bot, message *botbooter.Mes
 }
 
 func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message, next botbooter.CommandHandler) {
-	// AuthorName is a best-effort normalized field; it falls back to the user id
-	// on platforms (like Slack) that deliver only an id.
-	author := message.AuthorName
-	if author == "" {
-		author = message.UserID
-	}
-	log.Printf("%s in channel %s: %s", author, message.ChannelID, message.Content)
+	// AuthorName is best-effort; empty on platforms that deliver only an id (e.g. Slack).
+	log.Printf("%s in channel %s: %s",
+		cmp.Or(message.AuthorName, message.UserID), message.ChannelID, message.Content)
 	next(ctx, bot, message)
 }
 
