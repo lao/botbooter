@@ -10,7 +10,10 @@
 
 Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, or stdin.
 
-> ⚠️ **Pre-1.0** — the public API may still change.
+> ⚠️ **Not production ready.** botbooter is pre-1.0 and under active development. The
+> public API may change without notice, and it has not been hardened or battle-tested for
+> production workloads. Use it for experiments and side projects; pin a specific version and
+> review changes before depending on it for anything critical.
 
 ## Features
 
