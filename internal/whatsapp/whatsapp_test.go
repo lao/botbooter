@@ -97,6 +97,23 @@ func TestNew_Defaults(t *testing.T) {
 	asserts.True(t, a.http != nil, "HTTPClient should default")
 }
 
+func TestNew_NormalizesBareAddr(t *testing.T) {
+	cases := map[string]string{
+		"8080":           ":8080",
+		":9090":          ":9090",
+		"127.0.0.1:8080": "127.0.0.1:8080",
+	}
+	for in, want := range cases {
+		t.Run(in, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Addr = in
+			a, err := newAdapter(cfg)
+			asserts.NoError(t, err, "newAdapter should succeed")
+			asserts.Equal(t, a.cfg.Addr, want, "Addr should be normalized")
+		})
+	}
+}
+
 func TestNew_MissingConfig(t *testing.T) {
 	cases := map[string]func(*Config){
 		"token":       func(c *Config) { c.Token = "" },

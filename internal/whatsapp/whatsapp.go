@@ -62,7 +62,8 @@ type Config struct {
 	AppSecret string
 	// VerifyToken is echoed during Meta's GET webhook-verification handshake.
 	VerifyToken string
-	// Addr is the local TCP address the webhook server binds, e.g. ":8080".
+	// Addr is the local TCP address the webhook server binds, e.g. ":8080". A
+	// bare port ("8080") is accepted as shorthand for ":8080".
 	Addr string
 	// Path is the webhook route. Defaults to "/webhook".
 	Path string
@@ -100,6 +101,10 @@ func New(cfg Config) (*core.Bot, error) {
 func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.Token == "" || cfg.PhoneNumberID == "" || cfg.AppSecret == "" || cfg.VerifyToken == "" || cfg.Addr == "" {
 		return nil, fmt.Errorf("%w: Token, PhoneNumberID, AppSecret, VerifyToken and Addr are required", ErrMissingConfig)
+	}
+	// Accept a bare port ("8080") as shorthand for ":8080" so net.Listen is happy.
+	if !strings.Contains(cfg.Addr, ":") {
+		cfg.Addr = ":" + cfg.Addr
 	}
 	if cfg.Path == "" {
 		cfg.Path = defaultPath

@@ -4,7 +4,7 @@
 //	go run ./examples/v1            # CLI mode (no credentials needed)
 //	go run ./examples/v1 slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 //	go run ./examples/v1 discord    # reads DISCORD_BOT_TOKEN
-//	go run ./examples/v1 whatsapp   # reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR
+//	go run ./examples/v1 whatsapp   # reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
 package main
 
 import (
@@ -62,6 +62,7 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			AppSecret:     os.Getenv("WA_APP_SECRET"),
 			VerifyToken:   os.Getenv("WA_VERIFY_TOKEN"),
 			Addr:          os.Getenv("WA_ADDR"),
+			Path:          os.Getenv("WA_PATH"), // optional; defaults to /webhook
 		})
 	case "cli":
 		return botbooter.InitAsCLIBot(os.Stdin, os.Stdout), nil
