@@ -16,3 +16,5 @@ coverage.out
 .idea/
 .vscode/
 .claude/
+.plans/
+todo.md
