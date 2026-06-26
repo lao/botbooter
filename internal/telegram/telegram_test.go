@@ -17,15 +17,13 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// captureDeps returns AdapterDeps that record the dispatched message in *got.
 func captureDeps(got **core.Message) core.AdapterDeps {
 	return core.AdapterDeps{
 		Dispatch: func(_ context.Context, m *core.Message) { *got = m },
 	}
 }
 
-// newCaptureAdapter builds an adapter with the given self id whose Dispatch
-// records into *got, bypassing New (and the network) for onUpdate tests.
+// newCaptureAdapter bypasses New and the network so onUpdate can be tested directly.
 func newCaptureAdapter(selfID int64, got **core.Message) *adapter {
 	a := &adapter{selfID: selfID}
 	deps := captureDeps(got)
@@ -33,10 +31,7 @@ func newCaptureAdapter(selfID int64, got **core.Message) *adapter {
 	return a
 }
 
-// newStubAdapter builds an adapter wired to an httptest server that answers Bot
-// API calls, mirroring how New constructs the real bot (onUpdate registered as
-// the default handler). WithServerURL + WithSkipGetMe keep it free of real
-// network I/O.
+// newStubAdapter wires an adapter to an httptest Bot API server, mirroring New without real network I/O.
 func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -267,13 +262,8 @@ func TestDisconnect(t *testing.T) {
 	asserts.NoError(t, (&adapter{}).Disconnect(), "Disconnect is a no-op and safe before Connect")
 }
 
-// TestConnect_StartsAndStops verifies that Connect runs the poll loop and reports
-// the clean context cancellation back through deps.Done, all against a stub API
-// server so no real network I/O happens.
 func TestConnect_StartsAndStops(t *testing.T) {
 	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
-		// Any getUpdates poll returns no updates; the loop keeps polling until ctx
-		// is canceled.
 		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
 	})
 
@@ -295,8 +285,6 @@ func TestConnect_StartsAndStops(t *testing.T) {
 	}
 }
 
-// TestConnect_DispatchesUpdate drives one update through the real poll loop and
-// the default handler, confirming the Connect → onUpdate → Dispatch wiring.
 func TestConnect_DispatchesUpdate(t *testing.T) {
 	var served atomic.Bool
 	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
@@ -329,9 +317,7 @@ func TestConnect_DispatchesUpdate(t *testing.T) {
 	}
 }
 
-// TestConnect_DispatchesMultipleUpdates confirms every update in a single
-// getUpdates batch is dispatched (the library fans them out to handler
-// goroutines, so arrival order is not asserted).
+// The library fans updates out to handler goroutines, so arrival order is not asserted.
 func TestConnect_DispatchesMultipleUpdates(t *testing.T) {
 	var served atomic.Bool
 	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {

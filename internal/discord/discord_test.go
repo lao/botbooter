@@ -10,8 +10,6 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// newTestAdapter builds an adapter with a session from a fake token. The token
-// is well-formed enough to construct a session but cannot open a real gateway.
 func newTestAdapter(t *testing.T) *adapter {
 	t.Helper()
 	dg, err := discordgo.New("Bot test_token")
@@ -19,7 +17,6 @@ func newTestAdapter(t *testing.T) *adapter {
 	return &adapter{session: dg}
 }
 
-// captureDeps returns AdapterDeps that record the dispatched message in *got.
 func captureDeps(got **core.Message) core.AdapterDeps {
 	return core.AdapterDeps{
 		Dispatch: func(ctx context.Context, m *core.Message) { *got = m },
