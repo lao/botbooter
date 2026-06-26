@@ -1,77 +1,177 @@
 # botbooter
 
-Inspired by [Gin](https://gin-gonic.com/), supposed to act as a general purpose golang framework to build bots for Slack and Discord and Microsoft Teams, Telegram, Whatsapp, CLI (for testing) and more in the future.
+[![Go Reference](https://pkg.go.dev/badge/github.com/lao/botbooter.svg)](https://pkg.go.dev/github.com/lao/botbooter)
+[![CI](https://github.com/lao/botbooter/actions/workflows/ci.yml/badge.svg)](https://github.com/lao/botbooter/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/lao/botbooter)](https://goreportcard.com/report/github.com/lao/botbooter)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/lao/botbooter)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> NOT READY FOR PRODUCTION
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+
+Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, or stdin.
+
+> ⚠️ **Pre-1.0** — the public API may still change.
 
 ## Features
 
-- Generic handler for connections for bot types
-- Generic message handler with support for attachments for all bot types
-- Middleware support
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
+- **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
+- **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
+- **Context-first & graceful shutdown** — handlers receive a `context.Context`; `Run(ctx)` / `Start()` connect and shut down cleanly on cancellation or `SIGINT`/`SIGTERM`.
+- **Resilient dispatch** — a panicking handler is recovered and logged instead of taking down the bot.
 
 ## Install
+
 ```bash
-  go get -u github.com/lao/botbooter
+go get github.com/lao/botbooter
 ```
 
-## How to use?
+Requires Go 1.23+.
 
-Here is a simple example of how to use the BotBooter.
+## Quickstart
 
-```golang
-  package main
+The fastest way to try it — the CLI adapter needs **no tokens**:
 
-  import (
-    "fmt"
-    "log"
-    "os"
+```go
+package main
 
-    "github.com/joho/godotenv"
-    "github.com/lao/botbooter"
-  )
+import (
+	"context"
+	"os"
+	"strings"
 
-  func echoHandler(bot *botbooter.Bot, message *botbooter.Message) {
-    bot.SendMessage(message.ChannelID, "You said: "+message.Content)
-  }
+	"github.com/lao/botbooter"
+)
 
-  func loggingMiddleware(bot *botbooter.Bot, message *botbooter.Message, next botbooter.CommandHandler) {
-    fmt.Printf("User %s sent a message in channel %s: %s\n", message.UserID, message.ChannelID, message.Content)
-    next(bot, message)
-  }
+func main() {
+	bot := botbooter.InitAsCLIBot(os.Stdin, os.Stdout)
 
-  func main() {
-    godotenv.Load(".env")
+	_ = bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
+	})
 
-    var b *botbooter.Bot
-
-    botToken := os.Getenv("SLACK_BOT_TOKEN")
-    appToken := os.Getenv("SLACK_APP_TOKEN")
-    b = botbooter.InitAsSlackBot(appToken, botToken)
-    // SAME CODE SHOULD WORK FOR DISCORD OR SLACK
-    // DISCORD_BOT_TOKEN := os.Getenv("DISCORD_BOT_TOKEN")
-    // b = botbooter.InitAsDiscordBot(DISCORD_BOT_TOKEN)
-
-    b.AddMiddleware(loggingMiddleware)
-
-    b.AddHandler(botbooter.Command{
-      Pattern: "^echo ",
-      Handler: echoHandler,
-    })
-
-    b.SetUnknownCommandHandler(func(bot *botbooter.Bot, message *botbooter.Message) {
-      fmt.Println("Unknown command:", message.Content, message.ChannelID)
-    })
-
-    err := b.Connect()
-    if err != nil {
-      log.Fatal("Failed to connect:", err)
-    }
-    defer b.Disconnect()
-
-    b.StartListening()
-  }
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	_ = bot.Run(ctx) // type "echo hi", press enter; Ctrl-D to quit
+}
 ```
+
+Or run the bundled example directly:
+
+```bash
+go run ./examples/v1            # CLI mode (default, no credentials)
+go run ./examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
+go run ./examples/v1 discord    # uses DISCORD_BOT_TOKEN
+```
+
+## Concepts
+
+### Constructing a bot
+
+| Constructor | Signature | Notes |
+|---|---|---|
+| `InitAsCLIBot(in io.Reader, out io.Writer)` | `*Bot` | Local adapter; `nil` defaults to stdin/stdout. |
+| `InitAsSlackBot(appToken, botToken string)` | `*Bot` | Socket Mode (`xapp-…` + `xoxb-…`). |
+| `InitAsDiscordBot(token string)` | `(*Bot, error)` | Enables the message-content intent (see below). |
+
+### Handlers, commands and middleware
+
+```go
+// A command routes messages whose content matches a regular expression.
+_ = bot.AddHandler(botbooter.Command{
+	Pattern: "^ping$",
+	Handler: func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+		_ = b.SendMessageContext(ctx, m.ChannelID, "pong")
+	},
+})
+
+// HandleFunc is a shorthand for the common case.
+_ = bot.HandleFunc("^hello", greetHandler)
+
+// Fallback when nothing matches.
+bot.SetUnknownCommandHandler(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	_ = b.SendMessageContext(ctx, m.ChannelID, "unknown command")
+})
+
+// Middleware wraps dispatch; call next to continue the chain.
+bot.AddMiddleware(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message, next botbooter.CommandHandler) {
+	log.Printf("%s in %s: %s", m.UserID, m.ChannelID, m.Content)
+	next(ctx, b, m)
+})
+```
+
+`AddHandler` / `HandleFunc` return an error if the pattern is not a valid regular expression.
+
+### Attachments
+
+```go
+attachments, err := b.GetAttachments(m)
+for _, a := range attachments {
+	fmt.Println(a.URL, a.IsImage) // a.ExtraData holds the raw platform payload
+}
+```
+
+A terminal has no real upload channel, so the **CLI adapter treats any local file path in the message as an attachment** — "uploading" means referencing the path. Image files are detected by content sniffing:
+
+```text
+echo here is my screenshot /tmp/cat.png
+  → attachment (image): /tmp/cat.png
+```
+
+### Lifecycle
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+if err := bot.Run(ctx); err != nil { // connect, serve, and shut down on cancel
+	log.Fatal(err)
+}
+```
+
+- `Run(ctx)` — connect, block until `ctx` is canceled (or the event loop ends), then disconnect cleanly.
+- `Start()` — shorthand for `Run` with a context bound to `SIGINT`/`SIGTERM`.
+- `Connect(ctx)` / `Disconnect()` — non-blocking control if you want to manage the loop yourself. `Disconnect` is idempotent.
+
+## Platform setup
+
+### Slack
+
+1. Create a Slack app and enable **Socket Mode** (*Settings → Socket Mode*). This generates an **app-level token** (`xapp-…`) with the `connections:write` scope.
+2. Add the **bot token scopes** under *Features → **OAuth & Permissions** → Scopes → Bot Token Scopes*:
+   - `chat:write` — required to send replies.
+   - `channels:history` (and `im:history`, `groups:history`, `mpim:history` as needed) — required to *receive* message events from those channel types.
+3. Subscribe to the matching message events under *Features → Event Subscriptions → Subscribe to bot events*: `message.channels` (and/or `message.im`, …).
+4. Install the app to your workspace (*OAuth & Permissions → Install*) and copy the **bot token** (`xoxb-…`). Re-install whenever you change scopes.
+5. Invite the bot to a channel (`/invite @your-bot`) and post from a **human** account (the bot ignores its own and other bots' messages).
+
+```go
+bot := botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
+```
+
+> **No response?** It's almost always missing bot token scopes (no `*:history` ⇒ no events delivered even when subscribed; no `chat:write` ⇒ can't reply), the bot not being invited to the channel, or re-install skipped after a scope change.
+
+### Discord
+
+1. Create an application + bot in the [Discord Developer Portal](https://discord.com/developers/applications) and copy the bot token.
+2. **Enable the *Message Content Intent*** under *Bot → Privileged Gateway Intents*. botbooter requests this intent so handlers receive message text — without it Discord delivers empty content.
+3. Invite the bot to your server with the appropriate scopes/permissions.
+
+```go
+bot, err := botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
+```
+
+## Development
+
+```bash
+make all        # fmt + vet + lint + test
+make test-race  # race detector
+make cover      # coverage report
+make run-cli    # run the example bot in CLI mode
+```
+
+The suite runs under the race detector and is hermetic by default. The single test that touches the Slack network is opt-in, enabled by setting the `BOTBOOTER_SLACK_NETWORK_TEST` environment variable (see `botbooter_test.go`).
 
 ## DEMO
 
@@ -83,13 +183,27 @@ https://user-images.githubusercontent.com/197033/229368894-19b366d3-ca6d-41d2-9a
 
 Alternatives:
 
-### [Joe-bot](https://joe-bot.net/?utm_campaign=awesomego&utm_medium=referral&utm_source=awesomego) 
- 
-- no support for discord
+### [Joe-bot](https://joe-bot.net/?utm_campaign=awesomego&utm_medium=referral&utm_source=awesomego)
+
+- no support for Discord
 - no generic access for attachments in messages
 
 ### [GoSarah](https://github.com/oklahomer/go-sarah)
 
-- no support for discord
+- no support for Discord
 - no generic access for attachments in messages
 
+## Roadmap
+
+- [x] Slack, Discord and CLI adapters
+- [x] Middleware and attachment abstraction
+- [ ] Microsoft Teams, Telegram, WhatsApp adapters
+- [ ] Richer message types (blocks, embeds)
+
+## Contributing
+
+Issues and PRs are welcome. Please run `make all` (format, vet, lint, race tests) before opening a PR.
+
+## License
+
+[MIT](LICENSE) © Lucas Abreu Oliveira
