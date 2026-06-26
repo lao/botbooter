@@ -282,3 +282,38 @@ func slackEvent(data any) slackevents.EventsAPIEvent {
 		InnerEvent: slackevents.EventsAPIInnerEvent{Data: data},
 	}
 }
+
+func TestToMessage(t *testing.T) {
+	msg := &slackevents.MessageEvent{
+		User:            "U123",
+		Channel:         "C456",
+		Text:            "hello",
+		TimeStamp:       "1700000000.000100",
+		ThreadTimeStamp: "1699999999.000000",
+	}
+
+	got := toMessage(msg)
+
+	asserts.Equal(t, got.ID, "1700000000.000100", "ID is the ts")
+	asserts.Equal(t, got.UserID, "U123", "UserID")
+	asserts.Equal(t, got.ChannelID, "C456", "ChannelID")
+	asserts.Equal(t, got.Content, "hello", "Content")
+	asserts.Equal(t, got.AuthorName, "", "AuthorName empty (Slack gives id only)")
+	asserts.Equal(t, got.ReplyToID, "1699999999.000000", "ReplyToID is the thread ts")
+	asserts.Equal(t, got.Timestamp.Unix(), int64(1700000000), "Timestamp seconds")
+	raw, ok := RawEvent(got)
+	asserts.True(t, ok, "RawEvent recovers the event")
+	asserts.True(t, raw == msg, "RawEvent returns the same pointer")
+}
+
+func TestParseSlackTimestamp(t *testing.T) {
+	asserts.True(t, parseSlackTimestamp("").IsZero(), "empty ts is zero time")
+	asserts.True(t, parseSlackTimestamp("not-a-ts").IsZero(), "malformed ts is zero time")
+	asserts.Equal(t, parseSlackTimestamp("1700000000.000100").Unix(), int64(1700000000), "seconds parsed")
+}
+
+func TestClientAccessors(t *testing.T) {
+	bot := New("xapp-test", "xoxb-test")
+	asserts.NotNil(t, Client(bot), "Client accessor returns the web client")
+	asserts.NotNil(t, SocketClient(bot), "SocketClient accessor returns the socket client")
+}
