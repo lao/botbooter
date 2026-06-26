@@ -3,7 +3,9 @@ package botbooter_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -49,13 +51,41 @@ type errReader struct{ err error }
 
 func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
+// stubRoundTripper is an http.RoundTripper that returns a canned response
+// without any network I/O. It keeps the Discord adapter tests hermetic: the
+// gateway fetch in Connect and the REST call in Send still run through real
+// discordgo request/response handling, but never reach the Discord API.
+type stubRoundTripper struct {
+	status int
+	body   string
+}
+
+func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// The RoundTripper contract requires closing the request body.
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+	return &http.Response{
+		StatusCode: s.status,
+		Status:     fmt.Sprintf("%d %s", s.status, http.StatusText(s.status)),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(s.body)),
+		Request:    req,
+	}, nil
+}
+
 // newDiscordBot constructs a Discord bot for tests, failing the test if
-// construction errors.
+// construction errors. Its HTTP transport is stubbed to a canned 401 so Connect
+// and Send exercise their error paths without calling the real Discord API.
 func newDiscordBot(t *testing.T) *botbooter.Bot {
 	t.Helper()
 	bot, err := botbooter.InitAsDiscordBot("test_token")
 	asserts.NoError(t, err, "InitAsDiscordBot")
 	asserts.NotNil(t, bot, "bot should be initialized")
+	bot.DiscordSession.Client.Transport = stubRoundTripper{
+		status: http.StatusUnauthorized,
+		body:   `{"message":"401: Unauthorized","code":0}`,
+	}
 	return bot
 }
 
@@ -125,6 +155,13 @@ func TestBot_SendMessage(t *testing.T) {
 	})
 
 	t.Run("SlackBotNotConnected", func(t *testing.T) {
+		// slack-go's Client keeps its http client unexported with no
+		// post-construction setter, so SendMessage makes a real Slack Web API
+		// call. Gate it behind the same env var as the other network test
+		// rather than expand the public API just to inject a transport.
+		if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
+			t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; SendMessage performs a real Slack Web API call")
+		}
 		bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
 
 		err := bot.SendMessage("channel123", "test message")
