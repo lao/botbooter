@@ -1,9 +1,10 @@
 // Command v1 is a small demo of botbooter. It runs an "echo" bot on Slack,
-// Discord or the local CLI.
+// Discord, WhatsApp or the local CLI.
 //
 //	go run ./examples/v1            # CLI mode (no credentials needed)
 //	go run ./examples/v1 slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 //	go run ./examples/v1 discord    # reads DISCORD_BOT_TOKEN
+//	go run ./examples/v1 whatsapp   # reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR
 package main
 
 import (
@@ -54,10 +55,18 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		return botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN")), nil
 	case "discord":
 		return botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
+	case "whatsapp":
+		return botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{
+			Token:         os.Getenv("WA_TOKEN"),
+			PhoneNumberID: os.Getenv("WA_PHONE_ID"),
+			AppSecret:     os.Getenv("WA_APP_SECRET"),
+			VerifyToken:   os.Getenv("WA_VERIFY_TOKEN"),
+			Addr:          os.Getenv("WA_ADDR"),
+		})
 	case "cli":
 		return botbooter.InitAsCLIBot(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, whatsapp or cli)", botType)
 	}
 }
 
