@@ -324,8 +324,8 @@ func TestClientAccessors(t *testing.T) {
 
 func TestSlackMentions(t *testing.T) {
 	got := toMessage(&slackevents.MessageEvent{Text: "hi <@U2> and <@U3|carol> there"})
-	asserts.Equal(t, strings.Join(got.Mentions, ","), "U2,U3", "parsed mention ids")
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "U2,U3", "parsed mention ids")
 
 	none := toMessage(&slackevents.MessageEvent{Text: "no mentions"})
-	asserts.Equal(t, len(none.Mentions), 0, "no mentions -> nil")
+	asserts.Equal(t, len(none.MentionedUserIDs), 0, "no mentions -> nil")
 }

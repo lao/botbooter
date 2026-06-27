@@ -67,7 +67,7 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 
 // Attachments returns the files attached to the message's Slack event.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	msg, _ := m.Raw.(*slackevents.MessageEvent)
+	msg, _ := RawEvent(m)
 	return attachmentsFromMessage(msg), nil
 }
 
@@ -99,16 +99,18 @@ func SocketClient(b *core.Bot) *socketmode.Client {
 // toMessage maps a Slack message event onto a platform-agnostic Message.
 // AuthorName is left empty: the event carries only a user id, and resolving a
 // name would require a per-message API call.
+// Slack has no separate message id, so the message ts is reused as ID and (via
+// ThreadTimeStamp) as the thread/reply key.
 func toMessage(msg *slackevents.MessageEvent) *core.Message {
 	return &core.Message{
-		ID:        msg.TimeStamp,
-		UserID:    msg.User,
-		ChannelID: msg.Channel,
-		Content:   msg.Text,
-		Timestamp: parseSlackTimestamp(msg.TimeStamp),
-		ReplyToID: msg.ThreadTimeStamp,
-		Mentions:  slackMentions(msg.Text),
-		Raw:       msg,
+		ID:               msg.TimeStamp,
+		UserID:           msg.User,
+		ChannelID:        msg.Channel,
+		Content:          msg.Text,
+		Timestamp:        parseSlackTimestamp(msg.TimeStamp),
+		ReplyToID:        msg.ThreadTimeStamp,
+		MentionedUserIDs: slackMentions(msg.Text),
+		Raw:              msg,
 	}
 }
 
@@ -199,7 +201,7 @@ func attachmentsFromMessage(m *slackevents.MessageEvent) []core.Attachment {
 	attachments := make([]core.Attachment, 0, len(m.Files))
 	for _, file := range m.Files {
 		attachments = append(attachments, core.Attachment{
-			IsImage:   strings.HasPrefix(file.Mimetype, "image"),
+			IsImage:   strings.HasPrefix(file.Mimetype, "image/"),
 			URL:       file.URLPrivate,
 			ExtraData: file,
 		})

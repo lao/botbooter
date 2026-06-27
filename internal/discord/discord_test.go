@@ -234,5 +234,5 @@ func TestToMessageMentions(t *testing.T) {
 		Mentions: []*discordgo.User{{ID: "U2"}, {ID: "U3"}},
 	}}
 	got := toMessage(mc)
-	asserts.Equal(t, strings.Join(got.Mentions, ","), "U2,U3", "mention ids")
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "U2,U3", "mention ids")
 }

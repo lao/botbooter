@@ -53,18 +53,18 @@ func (t BotType) String() string {
 // value. Raw carries the originating platform's untouched event; read it with
 // the matching typed accessor (e.g. botbooter.DiscordRawEvent).
 //
-// Mentions holds mentioned user ids and is best-effort per platform: Slack and
+// MentionedUserIDs holds mentioned user ids and is best-effort per platform: Slack and
 // Discord surface every mention, while Telegram contributes only text_mention
 // entities (a plain @username carries no numeric id and is omitted).
 type Message struct {
-	ID         string
-	UserID     string
-	AuthorName string
-	ChannelID  string
-	Content    string
-	Timestamp  time.Time
-	ReplyToID  string
-	Mentions   []string
+	ID               string
+	UserID           string
+	AuthorName       string
+	ChannelID        string
+	Content          string
+	Timestamp        time.Time
+	ReplyToID        string
+	MentionedUserIDs []string
 
 	Raw any
 }

@@ -271,7 +271,7 @@ func TestTelegramMentions(t *testing.T) {
 		},
 	}}
 	got := toMessage(u)
-	asserts.Equal(t, strings.Join(got.Mentions, ","), "99", "text_mention id only")
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "99", "text_mention id only")
 }
 
 func TestTelegramMentionsFromCaption(t *testing.T) {
@@ -285,7 +285,7 @@ func TestTelegramMentionsFromCaption(t *testing.T) {
 		CaptionEntities: []models.MessageEntity{{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 77}}},
 	}}
 	got := toMessage(u)
-	asserts.Equal(t, strings.Join(got.Mentions, ","), "77", "caption text_mention used when Text is empty")
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "77", "caption text_mention used when Text is empty")
 }
 
 func TestChatID(t *testing.T) {

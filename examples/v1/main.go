@@ -44,7 +44,7 @@ func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botboot
 	log.Printf("  Content:    %s", message.Content)
 	log.Printf("  Timestamp:  %s", message.Timestamp)
 	log.Printf("  ReplyToID:  %s", message.ReplyToID)
-	log.Printf("  Mentions:   %v", message.Mentions)
+	log.Printf("  MentionedUserIDs: %v", message.MentionedUserIDs)
 
 	// URL is empty on platforms that deliver media by id rather than link (e.g.
 	// Telegram carries the FileID in ExtraData); resolve it via the raw client if

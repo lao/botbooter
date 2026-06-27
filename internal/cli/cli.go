@@ -74,8 +74,8 @@ func (a *adapter) Send(_ context.Context, _, text string) error {
 
 // Attachments returns the attachments parsed from the message's typed line.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	data, _ := m.Raw.(*core.CLIMessage)
-	if data == nil {
+	data, ok := RawData(m)
+	if !ok {
 		return nil, nil
 	}
 	return data.Attachments, nil
