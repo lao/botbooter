@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -30,6 +31,7 @@ const (
 	DiscordBotType
 	CLIBotType
 	TelegramBotType
+	WebhookBotType
 )
 
 func (t BotType) String() string {
@@ -42,6 +44,8 @@ func (t BotType) String() string {
 		return "cli"
 	case TelegramBotType:
 		return "telegram"
+	case WebhookBotType:
+		return "webhook"
 	default:
 		return fmt.Sprintf("BotType(%d)", int(t))
 	}
@@ -135,6 +139,9 @@ type Bot struct {
 	cancel context.CancelFunc
 	done   chan error
 	stop   func() error
+
+	workers int
+	pool    atomic.Pointer[workerPool]
 }
 
 // New creates a Bot of the given type backed by adapter.
@@ -179,6 +186,24 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }
 
+// WithWorkers enables sharded asynchronous dispatch. Instead of running the
+// handler chain inline on the adapter's event loop, the Bot fans messages across
+// n worker goroutines, each draining its own bounded queue. Messages are sharded
+// by ChannelID, so every channel is handled in order by a single worker while
+// different channels run concurrently — handy for high-volume transports (e.g.
+// the webhook adapter) where a slow handler must not stall intake.
+//
+// It must be called before Connect or Run, and returns the Bot for chaining. An
+// n of 1 or less keeps the default inline dispatch. A full queue makes dispatch
+// block until the run context is canceled; teardown waits for any in-flight
+// handler to finish but abandons messages still queued.
+func (b *Bot) WithWorkers(n int) *Bot {
+	b.mu.Lock()
+	b.workers = n
+	b.mu.Unlock()
+	return b
+}
+
 // Connect starts the adapter's event loop and returns without blocking. It
 // returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
 // if the Bot has no adapter, or any error from the adapter's own Connect.
@@ -208,12 +233,19 @@ func (b *Bot) Connect(ctx context.Context) error {
 		})
 		return err
 	}
+	workers := b.workers
 	b.mu.Unlock()
 
 	if b.adapter == nil {
 		cancel()
 		b.clearConnection()
 		return ErrUnknownBotType
+	}
+
+	// A fresh pool per connection (like the stop closure): a reconnect never
+	// reuses a previous connection's workers or their queues.
+	if workers > 1 {
+		b.pool.Store(startWorkerPool(runCtx, workers, b.dispatchNow))
 	}
 
 	deps := AdapterDeps{
@@ -223,6 +255,9 @@ func (b *Bot) Connect(ctx context.Context) error {
 	}
 	if err := b.adapter.Connect(runCtx, deps); err != nil {
 		cancel()
+		if p := b.pool.Swap(nil); p != nil {
+			p.stop()
+		}
 		b.clearConnection()
 		return err
 	}
@@ -250,8 +285,19 @@ func (b *Bot) Disconnect() error {
 		cancel()
 	}
 
+	// Stop the adapter first so it stops feeding new messages, then drain the
+	// worker pool. Canceling the run context above tells the workers to exit;
+	// pool.stop waits for any in-flight handler so no dispatch goroutine outlives
+	// the connection.
+	var stopErr error
 	if stop != nil {
-		return stop()
+		stopErr = stop()
+	}
+	if p := b.pool.Swap(nil); p != nil {
+		p.stop()
+	}
+	if stop != nil {
+		return stopErr
 	}
 
 	// Not connected: nothing to tear down. Still validate the bot type so a
@@ -328,10 +374,21 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 	return b.adapter.Attachments(message)
 }
 
-// dispatch routes message through the middleware chain to the first matching
-// command. A panic in any handler or middleware is recovered and logged so it
-// cannot take down the event loop.
+// dispatch is the callback handed to adapters. With WithWorkers enabled it hands
+// the message to the worker pool (returning at once, so the adapter's event loop
+// keeps reading); otherwise it runs the chain inline on the caller's goroutine.
 func (b *Bot) dispatch(ctx context.Context, message *Message) {
+	if p := b.pool.Load(); p != nil {
+		p.submit(message)
+		return
+	}
+	b.dispatchNow(ctx, message)
+}
+
+// dispatchNow runs message through the middleware chain to the first matching
+// command. A panic in any handler or middleware is recovered and logged so it
+// cannot take down the event loop or a pool worker.
+func (b *Bot) dispatchNow(ctx context.Context, message *Message) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("botbooter: recovered from panic while handling message: %v", r)

@@ -5,6 +5,7 @@
 //	go run ./examples/v1 slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 //	go run ./examples/v1 discord    # reads DISCORD_BOT_TOKEN
 //	go run ./examples/v1 telegram   # reads TELEGRAM_BOT_TOKEN
+//	go run ./examples/v1 webhook    # listens on :8080 for JSON POSTs
 package main
 
 import (
@@ -68,10 +69,15 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		return botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
 	case "telegram":
 		return botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	case "webhook":
+		// Sharded async dispatch: accepted POSTs are handed to a pool of workers
+		// so the HTTP handler can ack immediately even under heavy load. POST
+		// {"channel_id":"c","content":"echo hi"} to http://localhost:8080/.
+		return botbooter.InitAsWebhookBot(botbooter.WebhookConfig{}).WithWorkers(8), nil
 	case "cli":
 		return botbooter.InitAsCLIBot(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, webhook or cli)", botType)
 	}
 }
 

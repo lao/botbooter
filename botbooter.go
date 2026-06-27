@@ -18,12 +18,16 @@ import (
 	"github.com/lao/botbooter/internal/discord"
 	"github.com/lao/botbooter/internal/slack"
 	"github.com/lao/botbooter/internal/telegram"
+	"github.com/lao/botbooter/internal/webhook"
 )
 
 // Errors returned by [Bot] methods.
 var (
 	ErrUnknownBotType   = core.ErrUnknownBotType
 	ErrAlreadyConnected = core.ErrAlreadyConnected
+	// ErrWebhookNoSender is returned by SendMessage on a webhook bot created
+	// without a [WebhookSender]. See [webhook.ErrNoSender].
+	ErrWebhookNoSender = webhook.ErrNoSender
 )
 
 // BotType identifies the messaging platform a [Bot] is connected to.
@@ -35,6 +39,7 @@ const (
 	DiscordBotType  = core.DiscordBotType
 	CLIBotType      = core.CLIBotType
 	TelegramBotType = core.TelegramBotType
+	WebhookBotType  = core.WebhookBotType
 )
 
 type (
@@ -52,6 +57,14 @@ type (
 	CommandHandler = core.CommandHandler
 	// Middleware wraps message dispatch. See [core.Middleware].
 	Middleware = core.Middleware
+	// WebhookConfig configures a webhook bot. See [webhook.Config].
+	WebhookConfig = webhook.Config
+	// WebhookPayload is the default JSON body of a webhook message. See [webhook.Payload].
+	WebhookPayload = webhook.Payload
+	// WebhookDecoder turns an HTTP request into a [Message]. See [webhook.Decoder].
+	WebhookDecoder = webhook.Decoder
+	// WebhookSender delivers a webhook bot's outbound replies. See [webhook.Sender].
+	WebhookSender = webhook.Sender
 )
 
 // InitAsSlackBot creates a Slack bot that connects via Socket Mode.
@@ -74,6 +87,14 @@ func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 	return cli.New(in, out)
 }
 
+// InitAsWebhookBot creates a bot that receives messages over HTTP POST. With the
+// zero [WebhookConfig] it listens on :8080 and decodes the default JSON payload;
+// pair it with (*Bot).WithWorkers for asynchronous, per-channel sharded dispatch
+// under load.
+func InitAsWebhookBot(cfg WebhookConfig) *Bot {
+	return webhook.New(cfg)
+}
+
 // DiscordRawEvent returns the raw Discord event carried on m, reporting whether
 // m originated from Discord.
 func DiscordRawEvent(m *Message) (*discordgo.MessageCreate, bool) { return discord.RawEvent(m) }
@@ -89,6 +110,10 @@ func TelegramRawEvent(m *Message) (*models.Update, bool) { return telegram.RawUp
 // CLIRawEvent returns the parsed CLI line carried on m, reporting whether m
 // originated from the CLI adapter.
 func CLIRawEvent(m *Message) (*CLIMessage, bool) { return cli.RawData(m) }
+
+// WebhookRawPayload returns the default-decoded payload carried on m, reporting
+// whether m came from a webhook bot using the default decoder.
+func WebhookRawPayload(m *Message) (*WebhookPayload, bool) { return webhook.RawPayload(m) }
 
 // DiscordSession returns the discordgo session backing b, or nil if b is not a
 // Discord bot.
