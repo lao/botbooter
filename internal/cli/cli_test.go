@@ -63,3 +63,15 @@ func TestParseMessage_DirectoryIgnored(t *testing.T) {
 
 	asserts.Equal(t, len(msg.Attachments), 0, "directories are not attachments")
 }
+
+func TestRawData(t *testing.T) {
+	data := &core.CLIMessage{Text: "hello"}
+	m := &core.Message{Raw: data}
+
+	got, ok := RawData(m)
+	asserts.True(t, ok, "RawData recovers the CLI payload")
+	asserts.True(t, got == data, "RawData returns the same pointer")
+
+	_, ok = RawData(&core.Message{})
+	asserts.False(t, ok, "RawData reports false when Raw is unset")
+}

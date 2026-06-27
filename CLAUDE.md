@@ -29,7 +29,7 @@ The codebase is a **facade over internal packages**. Understanding the split is 
 
 - **`internal/core`** — the platform-agnostic engine: the `Bot` struct, command/middleware dispatch, and the connect/run/disconnect lifecycle. It depends on no platform's connection logic. The seam is the **`Adapter` interface** (`Connect`, `Disconnect`, `Send`, `Attachments`). The Bot drives an adapter and hands it an **`AdapterDeps`** struct of callbacks (`Dispatch`, `Done`, `Disconnect`) so adapters in other packages can drive the Bot's unexported internals without those internals leaking.
 
-- **`internal/{cli,slack,discord}`** — one `core.Adapter` implementation each. Each exposes `New(...)` returning a `*core.Bot` built via `core.New(botType, adapter)`, and sets the exported escape-hatch fields (`bot.SlackClient`, `bot.DiscordSession`, …) for callers who need the raw client.
+- **`internal/{cli,slack,discord}`** — one `core.Adapter` implementation each. Each exposes `New(...)` returning a `*core.Bot` built via `core.New(botType, adapter)`, plus package-level accessors (`slack.Client`, `discord.Session`, …) that recover the concrete adapter from a `*Bot` via `core.AdapterAs[T]` and hand back the raw client. The facade re-exports these as `botbooter.SlackClient(bot)`, `botbooter.DiscordSession(bot)`, … so `internal/core` imports no platform SDK.
 
 **To add a platform:** create `internal/<platform>` implementing `core.Adapter`, then add an `InitAs<Platform>Bot` constructor to `botbooter.go`. Core needs no changes.
 

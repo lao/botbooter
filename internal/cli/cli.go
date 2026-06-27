@@ -54,7 +54,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 				UserID:    userID,
 				ChannelID: channelID,
 				Content:   line,
-				CLIData:   parseMessage(line),
+				Raw:       parseMessage(line),
 			})
 		}
 		deps.Done(scanner.Err())
@@ -74,10 +74,18 @@ func (a *adapter) Send(_ context.Context, _, text string) error {
 
 // Attachments returns the attachments parsed from the message's typed line.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	if m.CLIData == nil {
+	data, ok := RawData(m)
+	if !ok {
 		return nil, nil
 	}
-	return m.CLIData.Attachments, nil
+	return data.Attachments, nil
+}
+
+// RawData returns the parsed CLI line carried on m, reporting whether m
+// originated from the CLI adapter.
+func RawData(m *core.Message) (*core.CLIMessage, bool) {
+	data, ok := m.Raw.(*core.CLIMessage)
+	return data, ok
 }
 
 func parseMessage(line string) *core.CLIMessage {

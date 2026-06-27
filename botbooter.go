@@ -6,6 +6,13 @@ package botbooter
 import (
 	"io"
 
+	"github.com/bwmarrin/discordgo"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
+	slackapi "github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
+
 	"github.com/lao/botbooter/internal/cli"
 	"github.com/lao/botbooter/internal/core"
 	"github.com/lao/botbooter/internal/discord"
@@ -66,3 +73,35 @@ func InitAsTelegramBot(token string) (*Bot, error) {
 func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 	return cli.New(in, out)
 }
+
+// DiscordRawEvent returns the raw Discord event carried on m, reporting whether
+// m originated from Discord.
+func DiscordRawEvent(m *Message) (*discordgo.MessageCreate, bool) { return discord.RawEvent(m) }
+
+// SlackRawEvent returns the raw Slack event carried on m, reporting whether m
+// originated from Slack.
+func SlackRawEvent(m *Message) (*slackevents.MessageEvent, bool) { return slack.RawEvent(m) }
+
+// TelegramRawEvent returns the raw Telegram update carried on m, reporting
+// whether m originated from Telegram.
+func TelegramRawEvent(m *Message) (*models.Update, bool) { return telegram.RawUpdate(m) }
+
+// CLIRawEvent returns the parsed CLI line carried on m, reporting whether m
+// originated from the CLI adapter.
+func CLIRawEvent(m *Message) (*CLIMessage, bool) { return cli.RawData(m) }
+
+// DiscordSession returns the discordgo session backing b, or nil if b is not a
+// Discord bot.
+func DiscordSession(b *Bot) *discordgo.Session { return discord.Session(b) }
+
+// SlackClient returns the Slack Web API client backing b, or nil if b is not a
+// Slack bot.
+func SlackClient(b *Bot) *slackapi.Client { return slack.Client(b) }
+
+// SlackSocketClient returns the Socket Mode client backing b, or nil if b is not
+// a Slack bot.
+func SlackSocketClient(b *Bot) *socketmode.Client { return slack.SocketClient(b) }
+
+// TelegramClient returns the go-telegram bot client backing b, or nil if b is
+// not a Telegram bot.
+func TelegramClient(b *Bot) *bot.Bot { return telegram.Client(b) }

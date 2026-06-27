@@ -124,6 +124,38 @@ echo here is my screenshot /tmp/cat.png
   → attachment (image): /tmp/cat.png
 ```
 
+### Message fields
+
+Every `Message` carries normalized, platform-agnostic fields so handlers rarely
+need the raw event. `UserID`, `ChannelID` and `Content` are always set; the rest
+are best-effort and stay at their zero value when a platform cannot supply them:
+
+| Field | Meaning |
+|---|---|
+| `ID` | Platform message id (`""` for CLI). |
+| `AuthorName` | Display/username (empty on Slack, which delivers only an id). |
+| `Timestamp` | Message time as a `time.Time` (zero on CLI). |
+| `ReplyToID` | Id of the replied-to/thread message (`""` when not a reply). |
+| `MentionedUserIDs` | Mentioned user ids; Telegram contributes only `text_mention` ids. |
+
+### Raw platform access
+
+When you need something the normalized fields don't carry, reach the originating
+event or the underlying SDK client through typed accessors — `internal/core`
+stays free of every platform SDK, so these live on the facade:
+
+```go
+if ev, ok := botbooter.SlackRawEvent(m); ok {
+	_ = ev.ThreadTimeStamp // anything on the raw *slackevents.MessageEvent
+}
+
+// Raw event per platform: DiscordRawEvent, SlackRawEvent, TelegramRawEvent, CLIRawEvent.
+// Underlying client per platform:
+client := botbooter.SlackClient(bot)         // *slack.Client (nil if not a Slack bot)
+session := botbooter.DiscordSession(bot)     // *discordgo.Session
+tg := botbooter.TelegramClient(bot)          // *bot.Bot
+```
+
 ### Lifecycle
 
 ```go

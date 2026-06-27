@@ -58,8 +58,8 @@ func TestNew(t *testing.T) {
 	asserts.NotNil(t, b, "Bot should be initialized")
 	asserts.Equal(t, b.BotType, core.TelegramBotType, "Bot type should be Telegram")
 	asserts.Equal(t, b.BotType.String(), "telegram", "Bot type string")
-	asserts.NotNil(t, b.TelegramBot, "Telegram client escape hatch should be set")
-	asserts.Equal(t, b.TelegramBot.ID(), int64(123456), "self id parsed from token prefix")
+	asserts.NotNil(t, Client(b), "Telegram client escape hatch should be set")
+	asserts.Equal(t, Client(b).ID(), int64(123456), "self id parsed from token prefix")
 }
 
 func TestNew_EmptyToken(t *testing.T) {
@@ -92,7 +92,9 @@ func TestOnUpdate(t *testing.T) {
 		asserts.Equal(t, got.UserID, "7", "message user id")
 		asserts.Equal(t, got.ChannelID, "100", "message chat id")
 		asserts.Equal(t, got.Content, "hello", "message content")
-		asserts.True(t, got.TelegramData == u, "raw update should be carried on TelegramData")
+		raw, ok := RawUpdate(got)
+		asserts.True(t, ok, "raw update should be recoverable")
+		asserts.True(t, raw == u, "raw update carried on Raw")
 	})
 
 	t.Run("CaptionUsedWhenTextEmpty", func(t *testing.T) {
@@ -118,7 +120,9 @@ func TestOnUpdate(t *testing.T) {
 
 		asserts.NotNil(t, got, "photo-only message should still be dispatched (pass-through)")
 		asserts.Equal(t, got.Content, "", "photo-only message has empty content")
-		asserts.True(t, got.TelegramData == u, "raw update carried so handlers can read the photo")
+		raw, ok := RawUpdate(got)
+		asserts.True(t, ok, "raw update should be recoverable")
+		asserts.True(t, raw == u, "raw update carried so handlers can read the photo")
 	})
 
 	t.Run("NoMessageIgnored", func(t *testing.T) {
@@ -203,6 +207,85 @@ func TestOnUpdate_DispatchIsConnectionScoped(t *testing.T) {
 	a.onUpdate(ctx2, nil, u)
 	asserts.True(t, got2 != nil, "update on connection 2's context reaches deps2")
 	asserts.True(t, got1 == nil, "and not deps1")
+}
+
+func TestToMessage(t *testing.T) {
+	u := &models.Update{Message: &models.Message{
+		ID:             42,
+		From:           &models.User{ID: 7, Username: "bob"},
+		Chat:           models.Chat{ID: 100},
+		Text:           "hey",
+		Date:           1700000000,
+		ReplyToMessage: &models.Message{ID: 41},
+	}}
+
+	got := toMessage(u)
+
+	asserts.Equal(t, got.ID, "42", "ID")
+	asserts.Equal(t, got.UserID, "7", "UserID")
+	asserts.Equal(t, got.AuthorName, "bob", "AuthorName from username")
+	asserts.Equal(t, got.ChannelID, "100", "ChannelID from chat id")
+	asserts.Equal(t, got.Content, "hey", "Content")
+	asserts.Equal(t, got.ReplyToID, "41", "ReplyToID")
+	asserts.Equal(t, got.Timestamp.Unix(), int64(1700000000), "Timestamp")
+	raw, ok := RawUpdate(got)
+	asserts.True(t, ok, "RawUpdate recovers the update")
+	asserts.True(t, raw == u, "RawUpdate returns the same pointer")
+}
+
+func TestToMessageCaptionAndFirstName(t *testing.T) {
+	u := &models.Update{Message: &models.Message{
+		ID:      1,
+		From:    &models.User{ID: 7, FirstName: "Bob"},
+		Chat:    models.Chat{ID: 100},
+		Caption: "a photo",
+		Date:    1700000000,
+	}}
+
+	got := toMessage(u)
+
+	asserts.Equal(t, got.Content, "a photo", "Content falls back to caption")
+	asserts.Equal(t, got.AuthorName, "Bob", "AuthorName falls back to first name")
+	asserts.Equal(t, got.ReplyToID, "", "no reply")
+}
+
+func TestToMessageNilSender(t *testing.T) {
+	// toMessage must not panic on a sender-less message; UserID/AuthorName stay empty.
+	got := toMessage(&models.Update{Message: &models.Message{
+		ID: 1, Chat: models.Chat{ID: 100}, Text: "hi", Date: 1700000000,
+	}})
+
+	asserts.Equal(t, got.UserID, "", "no sender yields empty UserID")
+	asserts.Equal(t, got.AuthorName, "", "no sender yields empty AuthorName")
+	asserts.Equal(t, got.ChannelID, "100", "chat id still mapped")
+}
+
+func TestTelegramMentions(t *testing.T) {
+	u := &models.Update{Message: &models.Message{
+		From: &models.User{ID: 1},
+		Chat: models.Chat{ID: 1},
+		Text: "hi Bob",
+		Entities: []models.MessageEntity{
+			{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 99}},
+			{Type: models.MessageEntityTypeMention}, // @username — no id, skipped
+		},
+	}}
+	got := toMessage(u)
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "99", "text_mention id only")
+}
+
+func TestTelegramMentionsFromCaption(t *testing.T) {
+	// A media message has empty Text, so mentions come from CaptionEntities even
+	// if Entities is non-empty — mirroring how Content falls back to Caption.
+	u := &models.Update{Message: &models.Message{
+		From:            &models.User{ID: 1},
+		Chat:            models.Chat{ID: 1},
+		Caption:         "see Bob",
+		Entities:        []models.MessageEntity{{Type: models.MessageEntityTypeMention}},
+		CaptionEntities: []models.MessageEntity{{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 77}}},
+	}}
+	got := toMessage(u)
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "77", "caption text_mention used when Text is empty")
 }
 
 func TestChatID(t *testing.T) {
