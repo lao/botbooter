@@ -12,13 +12,7 @@ import (
 	"regexp"
 	"sync"
 	"syscall"
-
-	"github.com/bwmarrin/discordgo"
-	"github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
-	"github.com/slack-go/slack"
-	"github.com/slack-go/slack/slackevents"
-	"github.com/slack-go/slack/socketmode"
+	"time"
 )
 
 // ErrUnknownBotType is returned by Bot methods when the Bot has no adapter.
@@ -54,16 +48,25 @@ func (t BotType) String() string {
 }
 
 // Message is a platform-agnostic incoming message handed to command handlers.
-// Exactly one of the platform-specific data fields is set.
+// UserID, ChannelID and Content are always set. The remaining normalized fields
+// are best-effort: a platform that cannot supply one leaves it at its zero
+// value. Raw carries the originating platform's untouched event; read it with
+// the matching typed accessor (e.g. botbooter.DiscordRawEvent).
+//
+// MentionedUserIDs holds mentioned user ids and is best-effort per platform: Slack and
+// Discord surface every mention, while Telegram contributes only text_mention
+// entities (a plain @username carries no numeric id and is omitted).
 type Message struct {
-	UserID    string
-	ChannelID string
-	Content   string
+	ID               string
+	UserID           string
+	AuthorName       string
+	ChannelID        string
+	Content          string
+	Timestamp        time.Time
+	ReplyToID        string
+	MentionedUserIDs []string
 
-	DiscordData  *discordgo.MessageCreate
-	SlackData    *slackevents.MessageEvent
-	TelegramData *models.Update
-	CLIData      *CLIMessage
+	Raw any
 }
 
 // CLIMessage is the raw payload of a message read from the CLI adapter.
@@ -122,11 +125,6 @@ type AdapterDeps struct {
 type Bot struct {
 	BotType BotType
 
-	DiscordSession    *discordgo.Session
-	SlackClient       *slack.Client
-	SlackSocketClient *socketmode.Client
-	TelegramBot       *bot.Bot
-
 	adapter Adapter
 
 	commands              []Command
@@ -142,6 +140,15 @@ type Bot struct {
 // New creates a Bot of the given type backed by adapter.
 func New(botType BotType, adapter Adapter) *Bot {
 	return &Bot{BotType: botType, adapter: adapter}
+}
+
+// AdapterAs returns the Bot's adapter as T, reporting whether it is that type.
+// Adapter packages use it to recover their concrete adapter — and the platform
+// client it holds — from a *Bot, so callers get typed access without core
+// importing any platform SDK.
+func AdapterAs[T any](b *Bot) (T, bool) {
+	a, ok := b.adapter.(T)
+	return a, ok
 }
 
 // AddHandler registers cmd, compiling its Pattern and returning an error if it

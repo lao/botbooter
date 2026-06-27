@@ -76,7 +76,7 @@ func newDiscordBot(t *testing.T) *botbooter.Bot {
 	bot, err := botbooter.InitAsDiscordBot("test_token")
 	asserts.NoError(t, err, "InitAsDiscordBot")
 	asserts.NotNil(t, bot, "bot should be initialized")
-	bot.DiscordSession.Client.Transport = stubRoundTripper{
+	botbooter.DiscordSession(bot).Client.Transport = stubRoundTripper{
 		status: http.StatusUnauthorized,
 		body:   `{"message":"401: Unauthorized","code":0}`,
 	}
@@ -176,7 +176,7 @@ func TestBot_GetAttachments(t *testing.T) {
 	t.Run("DiscordBot", func(t *testing.T) {
 		bot := newDiscordBot(t)
 		message := &botbooter.Message{
-			DiscordData: &discordgo.MessageCreate{
+			Raw: &discordgo.MessageCreate{
 				Message: &discordgo.Message{
 					Attachments: []*discordgo.MessageAttachment{
 						{URL: "https://example.com/image.png", Width: 100, Height: 100},
@@ -205,7 +205,7 @@ func TestBot_GetAttachments(t *testing.T) {
 	t.Run("SlackBot", func(t *testing.T) {
 		bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
 		message := &botbooter.Message{
-			SlackData: &slackevents.MessageEvent{
+			Raw: &slackevents.MessageEvent{
 				Files: []slackevents.File{
 					{Mimetype: "image/png", URLPrivate: "https://example.com/image.png"},
 				},
@@ -365,4 +365,42 @@ func TestBot_Start_GracefulShutdownOnSignal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Start did not shut down after SIGTERM")
 	}
+}
+
+func TestRawAccessors(t *testing.T) {
+	t.Run("Discord", func(t *testing.T) {
+		mc := &discordgo.MessageCreate{Message: &discordgo.Message{ID: "M1"}}
+		got, ok := botbooter.DiscordRawEvent(&botbooter.Message{Raw: mc})
+		asserts.True(t, ok, "DiscordRawEvent")
+		asserts.True(t, got == mc, "same pointer")
+	})
+
+	t.Run("Slack", func(t *testing.T) {
+		e := &slackevents.MessageEvent{User: "U1"}
+		got, ok := botbooter.SlackRawEvent(&botbooter.Message{Raw: e})
+		asserts.True(t, ok, "SlackRawEvent")
+		asserts.True(t, got == e, "same pointer")
+	})
+
+	t.Run("WrongPlatform", func(t *testing.T) {
+		_, ok := botbooter.SlackRawEvent(&botbooter.Message{Raw: &discordgo.MessageCreate{}})
+		asserts.False(t, ok, "SlackRawEvent on a Discord message reports false")
+	})
+}
+
+func TestSessionAccessors(t *testing.T) {
+	slackBot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
+	asserts.NotNil(t, botbooter.SlackClient(slackBot), "SlackClient")
+	asserts.NotNil(t, botbooter.SlackSocketClient(slackBot), "SlackSocketClient")
+
+	discordBot, err := botbooter.InitAsDiscordBot("test-token")
+	asserts.NoError(t, err, "InitAsDiscordBot")
+	asserts.NotNil(t, botbooter.DiscordSession(discordBot), "DiscordSession")
+
+	telegramBot, err := botbooter.InitAsTelegramBot("123456:test-token")
+	asserts.NoError(t, err, "InitAsTelegramBot")
+	asserts.NotNil(t, botbooter.TelegramClient(telegramBot), "TelegramClient")
+
+	cliBot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
+	asserts.True(t, botbooter.SlackClient(cliBot) == nil, "SlackClient nil for non-Slack bot")
 }

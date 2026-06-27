@@ -242,3 +242,30 @@ func TestBot_GetAttachments_UnknownBotType(t *testing.T) {
 	asserts.ErrorIs(t, err, ErrUnknownBotType, "GetAttachments with unknown bot type")
 	asserts.Equal(t, len(attachments), 0, "Attachments should be empty for unknown bot type")
 }
+
+// stubAdapter is a minimal core.Adapter used to exercise AdapterAs.
+type stubAdapter struct{ name string }
+
+func (s *stubAdapter) Connect(context.Context, AdapterDeps) error { return nil }
+func (s *stubAdapter) Disconnect() error                          { return nil }
+func (s *stubAdapter) Send(context.Context, string, string) error { return nil }
+func (s *stubAdapter) Attachments(*Message) ([]Attachment, error) { return nil, nil }
+
+type adapterMismatch struct{}
+
+func (a *adapterMismatch) Connect(context.Context, AdapterDeps) error { return nil }
+func (a *adapterMismatch) Disconnect() error                          { return nil }
+func (a *adapterMismatch) Send(context.Context, string, string) error { return nil }
+func (a *adapterMismatch) Attachments(*Message) ([]Attachment, error) { return nil, nil }
+
+func TestAdapterAs(t *testing.T) {
+	stub := &stubAdapter{name: "x"}
+	bot := New(SlackBotType, stub)
+
+	got, ok := AdapterAs[*stubAdapter](bot)
+	asserts.True(t, ok, "AdapterAs should recover the concrete adapter type")
+	asserts.Equal(t, got.name, "x", "recovered adapter identity")
+
+	_, ok = AdapterAs[*adapterMismatch](bot)
+	asserts.False(t, ok, "AdapterAs should report false for a different type")
+}

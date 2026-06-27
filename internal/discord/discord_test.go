@@ -2,7 +2,9 @@ package discord
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -29,9 +31,9 @@ func TestNew(t *testing.T) {
 	asserts.NoError(t, err, "New should not fail for a well-formed token")
 	asserts.NotNil(t, bot, "Bot should be initialized")
 	asserts.Equal(t, bot.BotType, core.DiscordBotType, "Bot type should be Discord")
-	asserts.NotNil(t, bot.DiscordSession, "Discord session should be initialized")
+	asserts.NotNil(t, Session(bot), "Discord session should be initialized")
 	asserts.True(t,
-		bot.DiscordSession.Identify.Intents&discordgo.IntentMessageContent != 0,
+		Session(bot).Identify.Intents&discordgo.IntentMessageContent != 0,
 		"message-content intent should be enabled")
 }
 
@@ -193,4 +195,44 @@ func TestAttachmentsFromMessage(t *testing.T) {
 
 func TestAttachmentsFromMessage_Nil(t *testing.T) {
 	asserts.Equal(t, len(attachmentsFromMessage(nil)), 0, "nil message yields no attachments")
+}
+
+func TestToMessage(t *testing.T) {
+	when := time.Unix(1700000000, 0).UTC()
+	mc := &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID:               "M1",
+		ChannelID:        "C1",
+		Content:          "hi",
+		Timestamp:        when,
+		Author:           &discordgo.User{ID: "U1", Username: "alice"},
+		MessageReference: &discordgo.MessageReference{MessageID: "M0"},
+	}}
+
+	got := toMessage(mc)
+
+	asserts.Equal(t, got.ID, "M1", "ID")
+	asserts.Equal(t, got.UserID, "U1", "UserID")
+	asserts.Equal(t, got.AuthorName, "alice", "AuthorName")
+	asserts.Equal(t, got.ChannelID, "C1", "ChannelID")
+	asserts.Equal(t, got.Content, "hi", "Content")
+	asserts.Equal(t, got.ReplyToID, "M0", "ReplyToID")
+	asserts.Equal(t, got.Timestamp.Unix(), int64(1700000000), "Timestamp")
+	raw, ok := RawEvent(got)
+	asserts.True(t, ok, "RawEvent recovers the event")
+	asserts.True(t, raw == mc, "RawEvent returns the same pointer")
+}
+
+func TestSessionAccessor(t *testing.T) {
+	bot, err := New("test_token")
+	asserts.NoError(t, err, "New")
+	asserts.NotNil(t, Session(bot), "Session accessor returns the gateway session")
+}
+
+func TestToMessageMentions(t *testing.T) {
+	mc := &discordgo.MessageCreate{Message: &discordgo.Message{
+		Author:   &discordgo.User{ID: "U1"},
+		Mentions: []*discordgo.User{{ID: "U2"}, {ID: "U3"}},
+	}}
+	got := toMessage(mc)
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "U2,U3", "mention ids")
 }

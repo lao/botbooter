@@ -25,9 +25,7 @@ func New(token string) (*core.Bot, error) {
 	}
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
-	bot := core.New(core.DiscordBotType, &adapter{session: dg})
-	bot.DiscordSession = dg
-	return bot, nil
+	return core.New(core.DiscordBotType, &adapter{session: dg}), nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
@@ -65,12 +63,34 @@ func (a *adapter) onMessage(ctx context.Context, s *discordgo.Session, m *discor
 		return
 	}
 
-	deps.Dispatch(ctx, &core.Message{
-		UserID:      m.Author.ID,
-		ChannelID:   m.ChannelID,
-		Content:     m.Content,
-		DiscordData: m,
-	})
+	deps.Dispatch(ctx, toMessage(m))
+}
+
+// toMessage maps a Discord message-create event onto a platform-agnostic
+// Message. onMessage passes only fully-formed gateway events; the Author guard
+// tolerates a missing author. Other fields read the embedded *Message, which
+// discordgo always allocates when decoding an event.
+func toMessage(m *discordgo.MessageCreate) *core.Message {
+	msg := &core.Message{
+		ID:        m.ID,
+		ChannelID: m.ChannelID,
+		Content:   m.Content,
+		Timestamp: m.Timestamp,
+		Raw:       m,
+	}
+	if m.Author != nil {
+		msg.UserID = m.Author.ID
+		msg.AuthorName = m.Author.Username
+	}
+	if m.MessageReference != nil {
+		msg.ReplyToID = m.MessageReference.MessageID
+	}
+	for _, u := range m.Mentions {
+		if u != nil {
+			msg.MentionedUserIDs = append(msg.MentionedUserIDs, u.ID)
+		}
+	}
+	return msg
 }
 
 // Disconnect removes the message handler and closes the gateway session.
@@ -94,10 +114,27 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 }
 
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	if m.DiscordData == nil {
+	mc, ok := RawEvent(m)
+	if !ok {
 		return nil, nil
 	}
-	return attachmentsFromMessage(m.DiscordData.Message), nil
+	return attachmentsFromMessage(mc.Message), nil
+}
+
+// RawEvent returns the raw Discord message-create event carried on m, reporting
+// whether m originated from Discord.
+func RawEvent(m *core.Message) (*discordgo.MessageCreate, bool) {
+	e, ok := m.Raw.(*discordgo.MessageCreate)
+	return e, ok
+}
+
+// Session returns the discordgo gateway session backing b, or nil if b is not a
+// Discord bot.
+func Session(b *core.Bot) *discordgo.Session {
+	if a, ok := core.AdapterAs[*adapter](b); ok {
+		return a.session
+	}
+	return nil
 }
 
 func attachmentsFromMessage(m *discordgo.Message) []core.Attachment {

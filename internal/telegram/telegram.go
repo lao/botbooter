@@ -3,9 +3,11 @@
 package telegram
 
 import (
+	"cmp"
 	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -52,9 +54,7 @@ func New(token string) (*core.Bot, error) {
 	a.client = tg
 	a.selfID = tg.ID()
 
-	b := core.New(core.TelegramBotType, a)
-	b.TelegramBot = tg
-	return b, nil
+	return core.New(core.TelegramBotType, a), nil
 }
 
 // Connect starts the getUpdates long-poll loop in the background; it returns immediately.
@@ -99,10 +99,81 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 
 // Attachments returns the files attached to the message's Telegram update.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	if m.TelegramData == nil {
+	u, ok := RawUpdate(m)
+	if !ok {
 		return nil, nil
 	}
-	return attachmentsFromMessage(m.TelegramData.Message), nil
+	return attachmentsFromMessage(u.Message), nil
+}
+
+// RawUpdate returns the raw Telegram update carried on m, reporting whether m
+// originated from Telegram.
+func RawUpdate(m *core.Message) (*models.Update, bool) {
+	u, ok := m.Raw.(*models.Update)
+	return u, ok
+}
+
+// Client returns the go-telegram bot client backing b, or nil if b is not a
+// Telegram bot.
+func Client(b *core.Bot) *bot.Bot {
+	if a, ok := core.AdapterAs[*adapter](b); ok {
+		return a.client
+	}
+	return nil
+}
+
+// toMessage maps a Telegram update's message onto a platform-agnostic Message.
+// onUpdate passes only updates with a non-nil Message; the From guard tolerates
+// a missing sender. Content is the text, or the caption for media-only messages.
+func toMessage(u *models.Update) *core.Message {
+	m := u.Message
+	content := cmp.Or(m.Text, m.Caption)
+	msg := &core.Message{
+		ID:        strconv.Itoa(m.ID),
+		ChannelID: strconv.FormatInt(m.Chat.ID, 10),
+		Content:   content,
+		Timestamp: time.Unix(int64(m.Date), 0).UTC(),
+		Raw:       u,
+	}
+	if m.From != nil {
+		msg.UserID = strconv.FormatInt(m.From.ID, 10)
+		msg.AuthorName = telegramAuthorName(m.From)
+	}
+	if m.ReplyToMessage != nil {
+		msg.ReplyToID = strconv.Itoa(m.ReplyToMessage.ID)
+	}
+	msg.MentionedUserIDs = telegramMentions(m)
+	return msg
+}
+
+// telegramAuthorName prefers the @username, falling back to the first name.
+func telegramAuthorName(u *models.User) string {
+	if u == nil {
+		return ""
+	}
+	if u.Username != "" {
+		return u.Username
+	}
+	return u.FirstName
+}
+
+// telegramMentions collects user ids from text_mention entities — the only
+// entity kind that carries a numeric user id (a plain @username "mention"
+// entity references a name, not an id, so it is skipped). It reads the entities
+// for whichever field supplied Content: message entities for text, caption
+// entities for media. Returns nil when there are none.
+func telegramMentions(m *models.Message) []string {
+	entities := m.Entities
+	if m.Text == "" {
+		entities = m.CaptionEntities
+	}
+	var ids []string
+	for _, e := range entities {
+		if e.Type == models.MessageEntityTypeTextMention && e.User != nil {
+			ids = append(ids, strconv.FormatInt(e.User.ID, 10))
+		}
+	}
+	return ids
 }
 
 func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
@@ -126,17 +197,7 @@ func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 
-	content := m.Text
-	if content == "" {
-		content = m.Caption
-	}
-
-	deps.Dispatch(ctx, &core.Message{
-		UserID:       strconv.FormatInt(m.From.ID, 10),
-		ChannelID:    strconv.FormatInt(m.Chat.ID, 10),
-		Content:      content,
-		TelegramData: u,
-	})
+	deps.Dispatch(ctx, toMessage(u))
 }
 
 func chatID(s string) any {

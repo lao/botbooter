@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	slackapi "github.com/slack-go/slack"
@@ -28,8 +29,8 @@ func TestNew(t *testing.T) {
 
 	asserts.NotNil(t, bot, "Bot should be initialized")
 	asserts.Equal(t, bot.BotType, core.SlackBotType, "Bot type should be Slack")
-	asserts.NotNil(t, bot.SlackClient, "Slack client should be initialized")
-	asserts.NotNil(t, bot.SlackSocketClient, "Slack socket client should be initialized")
+	asserts.NotNil(t, Client(bot), "Slack client should be initialized")
+	asserts.NotNil(t, SocketClient(bot), "Slack socket client should be initialized")
 }
 
 func TestIsBotMessage(t *testing.T) {
@@ -281,4 +282,50 @@ func slackEvent(data any) slackevents.EventsAPIEvent {
 	return slackevents.EventsAPIEvent{
 		InnerEvent: slackevents.EventsAPIInnerEvent{Data: data},
 	}
+}
+
+func TestToMessage(t *testing.T) {
+	msg := &slackevents.MessageEvent{
+		User:            "U123",
+		Channel:         "C456",
+		Text:            "hello",
+		TimeStamp:       "1700000000.000100",
+		ThreadTimeStamp: "1699999999.000000",
+	}
+
+	got := toMessage(msg)
+
+	asserts.Equal(t, got.ID, "1700000000.000100", "ID is the ts")
+	asserts.Equal(t, got.UserID, "U123", "UserID")
+	asserts.Equal(t, got.ChannelID, "C456", "ChannelID")
+	asserts.Equal(t, got.Content, "hello", "Content")
+	asserts.Equal(t, got.AuthorName, "", "AuthorName empty (Slack gives id only)")
+	asserts.Equal(t, got.ReplyToID, "1699999999.000000", "ReplyToID is the thread ts")
+	asserts.Equal(t, got.Timestamp.Unix(), int64(1700000000), "Timestamp seconds")
+	raw, ok := RawEvent(got)
+	asserts.True(t, ok, "RawEvent recovers the event")
+	asserts.True(t, raw == msg, "RawEvent returns the same pointer")
+}
+
+func TestParseSlackTimestamp(t *testing.T) {
+	asserts.True(t, parseSlackTimestamp("").IsZero(), "empty ts is zero time")
+	asserts.True(t, parseSlackTimestamp("not-a-ts").IsZero(), "non-numeric seconds is zero time")
+	asserts.Equal(t, parseSlackTimestamp("1700000000.000100").Unix(), int64(1700000000), "seconds parsed")
+	asserts.Equal(t, parseSlackTimestamp("1700000000.000100").UnixMicro(), int64(1700000000000100), "microsecond precision")
+	asserts.Equal(t, parseSlackTimestamp("1700000000.1").UnixMicro(), int64(1700000000100000), "short fraction padded to microseconds")
+	asserts.Equal(t, parseSlackTimestamp("1700000000.-1").UnixNano(), int64(1700000000)*1_000_000_000, "malformed fraction kept at second precision, not shifted")
+}
+
+func TestClientAccessors(t *testing.T) {
+	bot := New("xapp-test", "xoxb-test")
+	asserts.NotNil(t, Client(bot), "Client accessor returns the web client")
+	asserts.NotNil(t, SocketClient(bot), "SocketClient accessor returns the socket client")
+}
+
+func TestSlackMentions(t *testing.T) {
+	got := toMessage(&slackevents.MessageEvent{Text: "hi <@U2> and <@U3|carol> there"})
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "U2,U3", "parsed mention ids")
+
+	none := toMessage(&slackevents.MessageEvent{Text: "no mentions"})
+	asserts.Equal(t, len(none.MentionedUserIDs), 0, "no mentions -> nil")
 }
