@@ -24,6 +24,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,10 @@ const (
 	// this defends against memory-exhaustion from oversized/never-ending bodies;
 	// real Cloud API payloads are a few KB.
 	maxRequestBytes = 1 << 20 // 1 MiB
+
+	// maxErrorBodyBytes caps how much of a non-2xx Send response body is read into
+	// the returned error, bounding memory and log size from an unexpected response.
+	maxErrorBodyBytes = 4 << 10 // 4 KiB
 )
 
 // ErrMissingConfig is returned by New when a required Config field is empty.
@@ -112,11 +117,10 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.GraphVersion == "" {
 		cfg.GraphVersion = defaultGraphVersion
 	}
-	httpClient := cfg.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: httpClient}, nil
+	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient}, nil
 }
 
 // Connect starts the webhook HTTP server in the background and returns once the
@@ -172,6 +176,7 @@ func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	tokenOK := subtle.ConstantTimeCompare([]byte(q.Get("hub.verify_token")), []byte(a.cfg.VerifyToken)) == 1
 	if q.Get("hub.mode") == "subscribe" && tokenOK {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, q.Get("hub.challenge"))
 		return
@@ -204,12 +209,7 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 
 	go func() {
 		for _, m := range messages {
-			deps.Dispatch(ctx, &core.Message{
-				UserID:       m.From,
-				ChannelID:    m.From,
-				Content:      m.Text,
-				WhatsAppData: m,
-			})
+			deps.Dispatch(ctx, toMessage(m))
 		}
 	}()
 }
@@ -261,7 +261,7 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return fmt.Errorf("whatsapp: send failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	// Drain the success body so the connection can be reused (keep-alive).
@@ -274,15 +274,21 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 // ExtraData carries the *core.WhatsAppMedia; resolve the bytes with GET /{ID}
 // (using your access token) to obtain a short-lived download URL.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	if m.WhatsAppData == nil || m.WhatsAppData.Media == nil {
+	wm, ok := RawMessage(m)
+	if !ok || wm == nil || wm.Media == nil {
 		return nil, nil
 	}
-	media := m.WhatsAppData.Media
 	return []core.Attachment{{
-		IsImage:   strings.HasPrefix(media.MimeType, "image/"),
-		URL:       "",
-		ExtraData: media,
+		IsImage:   strings.HasPrefix(wm.Media.MimeType, "image/"),
+		ExtraData: wm.Media,
 	}}, nil
+}
+
+// RawMessage returns the parsed WhatsApp message carried on m, reporting whether
+// m originated from WhatsApp.
+func RawMessage(m *core.Message) (*core.WhatsAppMessage, bool) {
+	wm, ok := m.Raw.(*core.WhatsAppMessage)
+	return wm, ok
 }
 
 // validateSignature reports whether header is a valid X-Hub-Signature-256 for
@@ -309,6 +315,12 @@ type webhookEnvelope struct {
 	Entry []struct {
 		Changes []struct {
 			Value struct {
+				Contacts []struct {
+					WaID    string `json:"wa_id"`
+					Profile struct {
+						Name string `json:"name"`
+					} `json:"profile"`
+				} `json:"contacts"`
 				Messages []json.RawMessage `json:"messages"`
 			} `json:"value"`
 		} `json:"changes"`
@@ -317,10 +329,11 @@ type webhookEnvelope struct {
 
 // inboundMessage mirrors a single object in value.messages[].
 type inboundMessage struct {
-	From string `json:"from"`
-	ID   string `json:"id"`
-	Type string `json:"type"`
-	Text struct {
+	From      string `json:"from"`
+	ID        string `json:"id"`
+	Timestamp string `json:"timestamp"`
+	Type      string `json:"type"`
+	Text      struct {
 		Body string `json:"body"`
 	} `json:"text"`
 	Image    *mediaObject `json:"image"`
@@ -341,20 +354,12 @@ type mediaObject struct {
 // media returns the media object for whichever media type the message carries,
 // or nil for a non-media message.
 func (in inboundMessage) media() *mediaObject {
-	switch {
-	case in.Image != nil:
-		return in.Image
-	case in.Document != nil:
-		return in.Document
-	case in.Video != nil:
-		return in.Video
-	case in.Audio != nil:
-		return in.Audio
-	case in.Sticker != nil:
-		return in.Sticker
-	default:
-		return nil
+	for _, m := range []*mediaObject{in.Image, in.Document, in.Video, in.Audio, in.Sticker} {
+		if m != nil {
+			return m
+		}
 	}
+	return nil
 }
 
 // parseWebhook extracts inbound user messages from a Cloud API webhook payload.
@@ -371,12 +376,17 @@ func parseWebhook(body []byte) []*core.WhatsAppMessage {
 	var out []*core.WhatsAppMessage
 	for _, entry := range env.Entry {
 		for _, change := range entry.Changes {
+			names := make(map[string]string, len(change.Value.Contacts))
+			for _, c := range change.Value.Contacts {
+				names[c.WaID] = c.Profile.Name
+			}
 			for _, raw := range change.Value.Messages {
 				m, err := parseMessage(raw)
 				if err != nil {
 					log.Printf("whatsapp: skipping unparseable message: %v", err)
 					continue
 				}
+				m.AuthorName = names[m.From]
 				out = append(out, m)
 			}
 		}
@@ -393,11 +403,12 @@ func parseMessage(raw json.RawMessage) (*core.WhatsAppMessage, error) {
 	}
 
 	msg := &core.WhatsAppMessage{
-		From: in.From,
-		ID:   in.ID,
-		Type: in.Type,
-		Text: in.Text.Body,
-		Raw:  raw,
+		From:      in.From,
+		ID:        in.ID,
+		Type:      in.Type,
+		Text:      in.Text.Body,
+		Timestamp: parseTimestamp(in.Timestamp),
+		Raw:       raw,
 	}
 	if media := in.media(); media != nil {
 		msg.Media = &core.WhatsAppMedia{ID: media.ID, MimeType: media.MimeType, Filename: media.Filename}
@@ -406,4 +417,28 @@ func parseMessage(raw json.RawMessage) (*core.WhatsAppMessage, error) {
 		}
 	}
 	return msg, nil
+}
+
+// parseTimestamp converts a Cloud API unix-seconds timestamp string to UTC time,
+// returning the zero time when it is empty or non-numeric.
+func parseTimestamp(s string) time.Time {
+	secs, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(secs, 0).UTC()
+}
+
+// toMessage maps a parsed WhatsApp message onto a platform-agnostic Message; the
+// sender doubles as the channel, since a reply goes back to the same wa_id.
+func toMessage(m *core.WhatsAppMessage) *core.Message {
+	return &core.Message{
+		ID:         m.ID,
+		UserID:     m.From,
+		AuthorName: m.AuthorName,
+		ChannelID:  m.From,
+		Content:    m.Text,
+		Timestamp:  m.Timestamp,
+		Raw:        m,
+	}
 }

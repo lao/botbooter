@@ -185,8 +185,12 @@ func TestHandleWebhook_DispatchesText(t *testing.T) {
 	asserts.Equal(t, got[0].UserID, "123", "UserID should be the sender")
 	asserts.Equal(t, got[0].ChannelID, "123", "ChannelID should be the sender (reply target)")
 	asserts.Equal(t, got[0].Content, "hello", "Content should be the text body")
-	asserts.NotNil(t, got[0].WhatsAppData, "WhatsAppData should be set")
-	asserts.Equal(t, got[0].WhatsAppData.Type, "text", "message type should be text")
+	asserts.Equal(t, got[0].ID, "wamid.1", "ID should be the wamid")
+	asserts.Equal(t, got[0].AuthorName, "Ada", "AuthorName should come from the contacts profile")
+	asserts.True(t, got[0].Timestamp.Equal(time.Unix(1, 0).UTC()), "Timestamp should be parsed from the webhook")
+	wm, ok := RawMessage(got[0])
+	asserts.True(t, ok, "Raw should carry the parsed WhatsAppMessage")
+	asserts.Equal(t, wm.Type, "text", "message type should be text")
 }
 
 func TestHandleWebhook_BadSignature(t *testing.T) {
@@ -235,6 +239,25 @@ func TestParseWebhook_SkipsUnparseable(t *testing.T) {
 
 	asserts.Equal(t, len(messages), 1, "the valid message survives; the bad one is skipped")
 	asserts.Equal(t, messages[0].From, "123", "the surviving message is the valid one")
+}
+
+func TestParseTimestamp(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want time.Time
+	}{
+		{"unix seconds", "1", time.Unix(1, 0).UTC()},
+		{"large value", "1700000000", time.Unix(1700000000, 0).UTC()},
+		{"zero unix is epoch not zero-time", "0", time.Unix(0, 0).UTC()},
+		{"empty", "", time.Time{}},
+		{"non-numeric", "oops", time.Time{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			asserts.True(t, parseTimestamp(c.in).Equal(c.want), "parseTimestamp should match")
+		})
+	}
 }
 
 func TestSend(t *testing.T) {
@@ -294,14 +317,20 @@ func TestAttachments(t *testing.T) {
 		asserts.Equal(t, len(got), 0, "nil data yields no attachments")
 	})
 
+	t.Run("TypedNilRaw", func(t *testing.T) {
+		got, err := a.Attachments(&core.Message{Raw: (*core.WhatsAppMessage)(nil)})
+		asserts.NoError(t, err, "typed-nil Raw should not panic or error")
+		asserts.Equal(t, len(got), 0, "typed-nil Raw yields no attachments")
+	})
+
 	t.Run("NoMedia", func(t *testing.T) {
-		got, err := a.Attachments(&core.Message{WhatsAppData: &core.WhatsAppMessage{Type: "text"}})
+		got, err := a.Attachments(&core.Message{Raw: &core.WhatsAppMessage{Type: "text"}})
 		asserts.NoError(t, err, "text message should not error")
 		asserts.Equal(t, len(got), 0, "text message yields no attachments")
 	})
 
 	t.Run("Image", func(t *testing.T) {
-		got, err := a.Attachments(&core.Message{WhatsAppData: &core.WhatsAppMessage{
+		got, err := a.Attachments(&core.Message{Raw: &core.WhatsAppMessage{
 			Type:  "image",
 			Media: &core.WhatsAppMedia{ID: "MID", MimeType: "image/png"},
 		}})

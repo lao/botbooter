@@ -24,8 +24,6 @@ func TestNewAdapter_DefaultsToStdIO(t *testing.T) {
 	asserts.NotNil(t, a.out, "default output should be set")
 }
 
-// pngMagic is the 8-byte PNG signature; http.DetectContentType reports
-// image/png for any content beginning with it.
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
 
 func writeFile(t *testing.T, path string, data []byte) {
@@ -64,4 +62,16 @@ func TestParseMessage_DirectoryIgnored(t *testing.T) {
 	msg := parseMessage("look " + t.TempDir())
 
 	asserts.Equal(t, len(msg.Attachments), 0, "directories are not attachments")
+}
+
+func TestRawData(t *testing.T) {
+	data := &core.CLIMessage{Text: "hello"}
+	m := &core.Message{Raw: data}
+
+	got, ok := RawData(m)
+	asserts.True(t, ok, "RawData recovers the CLI payload")
+	asserts.True(t, got == data, "RawData returns the same pointer")
+
+	_, ok = RawData(&core.Message{})
+	asserts.False(t, ok, "RawData reports false when Raw is unset")
 }

@@ -1,19 +1,23 @@
 // Package botbooter is a small framework for building chat bots that behave the
-// same way across Slack, Discord and a local CLI. A single [Bot] abstracts over
-// the platforms; you register [Command] handlers and optional [Middleware],
-// then run the bot.
-//
-// This package is a thin facade over the implementation in the internal
-// packages, so that consumers keep a single import path.
+// same way across Slack, Discord, Telegram, WhatsApp and a local CLI. It is a
+// thin facade over the internal packages, so consumers keep a single import path.
 package botbooter
 
 import (
 	"io"
 
+	"github.com/bwmarrin/discordgo"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
+	slackapi "github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
+
 	"github.com/lao/botbooter/internal/cli"
 	"github.com/lao/botbooter/internal/core"
 	"github.com/lao/botbooter/internal/discord"
 	"github.com/lao/botbooter/internal/slack"
+	"github.com/lao/botbooter/internal/telegram"
 	"github.com/lao/botbooter/internal/whatsapp"
 )
 
@@ -21,6 +25,9 @@ import (
 var (
 	ErrUnknownBotType   = core.ErrUnknownBotType
 	ErrAlreadyConnected = core.ErrAlreadyConnected
+	// ErrMissingWhatsAppConfig is returned by InitAsWhatsAppBot when a required
+	// WhatsAppConfig field is empty.
+	ErrMissingWhatsAppConfig = whatsapp.ErrMissingConfig
 )
 
 // BotType identifies the messaging platform a [Bot] is connected to.
@@ -31,11 +38,10 @@ const (
 	SlackBotType    = core.SlackBotType
 	DiscordBotType  = core.DiscordBotType
 	CLIBotType      = core.CLIBotType
+	TelegramBotType = core.TelegramBotType
 	WhatsAppBotType = core.WhatsAppBotType
 )
 
-// These are aliases re-exported from the internal core package, so values are
-// interchangeable with that package.
 type (
 	// Bot is the platform-agnostic chat bot. See [core.Bot].
 	Bot = core.Bot
@@ -59,21 +65,22 @@ type (
 	WhatsAppConfig = whatsapp.Config
 )
 
-// InitAsSlackBot creates a Slack bot that connects via Socket Mode. appToken is
-// the app-level token (xapp-...) and botToken is the bot token (xoxb-...).
+// InitAsSlackBot creates a Slack bot that connects via Socket Mode.
 func InitAsSlackBot(appToken, botToken string) *Bot {
 	return slack.New(appToken, botToken)
 }
 
-// InitAsDiscordBot creates a Discord bot from a bot token. It returns an error
-// if the token cannot be used to construct a session.
+// InitAsDiscordBot creates a Discord bot that connects via the Gateway.
 func InitAsDiscordBot(token string) (*Bot, error) {
 	return discord.New(token)
 }
 
-// InitAsCLIBot creates a bot that reads newline-delimited messages from in and
-// writes replies to out. When in or out is nil, os.Stdin and os.Stdout are used
-// respectively. It is intended for trusted, local input only.
+// InitAsTelegramBot creates a Telegram bot that connects via the Bot API.
+func InitAsTelegramBot(token string) (*Bot, error) {
+	return telegram.New(token)
+}
+
+// InitAsCLIBot creates a local CLI bot.
 func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 	return cli.New(in, out)
 }
@@ -87,3 +94,40 @@ func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 func InitAsWhatsAppBot(cfg WhatsAppConfig) (*Bot, error) {
 	return whatsapp.New(cfg)
 }
+
+// DiscordRawEvent returns the raw Discord event carried on m, reporting whether
+// m originated from Discord.
+func DiscordRawEvent(m *Message) (*discordgo.MessageCreate, bool) { return discord.RawEvent(m) }
+
+// SlackRawEvent returns the raw Slack event carried on m, reporting whether m
+// originated from Slack.
+func SlackRawEvent(m *Message) (*slackevents.MessageEvent, bool) { return slack.RawEvent(m) }
+
+// TelegramRawEvent returns the raw Telegram update carried on m, reporting
+// whether m originated from Telegram.
+func TelegramRawEvent(m *Message) (*models.Update, bool) { return telegram.RawUpdate(m) }
+
+// CLIRawEvent returns the parsed CLI line carried on m, reporting whether m
+// originated from the CLI adapter.
+func CLIRawEvent(m *Message) (*CLIMessage, bool) { return cli.RawData(m) }
+
+// WhatsAppRawEvent returns the parsed WhatsApp message carried on m, reporting
+// whether m originated from WhatsApp. AuthorName and Timestamp on the returned
+// value are enriched, not present in its Raw JSON.
+func WhatsAppRawEvent(m *Message) (*WhatsAppMessage, bool) { return whatsapp.RawMessage(m) }
+
+// DiscordSession returns the discordgo session backing b, or nil if b is not a
+// Discord bot.
+func DiscordSession(b *Bot) *discordgo.Session { return discord.Session(b) }
+
+// SlackClient returns the Slack Web API client backing b, or nil if b is not a
+// Slack bot.
+func SlackClient(b *Bot) *slackapi.Client { return slack.Client(b) }
+
+// SlackSocketClient returns the Socket Mode client backing b, or nil if b is not
+// a Slack bot.
+func SlackSocketClient(b *Bot) *socketmode.Client { return slack.SocketClient(b) }
+
+// TelegramClient returns the go-telegram bot client backing b, or nil if b is
+// not a Telegram bot.
+func TelegramClient(b *Bot) *bot.Bot { return telegram.Client(b) }
