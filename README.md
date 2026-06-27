@@ -6,15 +6,18 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/lao/botbooter)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
-Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, or stdin.
+Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, or stdin.
 
-> ⚠️ **Pre-1.0** — the public API may still change.
+> ⚠️ **Not production ready.** botbooter is pre-1.0 and under active development. The
+> public API may change without notice, and it has not been hardened or battle-tested for
+> production workloads. Use it for experiments and side projects; pin a specific version and
+> review changes before depending on it for anything critical.
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (Cloud API webhook), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
@@ -63,6 +66,8 @@ Or run the bundled example directly:
 go run ./examples/v1            # CLI mode (default, no credentials)
 go run ./examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 go run ./examples/v1 discord    # uses DISCORD_BOT_TOKEN
+go run ./examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
+go run ./examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
 ```
 
 ## Concepts
@@ -74,6 +79,8 @@ go run ./examples/v1 discord    # uses DISCORD_BOT_TOKEN
 | `InitAsCLIBot(in io.Reader, out io.Writer)` | `*Bot` | Local adapter; `nil` defaults to stdin/stdout. |
 | `InitAsSlackBot(appToken, botToken string)` | `*Bot` | Socket Mode (`xapp-…` + `xoxb-…`). |
 | `InitAsDiscordBot(token string)` | `(*Bot, error)` | Enables the message-content intent (see below). |
+| `InitAsTelegramBot(token string)` | `(*Bot, error)` | Long polling via `getUpdates`; BotFather token. |
+| `InitAsWhatsAppBot(cfg WhatsAppConfig)` | `(*Bot, error)` | Meta Cloud API; runs an inbound webhook HTTP server. |
 
 ### Handlers, commands and middleware
 
@@ -119,6 +126,38 @@ echo here is my screenshot /tmp/cat.png
   → attachment (image): /tmp/cat.png
 ```
 
+### Message fields
+
+Every `Message` carries normalized, platform-agnostic fields so handlers rarely
+need the raw event. `UserID`, `ChannelID` and `Content` are always set; the rest
+are best-effort and stay at their zero value when a platform cannot supply them:
+
+| Field | Meaning |
+|---|---|
+| `ID` | Platform message id (`""` for CLI). |
+| `AuthorName` | Display/username (empty on Slack, which delivers only an id). |
+| `Timestamp` | Message time as a `time.Time` (zero on CLI). |
+| `ReplyToID` | Id of the replied-to/thread message (`""` when not a reply). |
+| `MentionedUserIDs` | Mentioned user ids; Telegram contributes only `text_mention` ids. |
+
+### Raw platform access
+
+When you need something the normalized fields don't carry, reach the originating
+event or the underlying SDK client through typed accessors — `internal/core`
+stays free of every platform SDK, so these live on the facade:
+
+```go
+if ev, ok := botbooter.SlackRawEvent(m); ok {
+	_ = ev.ThreadTimeStamp // anything on the raw *slackevents.MessageEvent
+}
+
+// Raw event per platform: DiscordRawEvent, SlackRawEvent, TelegramRawEvent, WhatsAppRawEvent, CLIRawEvent.
+// Underlying client per platform (WhatsApp has none — it speaks the Cloud API over plain HTTP):
+client := botbooter.SlackClient(bot)         // *slack.Client (nil if not a Slack bot)
+session := botbooter.DiscordSession(bot)     // *discordgo.Session
+tg := botbooter.TelegramClient(bot)          // *bot.Bot
+```
+
 ### Lifecycle
 
 ```go
@@ -136,31 +175,17 @@ if err := bot.Run(ctx); err != nil { // connect, serve, and shut down on cancel
 
 ## Platform setup
 
-### Slack
+Each platform takes different credentials. Full step-by-step setup,
+[troubleshooting](docs/platforms.md#no-response), and the official
+documentation for each live in **[docs/platforms.md](docs/platforms.md)**.
 
-1. Create a Slack app and enable **Socket Mode** (*Settings → Socket Mode*). This generates an **app-level token** (`xapp-…`) with the `connections:write` scope.
-2. Add the **bot token scopes** under *Features → **OAuth & Permissions** → Scopes → Bot Token Scopes*:
-   - `chat:write` — required to send replies.
-   - `channels:history` (and `im:history`, `groups:history`, `mpim:history` as needed) — required to *receive* message events from those channel types.
-3. Subscribe to the matching message events under *Features → Event Subscriptions → Subscribe to bot events*: `message.channels` (and/or `message.im`, …).
-4. Install the app to your workspace (*OAuth & Permissions → Install*) and copy the **bot token** (`xoxb-…`). Re-install whenever you change scopes.
-5. Invite the bot to a channel (`/invite @your-bot`) and post from a **human** account (the bot ignores its own and other bots' messages).
-
-```go
-bot := botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
-```
-
-> **No response?** It's almost always missing bot token scopes (no `*:history` ⇒ no events delivered even when subscribed; no `chat:write` ⇒ can't reply), the bot not being invited to the channel, or re-install skipped after a scope change.
-
-### Discord
-
-1. Create an application + bot in the [Discord Developer Portal](https://discord.com/developers/applications) and copy the bot token.
-2. **Enable the *Message Content Intent*** under *Bot → Privileged Gateway Intents*. botbooter requests this intent so handlers receive message text — without it Discord delivers empty content.
-3. Invite the bot to your server with the appropriate scopes/permissions.
-
-```go
-bot, err := botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
-```
+| Platform | What you need | Setup |
+|---|---|---|
+| Slack | `xapp-…` app-level token + `xoxb-…` bot token | [docs/platforms.md](docs/platforms.md#slack) |
+| Discord | bot token + Message Content Intent | [docs/platforms.md](docs/platforms.md#discord) |
+| Telegram | BotFather bot token | [docs/platforms.md](docs/platforms.md#telegram) |
+| WhatsApp | Cloud API token + phone-number id + app secret + verify token + bind addr | [docs/platforms.md](docs/platforms.md#whatsapp) |
+| CLI | nothing (local stdin/stdout) | [docs/platforms.md](docs/platforms.md#cli) |
 
 ## Development
 
@@ -195,9 +220,9 @@ Alternatives:
 
 ## Roadmap
 
-- [x] Slack, Discord and CLI adapters
+- [x] Slack, Discord, Telegram, WhatsApp and CLI adapters
 - [x] Middleware and attachment abstraction
-- [ ] Microsoft Teams, Telegram, WhatsApp adapters
+- [ ] Microsoft Teams adapter
 - [ ] Richer message types (blocks, embeds)
 
 ## Contributing

@@ -3,7 +3,9 @@ package botbooter_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/go-telegram/bot/models"
 	"github.com/slack-go/slack/slackevents"
 
 	"github.com/lao/botbooter"
@@ -39,23 +42,45 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// emptyReader is an io.Reader that is immediately at EOF.
 type emptyReader struct{}
 
 func (emptyReader) Read([]byte) (int, error) { return 0, io.EOF }
 
-// errReader is an io.Reader that always fails with a fixed error.
 type errReader struct{ err error }
 
 func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
-// newDiscordBot constructs a Discord bot for tests, failing the test if
-// construction errors.
+// stubRoundTripper returns a canned response so Discord adapter tests stay
+// hermetic: discordgo request/response handling runs but never reaches the
+// Discord API.
+type stubRoundTripper struct {
+	status int
+	body   string
+}
+
+func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// The RoundTripper contract requires closing the request body.
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+	return &http.Response{
+		StatusCode: s.status,
+		Status:     fmt.Sprintf("%d %s", s.status, http.StatusText(s.status)),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(s.body)),
+		Request:    req,
+	}, nil
+}
+
 func newDiscordBot(t *testing.T) *botbooter.Bot {
 	t.Helper()
 	bot, err := botbooter.InitAsDiscordBot("test_token")
 	asserts.NoError(t, err, "InitAsDiscordBot")
 	asserts.NotNil(t, bot, "bot should be initialized")
+	botbooter.DiscordSession(bot).Client.Transport = stubRoundTripper{
+		status: http.StatusUnauthorized,
+		body:   `{"message":"401: Unauthorized","code":0}`,
+	}
 	return bot
 }
 
@@ -64,8 +89,6 @@ func mustAddHandler(t *testing.T, bot *botbooter.Bot, pattern string, handler bo
 	asserts.NoError(t, bot.AddHandler(botbooter.Command{Pattern: pattern, Handler: handler}), "AddHandler "+pattern)
 }
 
-// pngMagic is the 8-byte PNG signature; http.DetectContentType reports
-// image/png for any content beginning with it.
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
 
 func writeFile(t *testing.T, path string, data []byte) {
@@ -125,6 +148,13 @@ func TestBot_SendMessage(t *testing.T) {
 	})
 
 	t.Run("SlackBotNotConnected", func(t *testing.T) {
+		// slack-go's Client keeps its http client unexported with no
+		// post-construction setter, so SendMessage makes a real Slack Web API
+		// call. Gate it behind the same env var as the other network test
+		// rather than expand the public API just to inject a transport.
+		if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
+			t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; SendMessage performs a real Slack Web API call")
+		}
 		bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
 
 		err := bot.SendMessage("channel123", "test message")
@@ -147,7 +177,7 @@ func TestBot_GetAttachments(t *testing.T) {
 	t.Run("DiscordBot", func(t *testing.T) {
 		bot := newDiscordBot(t)
 		message := &botbooter.Message{
-			DiscordData: &discordgo.MessageCreate{
+			Raw: &discordgo.MessageCreate{
 				Message: &discordgo.Message{
 					Attachments: []*discordgo.MessageAttachment{
 						{URL: "https://example.com/image.png", Width: 100, Height: 100},
@@ -176,7 +206,7 @@ func TestBot_GetAttachments(t *testing.T) {
 	t.Run("SlackBot", func(t *testing.T) {
 		bot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
 		message := &botbooter.Message{
-			SlackData: &slackevents.MessageEvent{
+			Raw: &slackevents.MessageEvent{
 				Files: []slackevents.File{
 					{Mimetype: "image/png", URLPrivate: "https://example.com/image.png"},
 				},
@@ -336,4 +366,74 @@ func TestBot_Start_GracefulShutdownOnSignal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Start did not shut down after SIGTERM")
 	}
+}
+
+func TestRawAccessors(t *testing.T) {
+	t.Run("Discord", func(t *testing.T) {
+		mc := &discordgo.MessageCreate{Message: &discordgo.Message{ID: "M1"}}
+		got, ok := botbooter.DiscordRawEvent(&botbooter.Message{Raw: mc})
+		asserts.True(t, ok, "DiscordRawEvent")
+		asserts.True(t, got == mc, "same pointer")
+	})
+
+	t.Run("Slack", func(t *testing.T) {
+		e := &slackevents.MessageEvent{User: "U1"}
+		got, ok := botbooter.SlackRawEvent(&botbooter.Message{Raw: e})
+		asserts.True(t, ok, "SlackRawEvent")
+		asserts.True(t, got == e, "same pointer")
+	})
+
+	t.Run("Telegram", func(t *testing.T) {
+		u := &models.Update{ID: 1}
+		got, ok := botbooter.TelegramRawEvent(&botbooter.Message{Raw: u})
+		asserts.True(t, ok, "TelegramRawEvent")
+		asserts.True(t, got == u, "same pointer")
+	})
+
+	t.Run("CLI", func(t *testing.T) {
+		c := &botbooter.CLIMessage{Text: "hi"}
+		got, ok := botbooter.CLIRawEvent(&botbooter.Message{Raw: c})
+		asserts.True(t, ok, "CLIRawEvent")
+		asserts.True(t, got == c, "same pointer")
+	})
+
+	t.Run("WhatsApp", func(t *testing.T) {
+		wm := &botbooter.WhatsAppMessage{Type: "text"}
+		got, ok := botbooter.WhatsAppRawEvent(&botbooter.Message{Raw: wm})
+		asserts.True(t, ok, "WhatsAppRawEvent")
+		asserts.True(t, got == wm, "same pointer")
+	})
+
+	t.Run("WrongPlatform", func(t *testing.T) {
+		_, ok := botbooter.SlackRawEvent(&botbooter.Message{Raw: &discordgo.MessageCreate{}})
+		asserts.False(t, ok, "SlackRawEvent on a Discord message reports false")
+	})
+}
+
+func TestSessionAccessors(t *testing.T) {
+	slackBot := botbooter.InitAsSlackBot("xapp-test", "xoxb-test")
+	asserts.NotNil(t, botbooter.SlackClient(slackBot), "SlackClient")
+	asserts.NotNil(t, botbooter.SlackSocketClient(slackBot), "SlackSocketClient")
+
+	discordBot, err := botbooter.InitAsDiscordBot("test-token")
+	asserts.NoError(t, err, "InitAsDiscordBot")
+	asserts.NotNil(t, botbooter.DiscordSession(discordBot), "DiscordSession")
+
+	telegramBot, err := botbooter.InitAsTelegramBot("123456:test-token")
+	asserts.NoError(t, err, "InitAsTelegramBot")
+	asserts.NotNil(t, botbooter.TelegramClient(telegramBot), "TelegramClient")
+
+	whatsappBot, err := botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{
+		Token: "t", PhoneNumberID: "p", AppSecret: "s", VerifyToken: "v", Addr: ":0",
+	})
+	asserts.NoError(t, err, "InitAsWhatsAppBot")
+	asserts.Equal(t, whatsappBot.BotType, botbooter.WhatsAppBotType, "WhatsApp bot type")
+
+	cliBot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
+	asserts.True(t, botbooter.SlackClient(cliBot) == nil, "SlackClient nil for non-Slack bot")
+}
+
+func TestInitAsWhatsAppBot_MissingConfig(t *testing.T) {
+	_, err := botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{})
+	asserts.ErrorIs(t, err, botbooter.ErrMissingWhatsAppConfig, "empty config should report the sentinel")
 }

@@ -1,5 +1,4 @@
-// Package asserts holds tiny test assertion helpers shared across botbooter's
-// test packages. It is imported only from _test.go files.
+// Package asserts holds tiny test assertion helpers shared across botbooter.
 package asserts
 
 import (
@@ -31,8 +30,7 @@ func Error(t *testing.T, err error, message string) {
 	}
 }
 
-// ErrorIs fails the test with message if err does not match target under
-// errors.Is.
+// ErrorIs fails the test with message if err does not match target under errors.Is.
 func ErrorIs(t *testing.T, err, target error, message string) {
 	t.Helper()
 	if !errors.Is(err, target) {

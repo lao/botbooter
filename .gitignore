@@ -15,3 +15,8 @@ coverage.out
 .DS_Store
 .idea/
 .vscode/
+.claude/
+.plans/
+todo.md
+docs/superpowers/
+v1
