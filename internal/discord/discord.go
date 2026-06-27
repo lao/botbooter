@@ -87,7 +87,7 @@ func toMessage(m *discordgo.MessageCreate) *core.Message {
 	}
 	for _, u := range m.Mentions {
 		if u != nil {
-			msg.Mentions = append(msg.Mentions, u.ID)
+			msg.MentionedUserIDs = append(msg.MentionedUserIDs, u.ID)
 		}
 	}
 	return msg
@@ -114,8 +114,8 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 }
 
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	mc, _ := m.Raw.(*discordgo.MessageCreate)
-	if mc == nil {
+	mc, ok := RawEvent(m)
+	if !ok {
 		return nil, nil
 	}
 	return attachmentsFromMessage(mc.Message), nil

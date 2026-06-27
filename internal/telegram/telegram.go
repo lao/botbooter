@@ -3,6 +3,7 @@
 package telegram
 
 import (
+	"cmp"
 	"context"
 	"strconv"
 	"strings"
@@ -98,8 +99,8 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 
 // Attachments returns the files attached to the message's Telegram update.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
-	u, _ := m.Raw.(*models.Update)
-	if u == nil {
+	u, ok := RawUpdate(m)
+	if !ok {
 		return nil, nil
 	}
 	return attachmentsFromMessage(u.Message), nil
@@ -126,10 +127,7 @@ func Client(b *core.Bot) *bot.Bot {
 // a missing sender. Content is the text, or the caption for media-only messages.
 func toMessage(u *models.Update) *core.Message {
 	m := u.Message
-	content := m.Text
-	if content == "" {
-		content = m.Caption
-	}
+	content := cmp.Or(m.Text, m.Caption)
 	msg := &core.Message{
 		ID:        strconv.Itoa(m.ID),
 		ChannelID: strconv.FormatInt(m.Chat.ID, 10),
@@ -144,7 +142,7 @@ func toMessage(u *models.Update) *core.Message {
 	if m.ReplyToMessage != nil {
 		msg.ReplyToID = strconv.Itoa(m.ReplyToMessage.ID)
 	}
-	msg.Mentions = telegramMentions(m)
+	msg.MentionedUserIDs = telegramMentions(m)
 	return msg
 }
 

@@ -133,7 +133,7 @@ are best-effort and stay at their zero value when a platform cannot supply them:
 | `AuthorName` | Display/username (empty on Slack, which delivers only an id). |
 | `Timestamp` | Message time as a `time.Time` (zero on CLI). |
 | `ReplyToID` | Id of the replied-to/thread message (`""` when not a reply). |
-| `Mentions` | Mentioned user ids; Telegram contributes only `text_mention` ids. |
+| `MentionedUserIDs` | Mentioned user ids; Telegram contributes only `text_mention` ids. |
 
 ### Raw platform access
 
