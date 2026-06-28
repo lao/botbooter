@@ -43,9 +43,13 @@ func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botboot
 	log.Printf("  ReplyToID:  %s", message.ReplyToID)
 	log.Printf("  MentionedUserIDs: %v", message.MentionedUserIDs)
 
-	// URL is empty on platforms that deliver media by id rather than link (e.g.
-	// Telegram carries the FileID in ExtraData); resolve it via the raw client if
-	// you need the bytes.
+	// URL is empty on platforms that deliver media by id rather than link:
+	// Telegram leaves it blank by design (the FileID rides in ExtraData). Call
+	// botbooter.TelegramResolveAttachmentURL(ctx, bot, a) to fetch a download link
+	// on demand — that link embeds the bot token, so never log it in production.
+	// ExtraData below also carries user-controlled fields (e.g. a Telegram
+	// document's FileName); this demo prints it for illustration — don't log it
+	// raw in production.
 	if attachments, err := bot.GetAttachments(message); err != nil {
 		log.Println("  failed to get attachments:", err)
 	} else {

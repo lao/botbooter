@@ -1,10 +1,13 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -354,6 +357,112 @@ func TestAttachmentsFromMessage(t *testing.T) {
 
 		asserts.Equal(t, len(att), 2, "photo and document each yield an attachment")
 	})
+}
+
+func TestFileIDOf(t *testing.T) {
+	asserts.Equal(t, fileIDOf(models.PhotoSize{FileID: "p"}), "p", "photo size value yields its FileID")
+	asserts.Equal(t, fileIDOf(&models.PhotoSize{FileID: "pp"}), "pp", "photo size pointer also yields its FileID")
+	asserts.Equal(t, fileIDOf(&models.Document{FileID: "d"}), "d", "document pointer yields its FileID")
+	asserts.Equal(t, fileIDOf((*models.Document)(nil)), "", "nil document pointer is guarded")
+	asserts.Equal(t, fileIDOf(nil), "", "nil ExtraData yields no FileID")
+	asserts.Equal(t, fileIDOf("unrelated"), "", "unrecognized ExtraData yields no FileID")
+}
+
+func TestResolveAttachmentURL(t *testing.T) {
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseMultipartForm(1 << 20)
+		if got := r.FormValue("file_id"); got != "large" {
+			http.Error(w, "unexpected file_id: "+got, http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"file_id":"large","file_path":"photos/file_1.jpg"}}`))
+	})
+	b := core.New(core.TelegramBotType, a)
+
+	url, err := ResolveAttachmentURL(context.Background(), b,
+		core.Attachment{ExtraData: models.PhotoSize{FileID: "large"}})
+
+	asserts.NoError(t, err, "getFile succeeds against the stub server")
+	want := a.client.FileDownloadLink(&models.File{FilePath: "photos/file_1.jpg"})
+	asserts.Equal(t, url, want, "URL is the download link for the resolved file_path")
+}
+
+func TestResolveAttachmentURL_GetFileError(t *testing.T) {
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: file is too big"}`))
+	})
+	b := core.New(core.TelegramBotType, a)
+
+	url, err := ResolveAttachmentURL(context.Background(), b,
+		core.Attachment{ExtraData: models.PhotoSize{FileID: "huge"}})
+
+	asserts.Error(t, err, "a getFile failure is surfaced")
+	asserts.Equal(t, url, "", "no URL is returned on error")
+}
+
+func TestResolveAttachmentURL_NotTelegram(t *testing.T) {
+	b := core.New(core.CLIBotType, nil)
+
+	url, err := ResolveAttachmentURL(context.Background(), b,
+		core.Attachment{ExtraData: models.PhotoSize{FileID: "x"}})
+
+	asserts.ErrorIs(t, err, ErrNotTelegramBot, "a non-Telegram bot is rejected")
+	asserts.Equal(t, url, "", "no URL for a non-Telegram bot")
+}
+
+func TestResolveAttachmentURL_NoFileID(t *testing.T) {
+	a := newStubAdapter(t, 0, func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("getFile must not be called when the attachment has no file id")
+	})
+	b := core.New(core.TelegramBotType, a)
+
+	url, err := ResolveAttachmentURL(context.Background(), b, core.Attachment{})
+
+	asserts.NoError(t, err, "an attachment without a file id is not an error")
+	asserts.Equal(t, url, "", "no file id yields an empty URL")
+}
+
+// captureLog redirects the default logger to a buffer for the test, restoring it
+// afterward, so a test can assert on what ResolveAttachmentURL logged.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	})
+	return &buf
+}
+
+func resolvePhoto(t *testing.T) error {
+	t.Helper()
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"file_id":"f","file_path":"photos/file_1.jpg"}}`))
+	})
+	b := core.New(core.TelegramBotType, a)
+	_, err := ResolveAttachmentURL(context.Background(), b,
+		core.Attachment{ExtraData: models.PhotoSize{FileID: "f"}})
+	return err
+}
+
+func TestResolveAttachmentURL_WarnsTokenInURL(t *testing.T) {
+	t.Setenv(EnvSuppressURLWarning, "") // neutralize any ambient opt-out
+	logs := captureLog(t)
+
+	asserts.NoError(t, resolvePhoto(t), "getFile succeeds against the stub server")
+	asserts.True(t, strings.Contains(logs.String(), "embeds the bot token"),
+		"a successful resolve warns that the URL carries the token")
+}
+
+func TestResolveAttachmentURL_SuppressesWarning(t *testing.T) {
+	t.Setenv(EnvSuppressURLWarning, "1")
+	logs := captureLog(t)
+
+	asserts.NoError(t, resolvePhoto(t), "getFile succeeds against the stub server")
+	asserts.Equal(t, logs.String(), "", "the warning is silenced when the env var is set")
 }
 
 func TestSend(t *testing.T) {
