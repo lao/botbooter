@@ -1,10 +1,13 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -417,6 +420,49 @@ func TestResolveAttachmentURL_NoFileID(t *testing.T) {
 
 	asserts.NoError(t, err, "an attachment without a file id is not an error")
 	asserts.Equal(t, url, "", "no file id yields an empty URL")
+}
+
+// captureLog redirects the default logger to a buffer for the test, restoring it
+// afterward, so a test can assert on what ResolveAttachmentURL logged.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(flags)
+	})
+	return &buf
+}
+
+func resolvePhoto(t *testing.T) error {
+	t.Helper()
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"file_id":"f","file_path":"photos/file_1.jpg"}}`))
+	})
+	b := core.New(core.TelegramBotType, a)
+	_, err := ResolveAttachmentURL(context.Background(), b,
+		core.Attachment{ExtraData: models.PhotoSize{FileID: "f"}})
+	return err
+}
+
+func TestResolveAttachmentURL_WarnsTokenInURL(t *testing.T) {
+	t.Setenv(EnvSuppressURLWarning, "") // neutralize any ambient opt-out
+	logs := captureLog(t)
+
+	asserts.NoError(t, resolvePhoto(t), "getFile succeeds against the stub server")
+	asserts.True(t, strings.Contains(logs.String(), "embeds the bot token"),
+		"a successful resolve warns that the URL carries the token")
+}
+
+func TestResolveAttachmentURL_SuppressesWarning(t *testing.T) {
+	t.Setenv(EnvSuppressURLWarning, "1")
+	logs := captureLog(t)
+
+	asserts.NoError(t, resolvePhoto(t), "getFile succeeds against the stub server")
+	asserts.Equal(t, logs.String(), "", "the warning is silenced when the env var is set")
 }
 
 func TestSend(t *testing.T) {

@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,18 +19,12 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// adapter owns a client factory plus a long-lived client used for outbound Send
-// and the exported escape hatch. It holds no per-connection poll state: Connect
-// builds a fresh client per run (so a canceled run's buffered updates can't carry
-// over), and dispatch callbacks ride on the context Connect hands that poll loop.
 type adapter struct {
 	newClient func() (*bot.Bot, error)
 	client    *bot.Bot
 	selfID    int64
 }
 
-// depsContextKey keys the per-connection deps on the poll loop context; a
-// dedicated type avoids collisions with other context values (SA1029).
 type depsContextKey struct{}
 
 func withDeps(ctx context.Context, deps *core.AdapterDeps) context.Context {
@@ -43,8 +39,6 @@ func depsFrom(ctx context.Context) *core.AdapterDeps {
 // New creates a Telegram bot from a BotFather token.
 func New(token string) (*core.Bot, error) {
 	a := &adapter{}
-	// WithSkipGetMe avoids a network round-trip; the bot id comes from the token
-	// prefix instead. The factory lets Connect build a fresh client per run.
 	a.newClient = func() (*bot.Bot, error) {
 		return bot.New(token, bot.WithDefaultHandler(a.onUpdate), bot.WithSkipGetMe())
 	}
@@ -59,13 +53,7 @@ func New(token string) (*core.Bot, error) {
 	return core.New(core.TelegramBotType, a), nil
 }
 
-// Connect starts the getUpdates long-poll loop in the background; it returns immediately.
-//
-// Each connection builds its own *bot.Bot, so its update channel — and anything the
-// library buffered in it — dies when the run is canceled. A shared client would let an
-// update buffered at cancel time be drained, and dispatched, by the next connection.
-// Dispatch callbacks likewise ride on the context handed to Start, so a straggling
-// update reaches its own run's deps and is dropped once that run is canceled.
+// Connect starts the getUpdates long-poll loop in the background and returns immediately.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	ctx = withDeps(ctx, &deps)
 
@@ -75,9 +63,6 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	}
 
 	go func() {
-		// Start blocks until ctx is canceled (getUpdates retries every non-context
-		// error forever), so ctx.Err() is always non-nil here; report it like Slack
-		// so Run can swallow the clean shutdown. Start has no other exit — no guard.
 		tg.Start(ctx)
 		deps.Done(ctx.Err())
 	}()
@@ -85,12 +70,11 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// Disconnect is a no-op: the poll loop is stopped by canceling the run context.
+// Disconnect is a no-op; the poll loop stops when the run context is canceled.
 func (a *adapter) Disconnect() error {
 	return nil
 }
 
-// Send delivers text to the chat identified by channelID.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	_, err := a.client.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: chatID(channelID),
@@ -99,7 +83,6 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	return err
 }
 
-// Attachments returns the files attached to the message's Telegram update.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	u, ok := RawUpdate(m)
 	if !ok {
@@ -115,8 +98,7 @@ func RawUpdate(m *core.Message) (*models.Update, bool) {
 	return u, ok
 }
 
-// Client returns the go-telegram bot client backing b, or nil if b is not a
-// Telegram bot.
+// Client returns the go-telegram bot client backing b, or nil if b is not a Telegram bot.
 func Client(b *core.Bot) *bot.Bot {
 	if a, ok := core.AdapterAs[*adapter](b); ok {
 		return a.client
@@ -124,17 +106,20 @@ func Client(b *core.Bot) *bot.Bot {
 	return nil
 }
 
-// ErrNotTelegramBot is returned by [ResolveAttachmentURL] when b is not a
-// Telegram bot.
+// ErrNotTelegramBot is returned by [ResolveAttachmentURL] when b is not a Telegram bot.
 var ErrNotTelegramBot = errors.New("botbooter: not a telegram bot")
 
-// ResolveAttachmentURL fetches a fresh, downloadable URL for a Telegram
-// attachment via the Bot API getFile method. It returns [ErrNotTelegramBot] if b
-// is not a Telegram bot, and ("", nil) if att carries no Telegram file id.
+// EnvSuppressURLWarning names the environment variable that silences the
+// plaintext-token warning
+const EnvSuppressURLWarning = "BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING"
+
+// ResolveAttachmentURL fetches a downloadable URL for a Telegram attachment via
+// the Bot API getFile method. It returns [ErrNotTelegramBot] if b is not a
+// Telegram bot, and ("", nil) if att carries no Telegram file id.
 //
-// The returned URL embeds the bot token in plaintext and is therefore secret —
-// do not log it. Telegram links stay valid for about an hour; call again to
-// refresh. getFile fails for files larger than 20 MB.
+// The returned URL embeds the bot token in plaintext and is secret — do not log
+// it. Each successful resolve warns to that effect unless [EnvSuppressURLWarning]
+// is set.
 func ResolveAttachmentURL(ctx context.Context, b *core.Bot, att core.Attachment) (string, error) {
 	a, ok := core.AdapterAs[*adapter](b)
 	if !ok {
@@ -146,16 +131,20 @@ func ResolveAttachmentURL(ctx context.Context, b *core.Bot, att core.Attachment)
 	}
 	f, err := a.client.GetFile(ctx, &bot.GetFileParams{FileID: id})
 	if err != nil {
-		// go-telegram redacts the bot token from *url.Error transport failures.
 		return "", fmt.Errorf("resolve telegram file %s: %w", id, err)
 	}
+	warnTokenInURL()
 	return a.client.FileDownloadLink(f), nil
 }
 
-// fileIDOf extracts the Telegram FileID from an attachment's ExtraData. The
-// models.PhotoSize (value) and *models.Document cases mirror what
-// attachmentsFromMessage stores; the pointer variants are accepted defensively
-// since ResolveAttachmentURL is public and may be handed a hand-built Attachment.
+func warnTokenInURL() {
+	if os.Getenv(EnvSuppressURLWarning) != "" {
+		return
+	}
+	log.Printf("botbooter: telegram download URL embeds the bot token in plaintext; "+
+		"treat it as a secret and do not log it (set %s to silence)", EnvSuppressURLWarning)
+}
+
 func fileIDOf(extra any) string {
 	switch v := extra.(type) {
 	case models.PhotoSize:
@@ -175,9 +164,6 @@ func fileIDOf(extra any) string {
 	}
 }
 
-// toMessage maps a Telegram update's message onto a platform-agnostic Message.
-// onUpdate passes only updates with a non-nil Message; the From guard tolerates
-// a missing sender. Content is the text, or the caption for media-only messages.
 func toMessage(u *models.Update) *core.Message {
 	m := u.Message
 	content := cmp.Or(m.Text, m.Caption)
@@ -199,7 +185,6 @@ func toMessage(u *models.Update) *core.Message {
 	return msg
 }
 
-// telegramAuthorName prefers the @username, falling back to the first name.
 func telegramAuthorName(u *models.User) string {
 	if u == nil {
 		return ""
@@ -210,11 +195,8 @@ func telegramAuthorName(u *models.User) string {
 	return u.FirstName
 }
 
-// telegramMentions collects user ids from text_mention entities — the only
-// entity kind that carries a numeric user id (a plain @username "mention"
-// entity references a name, not an id, so it is skipped). It reads the entities
-// for whichever field supplied Content: message entities for text, caption
-// entities for media. Returns nil when there are none.
+// telegramMentions collects user ids from text_mention entities, the only entity
+// kind carrying a numeric user id; a plain @username mention references a name.
 func telegramMentions(m *models.Message) []string {
 	entities := m.Entities
 	if m.Text == "" {
@@ -230,8 +212,6 @@ func telegramMentions(m *models.Message) []string {
 }
 
 func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
-	// Drop updates once the run context is canceled: the library can invoke this
-	// on a handler goroutine after Start has returned (see Connect).
 	if ctx.Err() != nil {
 		return
 	}
@@ -244,7 +224,6 @@ func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 
-	// deps rides on this connection's context (see Connect).
 	deps := depsFrom(ctx)
 	if deps == nil {
 		return
@@ -260,19 +239,13 @@ func chatID(s string) any {
 	return s
 }
 
-// attachmentsFromMessage converts a message's photo and document into attachments
-// (nil for a nil message); other media kinds are not surfaced. URLs are left empty
-// because Telegram delivers media by FileID, not URL; the FileID-bearing struct is
-// carried in ExtraData, which [ResolveAttachmentURL] turns into a download link.
 func attachmentsFromMessage(m *models.Message) []core.Attachment {
 	if m == nil {
 		return nil
 	}
 
-	// Non-nil, possibly-empty slice, mirroring the Discord and Slack adapters.
 	attachments := make([]core.Attachment, 0, 2)
 
-	// Photo sizes are in ascending order; the last is the largest.
 	if len(m.Photo) > 0 {
 		largest := m.Photo[len(m.Photo)-1]
 		attachments = append(attachments, core.Attachment{
