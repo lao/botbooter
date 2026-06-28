@@ -318,21 +318,21 @@ func TestAttachments(t *testing.T) {
 	})
 
 	t.Run("TypedNilRaw", func(t *testing.T) {
-		got, err := a.Attachments(&core.Message{Raw: (*core.WhatsAppMessage)(nil)})
+		got, err := a.Attachments(&core.Message{Raw: (*Message)(nil)})
 		asserts.NoError(t, err, "typed-nil Raw should not panic or error")
 		asserts.Equal(t, len(got), 0, "typed-nil Raw yields no attachments")
 	})
 
 	t.Run("NoMedia", func(t *testing.T) {
-		got, err := a.Attachments(&core.Message{Raw: &core.WhatsAppMessage{Type: "text"}})
+		got, err := a.Attachments(&core.Message{Raw: &Message{Type: "text"}})
 		asserts.NoError(t, err, "text message should not error")
 		asserts.Equal(t, len(got), 0, "text message yields no attachments")
 	})
 
 	t.Run("Image", func(t *testing.T) {
-		got, err := a.Attachments(&core.Message{Raw: &core.WhatsAppMessage{
+		got, err := a.Attachments(&core.Message{Raw: &Message{
 			Type:  "image",
-			Media: &core.WhatsAppMedia{ID: "MID", MimeType: "image/png"},
+			Media: &Media{ID: "MID", MimeType: "image/png"},
 		}})
 		asserts.NoError(t, err, "image message should not error")
 		asserts.Equal(t, len(got), 1, "image yields one attachment")
@@ -354,6 +354,35 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Connect(ctx, deps), "Connect should bind and start")
 	asserts.NoError(t, a.Disconnect(), "Disconnect should shut down cleanly")
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
+}
+
+func TestConnect_StaleWatcherIgnoresReplacedServer(t *testing.T) {
+	a := testAdapter()
+	called := make(chan struct{}, 1)
+	deps := core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { called <- struct{}{}; return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should bind")
+
+	// Simulate a reconnect that installed a different server, then close the one
+	// this Connect started so it does not leak.
+	a.mu.Lock()
+	old := a.srv
+	a.srv = &http.Server{}
+	a.mu.Unlock()
+	defer func() { _ = old.Close() }()
+
+	cancel() // wake the now-stale watcher
+
+	select {
+	case <-called:
+		t.Fatal("a stale watcher must not drive Disconnect on a replaced server")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: the guard saw a.srv != its own server and skipped.
+	}
 }
 
 func TestConnect_BindError(t *testing.T) {
