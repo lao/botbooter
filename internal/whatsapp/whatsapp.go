@@ -79,6 +79,33 @@ type Config struct {
 	HTTPClient *http.Client
 }
 
+// Message is the parsed payload of a message received from the WhatsApp Cloud
+// API webhook: the sender (From, which is also the reply target), the message id
+// and type, the text (or media caption), and any attached media. AuthorName and
+// Timestamp are enriched, not lifted from Raw: AuthorName is correlated from the
+// webhook's sibling contacts list and Timestamp is parsed from the message's
+// unix-seconds field. Raw holds the original message JSON object for callers that
+// need more.
+type Message struct {
+	From       string
+	ID         string
+	Type       string
+	Text       string
+	AuthorName string
+	Timestamp  time.Time
+	Media      *Media
+	Raw        json.RawMessage
+}
+
+// Media identifies a media object attached to a WhatsApp message. The Cloud API
+// delivers media by ID rather than URL: fetch the bytes with GET /{ID} to obtain
+// a short-lived download URL, then GET that URL with your access token.
+type Media struct {
+	ID       string
+	MimeType string
+	Filename string
+}
+
 // adapter is the WhatsApp Cloud API implementation of core.Adapter.
 type adapter struct {
 	cfg     Config
@@ -162,9 +189,17 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		}
 	}()
 
+	// Tear down when the run context is canceled — but only while this server is
+	// still the active one. After a disconnect+reconnect, a.srv points at a newer
+	// server; a stale watcher firing on the old context must not shut that one down.
 	go func() {
 		<-ctx.Done()
-		_ = deps.Disconnect()
+		a.mu.Lock()
+		current := a.srv == srv
+		a.mu.Unlock()
+		if current {
+			_ = deps.Disconnect()
+		}
 	}()
 
 	return nil
@@ -271,7 +306,7 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 
 // Attachments returns the media attached to the message's WhatsApp event. The
 // Cloud API delivers media by ID rather than URL, so Attachment.URL is empty and
-// ExtraData carries the *core.WhatsAppMedia; resolve the bytes with GET /{ID}
+// ExtraData carries the *Media; resolve the bytes with GET /{ID}
 // (using your access token) to obtain a short-lived download URL.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	wm, ok := RawMessage(m)
@@ -286,8 +321,8 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 
 // RawMessage returns the parsed WhatsApp message carried on m, reporting whether
 // m originated from WhatsApp.
-func RawMessage(m *core.Message) (*core.WhatsAppMessage, bool) {
-	wm, ok := m.Raw.(*core.WhatsAppMessage)
+func RawMessage(m *core.Message) (*Message, bool) {
+	wm, ok := m.Raw.(*Message)
 	return wm, ok
 }
 
@@ -366,14 +401,14 @@ func (in inboundMessage) media() *mediaObject {
 // An individual message that fails to parse is logged and skipped rather than
 // failing the whole batch, so one bad entry never drops its valid siblings (and
 // the request can still be acked with 200 to stop Meta retrying).
-func parseWebhook(body []byte) []*core.WhatsAppMessage {
+func parseWebhook(body []byte) []*Message {
 	var env webhookEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		log.Printf("whatsapp: discarding webhook with unparseable body: %v", err)
 		return nil
 	}
 
-	var out []*core.WhatsAppMessage
+	var out []*Message
 	for _, entry := range env.Entry {
 		for _, change := range entry.Changes {
 			names := make(map[string]string, len(change.Value.Contacts))
@@ -394,15 +429,15 @@ func parseWebhook(body []byte) []*core.WhatsAppMessage {
 	return out
 }
 
-// parseMessage converts one raw value.messages[] object into a WhatsAppMessage,
+// parseMessage converts one raw value.messages[] object into a Message,
 // using the media caption as the text when the message carries media but no body.
-func parseMessage(raw json.RawMessage) (*core.WhatsAppMessage, error) {
+func parseMessage(raw json.RawMessage) (*Message, error) {
 	var in inboundMessage
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil, err
 	}
 
-	msg := &core.WhatsAppMessage{
+	msg := &Message{
 		From:      in.From,
 		ID:        in.ID,
 		Type:      in.Type,
@@ -411,7 +446,7 @@ func parseMessage(raw json.RawMessage) (*core.WhatsAppMessage, error) {
 		Raw:       raw,
 	}
 	if media := in.media(); media != nil {
-		msg.Media = &core.WhatsAppMedia{ID: media.ID, MimeType: media.MimeType, Filename: media.Filename}
+		msg.Media = &Media{ID: media.ID, MimeType: media.MimeType, Filename: media.Filename}
 		if msg.Text == "" {
 			msg.Text = media.Caption
 		}
@@ -431,7 +466,7 @@ func parseTimestamp(s string) time.Time {
 
 // toMessage maps a parsed WhatsApp message onto a platform-agnostic Message; the
 // sender doubles as the channel, since a reply goes back to the same wa_id.
-func toMessage(m *core.WhatsAppMessage) *core.Message {
+func toMessage(m *Message) *core.Message {
 	return &core.Message{
 		ID:         m.ID,
 		UserID:     m.From,

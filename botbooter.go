@@ -57,10 +57,10 @@ type (
 	CommandHandler = core.CommandHandler
 	// Middleware wraps message dispatch. See [core.Middleware].
 	Middleware = core.Middleware
-	// WhatsAppMessage is the raw payload of a WhatsApp message. See [core.WhatsAppMessage].
-	WhatsAppMessage = core.WhatsAppMessage
-	// WhatsAppMedia identifies media attached to a WhatsApp message. See [core.WhatsAppMedia].
-	WhatsAppMedia = core.WhatsAppMedia
+	// WhatsAppMessage is the parsed payload of a WhatsApp message. See [whatsapp.Message].
+	WhatsAppMessage = whatsapp.Message
+	// WhatsAppMedia identifies media attached to a WhatsApp message. See [whatsapp.Media].
+	WhatsAppMedia = whatsapp.Media
 	// WhatsAppConfig configures a WhatsApp Cloud API bot. See [whatsapp.Config].
 	WhatsAppConfig = whatsapp.Config
 )
