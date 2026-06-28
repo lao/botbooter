@@ -165,6 +165,15 @@ func TestHandleVerify(t *testing.T) {
 
 		asserts.Equal(t, w.Code, http.StatusForbidden, "wrong token should be 403")
 	})
+
+	t.Run("WrongMode", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/webhook?hub.mode=unsubscribe&hub.verify_token=verify&hub.challenge=42", nil)
+		w := httptest.NewRecorder()
+
+		a.handleVerify(w, r)
+
+		asserts.Equal(t, w.Code, http.StatusForbidden, "a valid token with a non-subscribe mode should be 403")
+	})
 }
 
 func TestHandleWebhook_DispatchesText(t *testing.T) {
@@ -220,6 +229,35 @@ func TestHandleWebhook_StatusOnlyIgnored(t *testing.T) {
 
 	asserts.Equal(t, w.Code, http.StatusOK, "status callback should be acked 200")
 	asserts.Equal(t, len(got), 0, "status callback should dispatch nothing")
+}
+
+func TestHandleWebhook_OversizedBody(t *testing.T) {
+	a := testAdapter()
+	var got []*core.Message
+
+	big := strings.Repeat("a", maxRequestBytes+1)
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(big))
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusBadRequest, "an oversized body should be 400")
+	asserts.Equal(t, len(got), 0, "an oversized body dispatches nothing")
+}
+
+func TestHandleWebhook_UnparseableBody(t *testing.T) {
+	a := testAdapter()
+	var got []*core.Message
+	body := []byte("not json{")
+
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(string(body)))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusOK, "an authentic but unparseable body is still acked 200")
+	asserts.Equal(t, len(got), 0, "an unparseable body dispatches nothing")
 }
 
 func TestParseWebhook_Image(t *testing.T) {
@@ -286,6 +324,9 @@ func TestSend(t *testing.T) {
 	asserts.Equal(t, gotMethod, http.MethodPost, "Send should POST")
 	asserts.Equal(t, gotPath, "/v23.0/PNID/messages", "Send should target the messages endpoint")
 	asserts.Equal(t, gotAuth, "Bearer tok", "Send should set the bearer token")
+	asserts.Equal(t, payload["messaging_product"], "whatsapp", "payload messaging_product (Meta rejects without it)")
+	asserts.Equal(t, payload["recipient_type"], "individual", "payload recipient_type")
+	asserts.Equal(t, payload["type"], "text", "payload type")
 	asserts.Equal(t, payload["to"], "123", "payload recipient")
 	text, _ := payload["text"].(map[string]any)
 	asserts.Equal(t, text["body"], "hi there", "payload text body")
@@ -327,6 +368,7 @@ func TestAttachments(t *testing.T) {
 		got, err := a.Attachments(&core.Message{Raw: &Message{Type: "text"}})
 		asserts.NoError(t, err, "text message should not error")
 		asserts.Equal(t, len(got), 0, "text message yields no attachments")
+		asserts.True(t, got != nil, "no-media yields a non-nil empty slice, mirroring sibling adapters")
 	})
 
 	t.Run("Image", func(t *testing.T) {
@@ -338,6 +380,10 @@ func TestAttachments(t *testing.T) {
 		asserts.Equal(t, len(got), 1, "image yields one attachment")
 		asserts.True(t, got[0].IsImage, "image attachment should be flagged as image")
 		asserts.Equal(t, got[0].URL, "", "URL is empty for Cloud API media")
+		media, ok := got[0].ExtraData.(*Media)
+		asserts.True(t, ok, "ExtraData should carry the *Media")
+		asserts.Equal(t, media.ID, "MID", "ExtraData media id")
+		asserts.Equal(t, media.MimeType, "image/png", "ExtraData media mime type")
 	})
 }
 
@@ -354,6 +400,21 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Connect(ctx, deps), "Connect should bind and start")
 	asserts.NoError(t, a.Disconnect(), "Disconnect should shut down cleanly")
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
+}
+
+func TestDrainDispatch_WaitsForInflight(t *testing.T) {
+	a := testAdapter()
+	a.inflight.Add(1)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		a.inflight.Add(-1)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.drainDispatch(ctx)
+
+	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
 }
 
 func TestConnect_StaleWatcherIgnoresReplacedServer(t *testing.T) {
