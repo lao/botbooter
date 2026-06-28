@@ -57,35 +57,25 @@ type Config struct {
 	// Token is the Cloud API access token sent as a Bearer credential on
 	// outbound calls. Prefer a long-lived system-user token; short-lived user
 	// tokens expire in ~24h, after which Send fails.
-	Token string
-	// PhoneNumberID identifies the sending number and forms part of the send
-	// URL.
+	Token         string
 	PhoneNumberID string
-	// AppSecret is the Meta app secret used to verify the X-Hub-Signature-256
-	// HMAC on inbound webhook requests. Required: without it the endpoint would
-	// accept spoofed payloads.
-	AppSecret string
-	// VerifyToken is echoed during Meta's GET webhook-verification handshake.
+	// AppSecret verifies the X-Hub-Signature-256 HMAC on inbound webhook
+	// requests. Required: without it the endpoint would accept spoofed payloads.
+	AppSecret   string
 	VerifyToken string
 	// Addr is the local TCP address the webhook server binds, e.g. ":8080". A
 	// bare port ("8080") is accepted as shorthand for ":8080".
-	Addr string
-	// Path is the webhook route. Defaults to "/webhook".
-	Path string
-	// GraphVersion is the Graph API version. Defaults to "v23.0".
+	Addr         string
+	Path         string
 	GraphVersion string
-	// HTTPClient is used for outbound Cloud API calls. Defaults to an
-	// http.Client with a 30s timeout.
-	HTTPClient *http.Client
+	HTTPClient   *http.Client
 }
 
-// Message is the parsed payload of a message received from the WhatsApp Cloud
-// API webhook: the sender (From, which is also the reply target), the message id
-// and type, the text (or media caption), and any attached media. AuthorName and
-// Timestamp are enriched, not lifted from Raw: AuthorName is correlated from the
-// webhook's sibling contacts list and Timestamp is parsed from the message's
-// unix-seconds field. Raw holds the original message JSON object for callers that
-// need more.
+// Message is the parsed payload of a WhatsApp Cloud API webhook message.
+// AuthorName and Timestamp are enriched, not lifted from Raw: AuthorName is
+// correlated from the webhook's sibling contacts list and Timestamp is parsed
+// from the message's unix-seconds field. Raw holds the original message JSON for
+// callers that need more.
 type Message struct {
 	From       string
 	ID         string
@@ -106,10 +96,9 @@ type Media struct {
 	Filename string
 }
 
-// adapter is the WhatsApp Cloud API implementation of core.Adapter.
 type adapter struct {
 	cfg     Config
-	baseURL string // Cloud API host; overridable in tests.
+	baseURL string
 	http    *http.Client
 
 	mu  sync.Mutex
@@ -128,13 +117,10 @@ func New(cfg Config) (*core.Bot, error) {
 	return core.New(core.WhatsAppBotType, a), nil
 }
 
-// newAdapter validates cfg, applies defaults for the optional fields, and builds
-// the adapter.
 func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.Token == "" || cfg.PhoneNumberID == "" || cfg.AppSecret == "" || cfg.VerifyToken == "" || cfg.Addr == "" {
 		return nil, fmt.Errorf("%w: Token, PhoneNumberID, AppSecret, VerifyToken and Addr are required", ErrMissingConfig)
 	}
-	// Accept a bare port ("8080") as shorthand for ":8080" so net.Listen is happy.
 	if !strings.Contains(cfg.Addr, ":") {
 		cfg.Addr = ":" + cfg.Addr
 	}
@@ -150,10 +136,8 @@ func newAdapter(cfg Config) (*adapter, error) {
 	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient}, nil
 }
 
-// Connect starts the webhook HTTP server in the background and returns once the
-// listener is bound (so a port conflict surfaces here rather than asynchronously).
-// The server runs until ctx is canceled, at which point the run loop tears it
-// down via Disconnect.
+// Connect binds the listener synchronously — so a port conflict surfaces here
+// rather than asynchronously — then serves in the background until ctx is canceled.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(a.cfg.Path, func(w http.ResponseWriter, r *http.Request) {
@@ -205,8 +189,6 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// handleVerify answers Meta's webhook-verification handshake: if the verify
-// token matches, it echoes hub.challenge; otherwise it returns 403.
 func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	tokenOK := subtle.ConstantTimeCompare([]byte(q.Get("hub.verify_token")), []byte(a.cfg.VerifyToken)) == 1
@@ -249,8 +231,8 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 	}()
 }
 
-// Disconnect shuts the webhook server down. It is safe to call when the server
-// was never started and is idempotent.
+// Disconnect shuts the webhook server down; it is idempotent and safe to call
+// before Connect.
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	srv := a.srv
@@ -264,10 +246,8 @@ func (a *adapter) Disconnect() error {
 	return srv.Shutdown(ctx)
 }
 
-// Send delivers text to channelID (a WhatsApp wa_id / phone number) via the
-// Cloud API. A non-2xx response — including the common out-of-24h-window or
-// missing-template rejection — is returned as an error carrying the response
-// body.
+// Send posts text to channelID (a WhatsApp wa_id) via the Cloud API; a non-2xx
+// response is returned as an error carrying the response body.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	payload := map[string]any{
 		"messaging_product": "whatsapp",
@@ -304,10 +284,9 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	return nil
 }
 
-// Attachments returns the media attached to the message's WhatsApp event. The
-// Cloud API delivers media by ID rather than URL, so Attachment.URL is empty and
-// ExtraData carries the *Media; resolve the bytes with GET /{ID}
-// (using your access token) to obtain a short-lived download URL.
+// Attachments returns the media attached to m. The Cloud API delivers media by
+// ID rather than URL, so Attachment.URL is empty and ExtraData carries the
+// *Media; resolve the bytes with GET /{ID} (using your access token).
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	wm, ok := RawMessage(m)
 	if !ok || wm == nil || wm.Media == nil {
@@ -326,9 +305,6 @@ func RawMessage(m *core.Message) (*Message, bool) {
 	return wm, ok
 }
 
-// validateSignature reports whether header is a valid X-Hub-Signature-256 for
-// body under secret. The header has the form "sha256=<hex>"; the comparison is
-// constant-time.
 func validateSignature(secret, header string, body []byte) bool {
 	if secret == "" || !strings.HasPrefix(header, signaturePrefix) {
 		return false
@@ -362,7 +338,6 @@ type webhookEnvelope struct {
 	} `json:"entry"`
 }
 
-// inboundMessage mirrors a single object in value.messages[].
 type inboundMessage struct {
 	From      string `json:"from"`
 	ID        string `json:"id"`
@@ -378,7 +353,6 @@ type inboundMessage struct {
 	Sticker  *mediaObject `json:"sticker"`
 }
 
-// mediaObject mirrors a media field (image/document/...) on an inbound message.
 type mediaObject struct {
 	ID       string `json:"id"`
 	MimeType string `json:"mime_type"`
@@ -386,8 +360,6 @@ type mediaObject struct {
 	Filename string `json:"filename"`
 }
 
-// media returns the media object for whichever media type the message carries,
-// or nil for a non-media message.
 func (in inboundMessage) media() *mediaObject {
 	for _, m := range []*mediaObject{in.Image, in.Document, in.Video, in.Audio, in.Sticker} {
 		if m != nil {
@@ -429,8 +401,8 @@ func parseWebhook(body []byte) []*Message {
 	return out
 }
 
-// parseMessage converts one raw value.messages[] object into a Message,
-// using the media caption as the text when the message carries media but no body.
+// parseMessage uses the media caption as the text when the message carries media
+// but no body.
 func parseMessage(raw json.RawMessage) (*Message, error) {
 	var in inboundMessage
 	if err := json.Unmarshal(raw, &in); err != nil {
@@ -454,8 +426,6 @@ func parseMessage(raw json.RawMessage) (*Message, error) {
 	return msg, nil
 }
 
-// parseTimestamp converts a Cloud API unix-seconds timestamp string to UTC time,
-// returning the zero time when it is empty or non-numeric.
 func parseTimestamp(s string) time.Time {
 	secs, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
