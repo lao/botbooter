@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lao/botbooter/internal/core"
@@ -49,8 +50,10 @@ const (
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
 )
 
+// ErrMissingConfig is returned by New when a required Config field is empty.
 var ErrMissingConfig = errors.New("whatsapp: missing required config field")
 
+// Config configures a WhatsApp Cloud API bot.
 type Config struct {
 	// Token is the Cloud API access token sent as a Bearer credential on
 	// outbound calls. Prefer a long-lived system-user token; short-lived user
@@ -85,6 +88,8 @@ type Message struct {
 	Raw        json.RawMessage
 }
 
+// Media is a media object attached to a WhatsApp message. The Cloud API delivers
+// media by ID, not URL: resolve the bytes with GET /{ID} using your access token.
 type Media struct {
 	ID       string
 	MimeType string
@@ -96,8 +101,9 @@ type adapter struct {
 	baseURL string
 	http    *http.Client
 
-	mu  sync.Mutex
-	srv *http.Server
+	mu       sync.Mutex
+	srv      *http.Server
+	inflight atomic.Int64
 }
 
 // New creates a WhatsApp bot backed by the Meta Cloud API. It returns
@@ -116,11 +122,17 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.Token == "" || cfg.PhoneNumberID == "" || cfg.AppSecret == "" || cfg.VerifyToken == "" || cfg.Addr == "" {
 		return nil, fmt.Errorf("%w: Token, PhoneNumberID, AppSecret, VerifyToken and Addr are required", ErrMissingConfig)
 	}
-	if !strings.Contains(cfg.Addr, ":") {
+	// A bare port ("8080") is shorthand for ":8080"; a host, host:port, :port or
+	// IPv6 literal is left for net.Listen to validate.
+	if _, err := strconv.Atoi(cfg.Addr); err == nil {
 		cfg.Addr = ":" + cfg.Addr
 	}
 	if cfg.Path == "" {
 		cfg.Path = defaultPath
+	}
+	// A pattern without a leading slash panics ServeMux at Connect; normalize one in.
+	if !strings.HasPrefix(cfg.Path, "/") {
+		cfg.Path = "/" + cfg.Path
 	}
 	if cfg.GraphVersion == "" {
 		cfg.GraphVersion = defaultGraphVersion
@@ -209,7 +221,9 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 		return
 	}
 
+	a.inflight.Add(1)
 	go func() {
+		defer a.inflight.Add(-1)
 		for _, m := range messages {
 			deps.Dispatch(ctx, toMessage(m))
 		}
@@ -226,7 +240,24 @@ func (a *adapter) Disconnect() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return srv.Shutdown(ctx)
+	err := srv.Shutdown(ctx)
+	a.drainDispatch(ctx)
+	return err
+}
+
+// drainDispatch waits for in-flight dispatch goroutines to finish so an acked
+// message is processed rather than dropped at shutdown, bounded by ctx. It polls
+// an atomic counter rather than a WaitGroup: the dispatch goroutines are started
+// from request handlers that Shutdown may abandon at its deadline, and a
+// WaitGroup Add racing that Wait would risk a misuse panic.
+func (a *adapter) drainDispatch(ctx context.Context) {
+	for a.inflight.Load() > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
@@ -270,8 +301,11 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 // *Media; resolve the bytes with GET /{ID} (using your access token).
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	wm, ok := RawMessage(m)
-	if !ok || wm == nil || wm.Media == nil {
+	if !ok || wm == nil {
 		return nil, nil
+	}
+	if wm.Media == nil {
+		return []core.Attachment{}, nil
 	}
 	return []core.Attachment{{
 		IsImage:   strings.HasPrefix(wm.Media.MimeType, "image/"),
@@ -279,6 +313,8 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	}}, nil
 }
 
+// RawMessage returns the parsed WhatsApp message carried on m, reporting whether
+// m originated from WhatsApp.
 func RawMessage(m *core.Message) (*Message, bool) {
 	wm, ok := m.Raw.(*Message)
 	return wm, ok
