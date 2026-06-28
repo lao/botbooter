@@ -4,6 +4,7 @@
 package botbooter
 
 import (
+	"context"
 	"io"
 
 	"github.com/bwmarrin/discordgo"
@@ -20,10 +21,11 @@ import (
 	"github.com/lao/botbooter/internal/telegram"
 )
 
-// Errors returned by [Bot] methods.
+// Errors returned by [Bot] methods and platform helpers.
 var (
 	ErrUnknownBotType   = core.ErrUnknownBotType
 	ErrAlreadyConnected = core.ErrAlreadyConnected
+	ErrNotTelegramBot   = telegram.ErrNotTelegramBot
 )
 
 // BotType identifies the messaging platform a [Bot] is connected to.
@@ -105,3 +107,12 @@ func SlackSocketClient(b *Bot) *socketmode.Client { return slack.SocketClient(b)
 // TelegramClient returns the go-telegram bot client backing b, or nil if b is
 // not a Telegram bot.
 func TelegramClient(b *Bot) *bot.Bot { return telegram.Client(b) }
+
+// TelegramResolveAttachmentURL resolves a downloadable URL for a Telegram
+// attachment via the Bot API getFile method. The returned URL embeds the bot
+// token in plaintext — treat it as secret and do not log it. It returns
+// [ErrNotTelegramBot] if b is not a Telegram bot, and ("", nil) if att carries
+// no Telegram file id.
+func TelegramResolveAttachmentURL(ctx context.Context, b *Bot, att Attachment) (string, error) {
+	return telegram.ResolveAttachmentURL(ctx, b, att)
+}
