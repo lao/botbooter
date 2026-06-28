@@ -30,11 +30,7 @@ func echoHandler(ctx context.Context, bot *botbooter.Bot, message *botbooter.Mes
 }
 
 // loggingMiddleware dumps every field of each incoming message plus its
-// attachments, then continues the chain. Running as middleware (rather than a
-// command handler) is deliberate: middleware sees every message, including
-// media-only uploads whose text matches no command pattern — a Slack file share
-// or a Telegram photo sent without a caption both arrive with empty Content and
-// would never reach a "^echo "-style handler.
+// attachments, then continues the chain
 func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message, next botbooter.CommandHandler) {
 	// AuthorName is best-effort; empty on platforms that deliver only an id (e.g. Slack).
 	log.Printf("message from %s in channel %s:", cmp.Or(message.AuthorName, message.UserID), message.ChannelID)

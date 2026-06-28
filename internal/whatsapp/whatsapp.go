@@ -49,10 +49,8 @@ const (
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
 )
 
-// ErrMissingConfig is returned by New when a required Config field is empty.
 var ErrMissingConfig = errors.New("whatsapp: missing required config field")
 
-// Config configures a WhatsApp Cloud API bot.
 type Config struct {
 	// Token is the Cloud API access token sent as a Bearer credential on
 	// outbound calls. Prefer a long-lived system-user token; short-lived user
@@ -87,9 +85,6 @@ type Message struct {
 	Raw        json.RawMessage
 }
 
-// Media identifies a media object attached to a WhatsApp message. The Cloud API
-// delivers media by ID rather than URL: fetch the bytes with GET /{ID} to obtain
-// a short-lived download URL, then GET that URL with your access token.
 type Media struct {
 	ID       string
 	MimeType string
@@ -136,8 +131,6 @@ func newAdapter(cfg Config) (*adapter, error) {
 	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient}, nil
 }
 
-// Connect binds the listener synchronously — so a port conflict surfaces here
-// rather than asynchronously — then serves in the background until ctx is canceled.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(a.cfg.Path, func(w http.ResponseWriter, r *http.Request) {
@@ -173,9 +166,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		}
 	}()
 
-	// Tear down when the run context is canceled — but only while this server is
-	// still the active one. After a disconnect+reconnect, a.srv points at a newer
-	// server; a stale watcher firing on the old context must not shut that one down.
+	// Tear down when the run context is canceled
 	go func() {
 		<-ctx.Done()
 		a.mu.Lock()
@@ -201,12 +192,6 @@ func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusForbidden)
 }
 
-// handleWebhook verifies the request signature, then acknowledges the request
-// with 200 BEFORE dispatching, so a slow handler can never delay the ack and
-// trigger Meta's webhook retry (which would re-deliver the same message). The
-// parsed messages are dispatched off the request path using the run context;
-// an unauthenticated request gets 403. The body is size-capped because the
-// endpoint is public.
 func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
@@ -231,8 +216,6 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 	}()
 }
 
-// Disconnect shuts the webhook server down; it is idempotent and safe to call
-// before Connect.
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	srv := a.srv
@@ -246,8 +229,6 @@ func (a *adapter) Disconnect() error {
 	return srv.Shutdown(ctx)
 }
 
-// Send posts text to channelID (a WhatsApp wa_id) via the Cloud API; a non-2xx
-// response is returned as an error carrying the response body.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	payload := map[string]any{
 		"messaging_product": "whatsapp",
@@ -298,8 +279,6 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	}}, nil
 }
 
-// RawMessage returns the parsed WhatsApp message carried on m, reporting whether
-// m originated from WhatsApp.
 func RawMessage(m *core.Message) (*Message, bool) {
 	wm, ok := m.Raw.(*Message)
 	return wm, ok
@@ -318,10 +297,6 @@ func validateSignature(secret, header string, body []byte) bool {
 	return hmac.Equal(want, mac.Sum(nil))
 }
 
-// webhookEnvelope mirrors the parts of the Cloud API webhook payload we use.
-// Status callbacks (delivery/read receipts) carry no messages[], so they yield
-// no dispatched messages — which is also why the bot never sees its own
-// outbound messages echoed back.
 type webhookEnvelope struct {
 	Entry []struct {
 		Changes []struct {
@@ -401,8 +376,6 @@ func parseWebhook(body []byte) []*Message {
 	return out
 }
 
-// parseMessage uses the media caption as the text when the message carries media
-// but no body.
 func parseMessage(raw json.RawMessage) (*Message, error) {
 	var in inboundMessage
 	if err := json.Unmarshal(raw, &in); err != nil {
@@ -434,8 +407,6 @@ func parseTimestamp(s string) time.Time {
 	return time.Unix(secs, 0).UTC()
 }
 
-// toMessage maps a parsed WhatsApp message onto a platform-agnostic Message; the
-// sender doubles as the channel, since a reply goes back to the same wa_id.
 func toMessage(m *Message) *core.Message {
 	return &core.Message{
 		ID:         m.ID,
