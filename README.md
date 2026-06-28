@@ -224,6 +224,7 @@ Alternatives:
 - [x] Middleware and attachment abstraction
 - [ ] Microsoft Teams adapter
 - [ ] Richer message types (blocks, embeds)
+- [ ] Unify attachment url retriavel for all implementations
 
 ## Contributing
 
