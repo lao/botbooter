@@ -403,4 +403,7 @@ func TestSessionAccessors(t *testing.T) {
 
 	cliBot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
 	asserts.True(t, botbooter.SlackClient(cliBot) == nil, "SlackClient nil for non-Slack bot")
+
+	_, telegramErr := botbooter.TelegramResolveAttachmentURL(context.Background(), cliBot, botbooter.Attachment{})
+	asserts.ErrorIs(t, telegramErr, botbooter.ErrNotTelegramBot, "TelegramResolveAttachmentURL rejects a non-Telegram bot")
 }

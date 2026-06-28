@@ -5,6 +5,8 @@ package telegram
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -122,6 +124,57 @@ func Client(b *core.Bot) *bot.Bot {
 	return nil
 }
 
+// ErrNotTelegramBot is returned by [ResolveAttachmentURL] when b is not a
+// Telegram bot.
+var ErrNotTelegramBot = errors.New("botbooter: not a telegram bot")
+
+// ResolveAttachmentURL fetches a fresh, downloadable URL for a Telegram
+// attachment via the Bot API getFile method. It returns [ErrNotTelegramBot] if b
+// is not a Telegram bot, and ("", nil) if att carries no Telegram file id.
+//
+// The returned URL embeds the bot token in plaintext and is therefore secret —
+// do not log it. Telegram links stay valid for about an hour; call again to
+// refresh. getFile fails for files larger than 20 MB.
+func ResolveAttachmentURL(ctx context.Context, b *core.Bot, att core.Attachment) (string, error) {
+	a, ok := core.AdapterAs[*adapter](b)
+	if !ok {
+		return "", ErrNotTelegramBot
+	}
+	id := fileIDOf(att.ExtraData)
+	if id == "" {
+		return "", nil
+	}
+	f, err := a.client.GetFile(ctx, &bot.GetFileParams{FileID: id})
+	if err != nil {
+		// go-telegram redacts the bot token from *url.Error transport failures.
+		return "", fmt.Errorf("resolve telegram file %s: %w", id, err)
+	}
+	return a.client.FileDownloadLink(f), nil
+}
+
+// fileIDOf extracts the Telegram FileID from an attachment's ExtraData. The
+// models.PhotoSize (value) and *models.Document cases mirror what
+// attachmentsFromMessage stores; the pointer variants are accepted defensively
+// since ResolveAttachmentURL is public and may be handed a hand-built Attachment.
+func fileIDOf(extra any) string {
+	switch v := extra.(type) {
+	case models.PhotoSize:
+		return v.FileID
+	case *models.PhotoSize:
+		if v == nil {
+			return ""
+		}
+		return v.FileID
+	case *models.Document:
+		if v == nil {
+			return ""
+		}
+		return v.FileID
+	default:
+		return ""
+	}
+}
+
 // toMessage maps a Telegram update's message onto a platform-agnostic Message.
 // onUpdate passes only updates with a non-nil Message; the From guard tolerates
 // a missing sender. Content is the text, or the caption for media-only messages.
@@ -210,7 +263,7 @@ func chatID(s string) any {
 // attachmentsFromMessage converts a message's photo and document into attachments
 // (nil for a nil message); other media kinds are not surfaced. URLs are left empty
 // because Telegram delivers media by FileID, not URL; the FileID-bearing struct is
-// carried in ExtraData for callers to resolve via GetFile.
+// carried in ExtraData, which [ResolveAttachmentURL] turns into a download link.
 func attachmentsFromMessage(m *models.Message) []core.Attachment {
 	if m == nil {
 		return nil
