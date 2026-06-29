@@ -43,7 +43,9 @@ token* (`xapp-…`) and a *bot token* (`xoxb-…`).
    **human** account — the bot ignores its own and other bots' messages.
 
 ```go
-bot := botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
+import "github.com/lao/botbooter/slack"
+
+bot := slack.New(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
 ```
 
 **Environment variables** (read by the bundled example):
@@ -85,7 +87,9 @@ botbooter connects over the **Gateway** and requests the privileged
    permissions, then open the generated URL to add it to a server.
 
 ```go
-bot, err := botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
+import "github.com/lao/botbooter/discord"
+
+bot, err := discord.New(os.Getenv("DISCORD_BOT_TOKEN"))
 ```
 
 **Environment variables** (read by the bundled example):
@@ -115,7 +119,9 @@ dial-out model of Slack Socket Mode and the Discord Gateway).
    from a **human** account. The bot ignores its own and other bots' messages.
 
 ```go
-bot, err := botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
+import "github.com/lao/botbooter/telegram"
+
+bot, err := telegram.New(os.Getenv("TELEGRAM_BOT_TOKEN"))
 ```
 
 An empty token is rejected at construction; an otherwise-invalid token is not —

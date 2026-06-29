@@ -51,7 +51,7 @@ func (t BotType) String() string {
 // UserID, ChannelID and Content are always set. The remaining normalized fields
 // are best-effort: a platform that cannot supply one leaves it at its zero
 // value. Raw carries the originating platform's untouched event; read it with
-// the matching typed accessor (e.g. botbooter.DiscordRawEvent).
+// the matching typed accessor (e.g. discord.RawEvent).
 //
 // MentionedUserIDs holds mentioned user ids and is best-effort per platform: Slack and
 // Discord surface every mention, while Telegram contributes only text_mention
