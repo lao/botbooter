@@ -11,14 +11,18 @@ import (
 // goListDeps returns the transitive build-dependency import paths of pkg as
 // reported by `go list -deps`. It deliberately runs without -test: a wrapper's
 // own _test.go may import any SDK, but those imports never reach a consumer
-// binary, so only the non-test build closure matters for isolation.
+// binary, so only the non-test build closure matters for isolation. A go list
+// failure is fatal for the calling subtest so no assertion ever runs against a
+// malformed (error-text) closure.
 func goListDeps(t *testing.T, pkg string) string {
 	t.Helper()
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain not on PATH; skipping transitive isolation check")
 	}
 	out, err := exec.Command("go", "list", "-deps", pkg).CombinedOutput()
-	asserts.NoError(t, err, "go list -deps "+pkg+": "+string(out))
+	if err != nil {
+		t.Fatalf("go list -deps %s: %v\n%s", pkg, err, out)
+	}
 	return string(out)
 }
 
@@ -27,7 +31,8 @@ func goListDeps(t *testing.T, pkg string) string {
 // the other platforms' SDKs (and that root excludes all three), while each
 // platform wrapper still includes its own SDK. A future cross-package import
 // (e.g. internal/telegram pulling in internal/slack) would pass every
-// direct-import guard yet fail here.
+// direct-import guard yet fail here. Each package runs as its own subtest so one
+// failure neither hides nor is hidden by the others.
 func TestIsolationDeps(t *testing.T) {
 	const (
 		discordgo  = "github.com/bwmarrin/discordgo"
@@ -46,12 +51,14 @@ func TestIsolationDeps(t *testing.T) {
 		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo}, []string{gotelegram}},
 	}
 	for _, tc := range cases {
-		closure := goListDeps(t, tc.pkg)
-		for _, sdk := range tc.absent {
-			asserts.False(t, strings.Contains(closure, sdk), tc.pkg+" build closure must not contain "+sdk)
-		}
-		for _, sdk := range tc.present {
-			asserts.True(t, strings.Contains(closure, sdk), tc.pkg+" build closure should contain its own SDK "+sdk)
-		}
+		t.Run(tc.pkg, func(t *testing.T) {
+			closure := goListDeps(t, tc.pkg)
+			for _, sdk := range tc.absent {
+				asserts.False(t, strings.Contains(closure, sdk), tc.pkg+" build closure must not contain "+sdk)
+			}
+			for _, sdk := range tc.present {
+				asserts.True(t, strings.Contains(closure, sdk), tc.pkg+" build closure should contain its own SDK "+sdk)
+			}
+		})
 	}
 }
