@@ -5,7 +5,6 @@ package telegram
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -106,25 +105,18 @@ func Client(b *core.Bot) *bot.Bot {
 	return nil
 }
 
-// ErrNotTelegramBot is returned by [ResolveAttachmentURL] when b is not a Telegram bot.
-var ErrNotTelegramBot = errors.New("botbooter: not a telegram bot")
-
 // EnvSuppressURLWarning names the environment variable that silences the
 // plaintext-token warning
 const EnvSuppressURLWarning = "BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING"
 
-// ResolveAttachmentURL fetches a downloadable URL for a Telegram attachment via
-// the Bot API getFile method. It returns [ErrNotTelegramBot] if b is not a
-// Telegram bot, and ("", nil) if att carries no Telegram file id.
+// ResolveAttachmentURL implements [core.AttachmentResolver]: it turns att's
+// Telegram file id (carried in ExtraData) into a getFile download link, or
+// returns ("", nil) when att carries no recognized file id.
 //
 // The returned URL embeds the bot token in plaintext and is secret — do not log
 // it. Each successful resolve warns to that effect unless [EnvSuppressURLWarning]
 // is set.
-func ResolveAttachmentURL(ctx context.Context, b *core.Bot, att core.Attachment) (string, error) {
-	a, ok := core.AdapterAs[*adapter](b)
-	if !ok {
-		return "", ErrNotTelegramBot
-	}
+func (a *adapter) ResolveAttachmentURL(ctx context.Context, att core.Attachment) (string, error) {
 	id := fileIDOf(att.ExtraData)
 	if id == "" {
 		return "", nil
@@ -145,6 +137,10 @@ func warnTokenInURL() {
 		"treat it as a secret and do not log it (set %s to silence)", EnvSuppressURLWarning)
 }
 
+// fileIDOf extracts a Telegram FileID from an attachment's ExtraData. Only the
+// PhotoSize and Document kinds attachmentsFromMessage emits are recognized; a nil
+// ExtraData is a no-op, but any other non-nil type is logged rather than silently
+// dropped, so a newly-surfaced media kind cannot fail to resolve unnoticed.
 func fileIDOf(extra any) string {
 	switch v := extra.(type) {
 	case models.PhotoSize:
@@ -159,7 +155,11 @@ func fileIDOf(extra any) string {
 			return ""
 		}
 		return v.FileID
+	case nil:
+		return ""
 	default:
+		log.Printf("botbooter: telegram attachment ExtraData has unexpected type %T; "+
+			"no file id resolved (only photo and document attachments are supported)", extra)
 		return ""
 	}
 }
