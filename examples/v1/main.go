@@ -1,10 +1,11 @@
 // Command v1 is a small demo of botbooter. It runs an "echo" bot on Slack,
-// Discord, Telegram or the local CLI.
+// Discord, Telegram, WhatsApp or the local CLI.
 //
 //	go run ./examples/v1            # CLI mode (no credentials needed)
 //	go run ./examples/v1 slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 //	go run ./examples/v1 discord    # reads DISCORD_BOT_TOKEN
 //	go run ./examples/v1 telegram   # reads TELEGRAM_BOT_TOKEN
+//	go run ./examples/v1 whatsapp   # reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
 package main
 
 import (
@@ -29,11 +30,7 @@ func echoHandler(ctx context.Context, bot *botbooter.Bot, message *botbooter.Mes
 }
 
 // loggingMiddleware dumps every field of each incoming message plus its
-// attachments, then continues the chain. Running as middleware (rather than a
-// command handler) is deliberate: middleware sees every message, including
-// media-only uploads whose text matches no command pattern — a Slack file share
-// or a Telegram photo sent without a caption both arrive with empty Content and
-// would never reach a "^echo "-style handler.
+// attachments, then continues the chain
 func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message, next botbooter.CommandHandler) {
 	// AuthorName is best-effort; empty on platforms that deliver only an id (e.g. Slack).
 	log.Printf("message from %s in channel %s:", cmp.Or(message.AuthorName, message.UserID), message.ChannelID)
@@ -46,9 +43,13 @@ func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botboot
 	log.Printf("  ReplyToID:  %s", message.ReplyToID)
 	log.Printf("  MentionedUserIDs: %v", message.MentionedUserIDs)
 
-	// URL is empty on platforms that deliver media by id rather than link (e.g.
-	// Telegram carries the FileID in ExtraData); resolve it via the raw client if
-	// you need the bytes.
+	// URL is empty on platforms that deliver media by id rather than link:
+	// Telegram leaves it blank by design (the FileID rides in ExtraData). Call
+	// botbooter.TelegramResolveAttachmentURL(ctx, bot, a) to fetch a download link
+	// on demand — that link embeds the bot token, so never log it in production.
+	// ExtraData below also carries user-controlled fields (e.g. a Telegram
+	// document's FileName); this demo prints it for illustration — don't log it
+	// raw in production.
 	if attachments, err := bot.GetAttachments(message); err != nil {
 		log.Println("  failed to get attachments:", err)
 	} else {
@@ -68,10 +69,19 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		return botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
 	case "telegram":
 		return botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	case "whatsapp":
+		return botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{
+			Token:         os.Getenv("WA_TOKEN"),
+			PhoneNumberID: os.Getenv("WA_PHONE_ID"),
+			AppSecret:     os.Getenv("WA_APP_SECRET"),
+			VerifyToken:   os.Getenv("WA_VERIFY_TOKEN"),
+			Addr:          os.Getenv("WA_ADDR"),
+			Path:          os.Getenv("WA_PATH"), // optional; defaults to /webhook
+		})
 	case "cli":
 		return botbooter.InitAsCLIBot(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp or cli)", botType)
 	}
 }
 

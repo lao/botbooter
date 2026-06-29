@@ -1,9 +1,10 @@
 // Package botbooter is a small framework for building chat bots that behave the
-// same way across Slack, Discord and a local CLI. It is a thin facade over the
-// internal packages, so consumers keep a single import path.
+// same way across Slack, Discord, Telegram, WhatsApp and a local CLI. It is a
+// thin facade over the internal packages, so consumers keep a single import path.
 package botbooter
 
 import (
+	"context"
 	"io"
 
 	"github.com/bwmarrin/discordgo"
@@ -18,12 +19,17 @@ import (
 	"github.com/lao/botbooter/internal/discord"
 	"github.com/lao/botbooter/internal/slack"
 	"github.com/lao/botbooter/internal/telegram"
+	"github.com/lao/botbooter/internal/whatsapp"
 )
 
-// Errors returned by [Bot] methods.
+// Errors returned by [Bot] methods and platform helpers.
 var (
 	ErrUnknownBotType   = core.ErrUnknownBotType
 	ErrAlreadyConnected = core.ErrAlreadyConnected
+	// ErrMissingWhatsAppConfig is returned by InitAsWhatsAppBot when a required
+	// WhatsAppConfig field is empty.
+	ErrMissingWhatsAppConfig = whatsapp.ErrMissingConfig
+	ErrNotTelegramBot        = telegram.ErrNotTelegramBot
 )
 
 // BotType identifies the messaging platform a [Bot] is connected to.
@@ -35,6 +41,7 @@ const (
 	DiscordBotType  = core.DiscordBotType
 	CLIBotType      = core.CLIBotType
 	TelegramBotType = core.TelegramBotType
+	WhatsAppBotType = core.WhatsAppBotType
 )
 
 type (
@@ -52,6 +59,12 @@ type (
 	CommandHandler = core.CommandHandler
 	// Middleware wraps message dispatch. See [core.Middleware].
 	Middleware = core.Middleware
+	// WhatsAppMessage is the parsed payload of a WhatsApp message. See [whatsapp.Message].
+	WhatsAppMessage = whatsapp.Message
+	// WhatsAppMedia identifies media attached to a WhatsApp message. See [whatsapp.Media].
+	WhatsAppMedia = whatsapp.Media
+	// WhatsAppConfig configures a WhatsApp Cloud API bot. See [whatsapp.Config].
+	WhatsAppConfig = whatsapp.Config
 )
 
 // InitAsSlackBot creates a Slack bot that connects via Socket Mode.
@@ -74,34 +87,54 @@ func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
 	return cli.New(in, out)
 }
 
-// DiscordRawEvent returns the raw Discord event carried on m, reporting whether
-// m originated from Discord.
+// InitAsWhatsAppBot creates a WhatsApp bot backed by the Meta Cloud API. It runs
+// an inbound webhook HTTP server at cfg.Addr, so put a TLS-terminating proxy in
+// front and register the public HTTPS URL in Meta's webhook settings. Inbound
+// media arrives as an id in Attachment.ExtraData (not a URL); resolve the bytes
+// with GET /{media-id} using your access token. It returns an error if a
+// required config field is missing.
+func InitAsWhatsAppBot(cfg WhatsAppConfig) (*Bot, error) {
+	return whatsapp.New(cfg)
+}
+
+// DiscordRawEvent returns the raw Discord event carried on m, reporting whether m originated from Discord.
 func DiscordRawEvent(m *Message) (*discordgo.MessageCreate, bool) { return discord.RawEvent(m) }
 
-// SlackRawEvent returns the raw Slack event carried on m, reporting whether m
-// originated from Slack.
+// SlackRawEvent returns the raw Slack event carried on m, reporting whether m originated from Slack.
 func SlackRawEvent(m *Message) (*slackevents.MessageEvent, bool) { return slack.RawEvent(m) }
 
-// TelegramRawEvent returns the raw Telegram update carried on m, reporting
-// whether m originated from Telegram.
+// TelegramRawEvent returns the raw Telegram update carried on m, reporting whether m originated from Telegram.
 func TelegramRawEvent(m *Message) (*models.Update, bool) { return telegram.RawUpdate(m) }
 
-// CLIRawEvent returns the parsed CLI line carried on m, reporting whether m
-// originated from the CLI adapter.
+// CLIRawEvent returns the parsed CLI line carried on m, reporting whether m originated from the CLI adapter.
 func CLIRawEvent(m *Message) (*CLIMessage, bool) { return cli.RawData(m) }
 
-// DiscordSession returns the discordgo session backing b, or nil if b is not a
-// Discord bot.
+// WhatsAppRawEvent returns the parsed WhatsApp message carried on m, reporting
+// whether m originated from WhatsApp. AuthorName and Timestamp on the returned
+// value are enriched, not present in its Raw JSON.
+func WhatsAppRawEvent(m *Message) (*WhatsAppMessage, bool) { return whatsapp.RawMessage(m) }
+
+// DiscordSession returns the discordgo session backing b, or nil if b is not a Discord bot.
 func DiscordSession(b *Bot) *discordgo.Session { return discord.Session(b) }
 
-// SlackClient returns the Slack Web API client backing b, or nil if b is not a
-// Slack bot.
+// SlackClient returns the Slack Web API client backing b, or nil if b is not a Slack bot.
 func SlackClient(b *Bot) *slackapi.Client { return slack.Client(b) }
 
-// SlackSocketClient returns the Socket Mode client backing b, or nil if b is not
-// a Slack bot.
+// SlackSocketClient returns the Socket Mode client backing b, or nil if b is not a Slack bot.
 func SlackSocketClient(b *Bot) *socketmode.Client { return slack.SocketClient(b) }
 
-// TelegramClient returns the go-telegram bot client backing b, or nil if b is
-// not a Telegram bot.
+// TelegramClient returns the go-telegram bot client backing b, or nil if b is not a Telegram bot.
 func TelegramClient(b *Bot) *bot.Bot { return telegram.Client(b) }
+
+// TelegramResolveAttachmentURL resolves a downloadable URL for a Telegram
+// attachment via the Bot API getFile method. The returned URL embeds the bot
+// token in plaintext — treat it as secret and do not log it. It returns [ErrNotTelegramBot] if b is not
+// a Telegram bot, and ("", nil) if att carries no Telegram file id.
+func TelegramResolveAttachmentURL(ctx context.Context, b *Bot, att Attachment) (string, error) {
+	return telegram.ResolveAttachmentURL(ctx, b, att)
+}
+
+// TelegramEnvSuppressURLWarning names the environment variable that silences the
+// plaintext-token warning [TelegramResolveAttachmentURL] logs on every
+// successful resolve. Set it to any non-empty value to opt out.
+const TelegramEnvSuppressURLWarning = telegram.EnvSuppressURLWarning
