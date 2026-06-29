@@ -48,6 +48,11 @@ const (
 	// maxErrorBodyBytes caps how much of a non-2xx Send response body is read into
 	// the returned error, bounding memory and log size from an unexpected response.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
+
+	// maxMediaMetaBytes caps the getMedia metadata response decoded when resolving
+	// an attachment URL. The payload is a small JSON object (url, mime_type, ...);
+	// the cap bounds memory from an unexpected response.
+	maxMediaMetaBytes = 64 << 10 // 64 KiB
 )
 
 // ErrMissingConfig is returned by New when a required Config field is empty.
@@ -311,6 +316,49 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 		IsImage:   strings.HasPrefix(wm.Media.MimeType, "image/"),
 		ExtraData: wm.Media,
 	}}, nil
+}
+
+// ResolveAttachmentURL implements [core.AttachmentResolver]: it turns att's
+// WhatsApp media id (carried in ExtraData as *Media) into a Cloud API download
+// URL via GET /{media-id}, or returns ("", nil) when att carries no media id.
+//
+// The returned URL is NOT fetchable with a bare GET: download it with an
+// Authorization: Bearer <token> header — the same Cloud API token used to send.
+// Meta scopes the URL to a short window, so consume it promptly.
+func (a *adapter) ResolveAttachmentURL(ctx context.Context, att core.Attachment) (string, error) {
+	media, ok := att.ExtraData.(*Media)
+	if !ok || media == nil || media.ID == "" {
+		return "", nil
+	}
+
+	url := fmt.Sprintf("%s/%s/%s", a.baseURL, a.cfg.GraphVersion, media.ID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.Token)
+
+	resp, err := a.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		return "", fmt.Errorf("whatsapp: resolve media %s failed with status %d: %s",
+			media.ID, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMediaMetaBytes)).Decode(&out); err != nil {
+		return "", fmt.Errorf("whatsapp: decode media %s response: %w", media.ID, err)
+	}
+	// Drain any trailing bytes so the connection can be reused (keep-alive).
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return out.URL, nil
 }
 
 // RawMessage returns the parsed WhatsApp message carried on m, reporting whether

@@ -117,6 +117,14 @@ type Adapter interface {
 	Attachments(m *Message) ([]Attachment, error)
 }
 
+// AttachmentResolver is an OPTIONAL capability an Adapter may implement to turn
+// an Attachment into a downloadable URL. It is deliberately NOT part of the
+// mandatory Adapter interface: adapters whose Attachment.URL is already usable
+// implement nothing and ride the passthrough in [Bot.ResolveAttachmentURL].
+type AttachmentResolver interface {
+	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
+}
+
 // AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
 type AdapterDeps struct {
 	Dispatch   func(ctx context.Context, m *Message)
@@ -329,6 +337,36 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 		return nil, ErrUnknownBotType
 	}
 	return b.adapter.Attachments(message)
+}
+
+// ResolveAttachmentURL returns a downloadable URL for att — the unified
+// cross-platform entry point. If the Bot's adapter implements
+// [AttachmentResolver] the call is delegated in full (the adapter owns the
+// result, including ("", nil) meaning "nothing to resolve"); otherwise att.URL is
+// returned verbatim. It returns [ErrUnknownBotType] if the Bot has no adapter. An
+// empty string with a nil error means "not resolvable", not a failure.
+//
+// The result is consumed DIFFERENTLY per platform and is not uniformly fetchable
+// with a bare GET:
+//   - Discord: att.URL is already a signed CDN link (~24h), returned as-is via the
+//     passthrough; fetch it with a plain GET and consume promptly.
+//   - Slack: NOT directly fetchable — download via the Slack Web API client
+//     (SlackClient(b).GetFileContext), which injects the bot token.
+//   - Telegram: a plain GET on a SECRET, ~1h URL that embeds the bot token in
+//     plaintext — never log or cache it. Each successful Telegram resolve logs a
+//     warning, suppressible via the BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING
+//     environment variable.
+//   - WhatsApp: NOT directly fetchable — GET it with an Authorization: Bearer
+//     <token> header (the Cloud API token used to send). Short-lived; consume promptly.
+//   - CLI: a local filesystem path (open with os.Open), not an HTTP URL.
+func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error) {
+	if b.adapter == nil {
+		return "", ErrUnknownBotType
+	}
+	if r, ok := b.adapter.(AttachmentResolver); ok {
+		return r.ResolveAttachmentURL(ctx, att)
+	}
+	return att.URL, nil
 }
 
 // dispatch routes message through the middleware chain to the first matching

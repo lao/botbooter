@@ -129,6 +129,14 @@ logs and retries rather than failing fast).
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | bot token from step 1 (`123456:ABC-…`) |
 
+**Resolving attachment URLs.** Telegram delivers media by file id, not URL, so
+`Attachment.URL` is empty. Call `bot.ResolveAttachmentURL(ctx, att)` to fetch a
+download link via the Bot API `getFile`. That link **embeds the bot token in
+plaintext** — treat it as a secret and never log it. Each successful resolve
+logs a one-line warning to that effect; set the
+`BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING` environment variable to any non-empty
+value to silence it.
+
 **Official docs:** [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api) · [getUpdates / long polling](https://core.telegram.org/bots/api#getupdates)
 
 ---
