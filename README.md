@@ -231,6 +231,7 @@ Alternatives:
 - [ ] Microsoft Teams adapter
 - [ ] Richer message types (blocks, embeds)
 - [ ] Unify attachment url retriavel for all implementations
+- [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend
 
 ## Contributing
 
