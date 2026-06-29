@@ -71,6 +71,17 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	return attachmentsFromMessage(msg), nil
 }
 
+// ResolveAttachmentURL implements [core.AttachmentResolver]: for a Slack file it
+// prefers the url_private_download link (recovered from att.ExtraData), falling
+// back to att.URL (url_private). The result is NOT fetchable with a bare GET —
+// download it via [Client](b).GetFileContext, which injects the bot token.
+func (a *adapter) ResolveAttachmentURL(_ context.Context, att core.Attachment) (string, error) {
+	if file, ok := att.ExtraData.(slackevents.File); ok && file.URLPrivateDownload != "" {
+		return file.URLPrivateDownload, nil
+	}
+	return att.URL, nil
+}
+
 // RawEvent returns the raw Slack message event carried on m, reporting whether
 // m originated from Slack.
 func RawEvent(m *core.Message) (*slackevents.MessageEvent, bool) {

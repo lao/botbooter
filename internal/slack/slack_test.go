@@ -329,3 +329,36 @@ func TestSlackMentions(t *testing.T) {
 	none := toMessage(&slackevents.MessageEvent{Text: "no mentions"})
 	asserts.Equal(t, len(none.MentionedUserIDs), 0, "no mentions -> nil")
 }
+
+var _ core.AttachmentResolver = (*adapter)(nil)
+
+func TestResolveAttachmentURL(t *testing.T) {
+	b := core.New(core.SlackBotType, newTestAdapter())
+
+	url, err := b.ResolveAttachmentURL(context.Background(), core.Attachment{
+		URL: "https://files.slack/url_private",
+		ExtraData: slackevents.File{
+			URLPrivate:         "https://files.slack/url_private",
+			URLPrivateDownload: "https://files.slack/url_private_download",
+		},
+	})
+
+	asserts.NoError(t, err, "slack resolve")
+	asserts.Equal(t, url, "https://files.slack/url_private_download", "prefers url_private_download from ExtraData")
+}
+
+func TestResolveAttachmentURL_FallsBackToURL(t *testing.T) {
+	b := core.New(core.SlackBotType, newTestAdapter())
+
+	noDownload, err := b.ResolveAttachmentURL(context.Background(), core.Attachment{
+		URL:       "https://files.slack/url_private",
+		ExtraData: slackevents.File{URLPrivate: "https://files.slack/url_private"},
+	})
+	asserts.NoError(t, err, "slack resolve without a download link")
+	asserts.Equal(t, noDownload, "https://files.slack/url_private", "falls back to att.URL when no download link")
+
+	wrongExtra, err := b.ResolveAttachmentURL(context.Background(),
+		core.Attachment{URL: "https://files.slack/url_private", ExtraData: "not-a-file"})
+	asserts.NoError(t, err, "slack resolve with unrelated ExtraData")
+	asserts.Equal(t, wrongExtra, "https://files.slack/url_private", "falls back to att.URL for unrelated ExtraData")
+}
