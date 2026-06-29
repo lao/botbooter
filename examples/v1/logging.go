@@ -24,12 +24,12 @@ func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botboot
 	// URL: Telegram resolves a link that EMBEDS the bot token in plaintext —
 	// secret, so this demo does not print it.
 	if attachments, err := bot.GetAttachments(message); err != nil {
-		log.Println("  failed to get attachments:", err)
+		log.Println("  failed to get attachments")
 	} else {
 		for i, attachment := range attachments {
-			log.Printf("  attachment[%d]: isImage=%t url=%q extraData=%+v", i, attachment.IsImage, attachment.URL, attachment.ExtraData)
+			log.Printf("  attachment[%d]: isImage=%t", i, attachment.IsImage)
 			if url, err := bot.ResolveAttachmentURL(ctx, attachment); err != nil {
-				log.Printf("  attachment[%d]: resolve failed: %v", i, err)
+				log.Printf("  attachment[%d]: resolve failed", i)
 			} else if url != "" {
 				log.Printf("  attachment[%d]: resolved a downloadable URL (not printed; may embed a secret)", i)
 			}
