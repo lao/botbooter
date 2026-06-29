@@ -119,6 +119,8 @@ for _, a := range attachments {
 }
 ```
 
+`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [docs/platforms.md](docs/platforms.md#telegram).
+
 A terminal has no real upload channel, so the **CLI adapter treats any local file path in the message as an attachment** — "uploading" means referencing the path. Image files are detected by content sniffing:
 
 ```text
