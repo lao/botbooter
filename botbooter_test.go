@@ -78,7 +78,7 @@ func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 func newDiscordBot(t *testing.T) *botbooter.Bot {
 	t.Helper()
 	bot, err := discord.New("test_token")
-	asserts.NoError(t, err, "InitAsDiscordBot")
+	asserts.NoError(t, err, "discord.New")
 	asserts.NotNil(t, bot, "bot should be initialized")
 	discord.Session(bot).Client.Transport = stubRoundTripper{
 		status: http.StatusUnauthorized,
@@ -375,20 +375,20 @@ func TestRawAccessors(t *testing.T) {
 	t.Run("Discord", func(t *testing.T) {
 		mc := &discordgo.MessageCreate{Message: &discordgo.Message{ID: "M1"}}
 		got, ok := discord.RawEvent(&botbooter.Message{Raw: mc})
-		asserts.True(t, ok, "DiscordRawEvent")
+		asserts.True(t, ok, "discord.RawEvent")
 		asserts.True(t, got == mc, "same pointer")
 	})
 
 	t.Run("Slack", func(t *testing.T) {
 		e := &slackevents.MessageEvent{User: "U1"}
 		got, ok := slack.RawEvent(&botbooter.Message{Raw: e})
-		asserts.True(t, ok, "SlackRawEvent")
+		asserts.True(t, ok, "slack.RawEvent")
 		asserts.True(t, got == e, "same pointer")
 	})
 
 	t.Run("WrongPlatform", func(t *testing.T) {
 		_, ok := slack.RawEvent(&botbooter.Message{Raw: &discordgo.MessageCreate{}})
-		asserts.False(t, ok, "SlackRawEvent on a Discord message reports false")
+		asserts.False(t, ok, "slack.RawEvent on a Discord message reports false")
 	})
 }
 
@@ -398,16 +398,16 @@ func TestSessionAccessors(t *testing.T) {
 	asserts.NotNil(t, slack.SocketClient(slackBot), "SlackSocketClient")
 
 	discordBot, err := discord.New("test-token")
-	asserts.NoError(t, err, "InitAsDiscordBot")
+	asserts.NoError(t, err, "discord.New")
 	asserts.NotNil(t, discord.Session(discordBot), "DiscordSession")
 
 	telegramBot, err := telegram.New("123456:test-token")
-	asserts.NoError(t, err, "InitAsTelegramBot")
+	asserts.NoError(t, err, "telegram.New")
 	asserts.NotNil(t, telegram.Client(telegramBot), "TelegramClient")
 
 	cliBot := cli.New(emptyReader{}, &syncBuffer{})
 	asserts.True(t, slack.Client(cliBot) == nil, "SlackClient nil for non-Slack bot")
 
 	_, telegramErr := telegram.ResolveAttachmentURL(context.Background(), cliBot, botbooter.Attachment{})
-	asserts.ErrorIs(t, telegramErr, telegram.ErrNotTelegramBot, "TelegramResolveAttachmentURL rejects a non-Telegram bot")
+	asserts.ErrorIs(t, telegramErr, telegram.ErrNotTelegramBot, "telegram.ResolveAttachmentURL rejects a non-Telegram bot")
 }
