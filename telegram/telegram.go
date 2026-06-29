@@ -1,12 +1,12 @@
-// Package telegram exposes the Telegram (Bot API) constructor and the
-// raw-update, client and attachment-URL helpers for botbooter. Import it for a
-// Telegram bot; a Telegram-only binary pulls in go-telegram but never discordgo
-// or slack-go.
+// Package telegram exposes the Telegram (Bot API) constructor and the raw-update
+// and client accessors for botbooter. Import it for a Telegram bot; a
+// Telegram-only binary pulls in go-telegram but never discordgo or slack-go.
+//
+// Attachment resolution is platform-agnostic: call
+// botbooter.Bot.ResolveAttachmentURL on the bot returned by [New].
 package telegram
 
 import (
-	"context"
-
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
@@ -31,19 +31,7 @@ func Client(b *botbooter.Bot) *bot.Bot {
 	return tgint.Client(b)
 }
 
-// ErrNotTelegramBot is returned by [ResolveAttachmentURL] when b is not a
-// Telegram bot.
-var ErrNotTelegramBot = tgint.ErrNotTelegramBot
-
 // EnvSuppressURLWarning names the environment variable that silences the
-// plaintext-token warning [ResolveAttachmentURL] logs on every successful
-// resolve. Set it to any non-empty value to opt out.
+// plaintext-token warning the Telegram resolver logs on every successful
+// attachment resolve. Set it to any non-empty value to opt out.
 const EnvSuppressURLWarning = tgint.EnvSuppressURLWarning
-
-// ResolveAttachmentURL fetches a downloadable URL for a Telegram attachment via
-// the Bot API getFile method. It returns [ErrNotTelegramBot] if b is not a
-// Telegram bot, and ("", nil) if att carries no Telegram file id. The returned
-// URL embeds the bot token in plaintext — treat it as secret and do not log it.
-func ResolveAttachmentURL(ctx context.Context, b *botbooter.Bot, att botbooter.Attachment) (string, error) {
-	return tgint.ResolveAttachmentURL(ctx, b, att)
-}

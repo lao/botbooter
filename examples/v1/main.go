@@ -48,18 +48,24 @@ func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botboot
 	log.Printf("  ReplyToID:  %s", message.ReplyToID)
 	log.Printf("  MentionedUserIDs: %v", message.MentionedUserIDs)
 
-	// URL is empty on platforms that deliver media by id rather than link:
-	// Telegram leaves it blank by design (the FileID rides in ExtraData). Call
-	// telegram.ResolveAttachmentURL(ctx, bot, a) to fetch a download link
-	// on demand — that link embeds the bot token, so never log it in production.
-	// ExtraData below also carries user-controlled fields (e.g. a Telegram
-	// document's FileName); this demo prints it for illustration — don't log it
-	// raw in production.
+	// bot.ResolveAttachmentURL(ctx, a) is the unified way to get a downloadable
+	// URL: Discord returns a public CDN link; Slack returns a url_private link you
+	// must fetch via slack.Client(bot).GetFileContext (it needs the bot token);
+	// Telegram resolves a link that EMBEDS the bot token in plaintext — secret,
+	// so this demo does not print it; WhatsApp returns a link you fetch with the
+	// Cloud API bearer token; CLI returns a local file path.
+	// ExtraData also carries user-controlled fields (e.g. a Telegram document's
+	// FileName); this demo prints it for illustration — don't log it raw in production.
 	if attachments, err := bot.GetAttachments(message); err != nil {
 		log.Println("  failed to get attachments:", err)
 	} else {
 		for i, a := range attachments {
 			log.Printf("  attachment[%d]: isImage=%t url=%q extraData=%+v", i, a.IsImage, a.URL, a.ExtraData)
+			if url, err := bot.ResolveAttachmentURL(ctx, a); err != nil {
+				log.Printf("  attachment[%d]: resolve failed: %v", i, err)
+			} else if url != "" {
+				log.Printf("  attachment[%d]: resolved a downloadable URL (not printed; may embed a secret)", i)
+			}
 		}
 	}
 
