@@ -54,5 +54,5 @@ The CLI has no real upload channel, so `parseMessage` treats any whitespace-sepa
 ## Conventions
 
 - Tests use the in-repo **`internal/asserts`** helpers (`asserts.Equal`, `NoError`, `ErrorIs`, …), not testify — testify is only an indirect dependency. Match that style in new tests.
-- Errors are sentinel values (`ErrUnknownBotType`, `ErrAlreadyConnected`) re-exported through the facade; check with `errors.Is`.
-- Pre-1.0: the public API may still change, but keep `botbooter.go` a pure facade — put real logic in `internal/`.
+- Errors are sentinel values (`ErrUnknownBotType`, `ErrAlreadyConnected`) re-exported through the root package; check with `errors.Is`.
+- Pre-1.0: the public API may still change, but keep `botbooter.go` SDK-free (shared-type aliases, `BotType` consts and error sentinels only) and the per-platform `{cli,slack,discord,telegram,whatsapp}` packages thin — put real logic in `internal/`.
