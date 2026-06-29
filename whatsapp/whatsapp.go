@@ -1,7 +1,8 @@
-// Package whatsapp exposes the WhatsApp (Meta Cloud API) constructor and the
-// raw-message accessor for botbooter. Import it for a WhatsApp bot; the adapter
-// speaks the Cloud API over plain HTTP, so this package pulls in no third-party
-// platform SDK.
+// Package whatsapp exposes the WhatsApp (Meta Cloud API) constructor, the
+// raw-message accessor, and the Config/Message/Media types for botbooter. Import
+// it for a WhatsApp bot; the adapter speaks the Cloud API over plain HTTP, so a
+// WhatsApp-only binary pulls in no third-party platform SDK — it never compiles
+// discordgo, slack-go or go-telegram.
 package whatsapp
 
 import (
@@ -9,13 +10,13 @@ import (
 	waint "github.com/lao/botbooter/internal/whatsapp"
 )
 
-// Config configures a WhatsApp Cloud API bot. See [waint.Config].
+// Config configures a WhatsApp Cloud API bot.
 type Config = waint.Config
 
-// Message is the parsed payload of a WhatsApp webhook message. See [waint.Message].
+// Message is the parsed payload of a WhatsApp webhook message.
 type Message = waint.Message
 
-// Media is a media object attached to a WhatsApp message. See [waint.Media].
+// Media is a media object attached to a WhatsApp message.
 type Media = waint.Media
 
 // ErrMissingConfig is returned by [New] when a required [Config] field is empty.
