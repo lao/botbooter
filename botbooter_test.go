@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/go-telegram/bot/models"
 	"github.com/slack-go/slack/slackevents"
 
 	"github.com/lao/botbooter"
@@ -382,6 +383,27 @@ func TestRawAccessors(t *testing.T) {
 		asserts.True(t, got == e, "same pointer")
 	})
 
+	t.Run("Telegram", func(t *testing.T) {
+		u := &models.Update{ID: 1}
+		got, ok := botbooter.TelegramRawEvent(&botbooter.Message{Raw: u})
+		asserts.True(t, ok, "TelegramRawEvent")
+		asserts.True(t, got == u, "same pointer")
+	})
+
+	t.Run("CLI", func(t *testing.T) {
+		c := &botbooter.CLIMessage{Text: "hi"}
+		got, ok := botbooter.CLIRawEvent(&botbooter.Message{Raw: c})
+		asserts.True(t, ok, "CLIRawEvent")
+		asserts.True(t, got == c, "same pointer")
+	})
+
+	t.Run("WhatsApp", func(t *testing.T) {
+		wm := &botbooter.WhatsAppMessage{Type: "text"}
+		got, ok := botbooter.WhatsAppRawEvent(&botbooter.Message{Raw: wm})
+		asserts.True(t, ok, "WhatsAppRawEvent")
+		asserts.True(t, got == wm, "same pointer")
+	})
+
 	t.Run("WrongPlatform", func(t *testing.T) {
 		_, ok := botbooter.SlackRawEvent(&botbooter.Message{Raw: &discordgo.MessageCreate{}})
 		asserts.False(t, ok, "SlackRawEvent on a Discord message reports false")
@@ -401,9 +423,20 @@ func TestSessionAccessors(t *testing.T) {
 	asserts.NoError(t, err, "InitAsTelegramBot")
 	asserts.NotNil(t, botbooter.TelegramClient(telegramBot), "TelegramClient")
 
+	whatsappBot, err := botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{
+		Token: "t", PhoneNumberID: "p", AppSecret: "s", VerifyToken: "v", Addr: ":0",
+	})
+	asserts.NoError(t, err, "InitAsWhatsAppBot")
+	asserts.Equal(t, whatsappBot.BotType, botbooter.WhatsAppBotType, "WhatsApp bot type")
+
 	cliBot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
 	asserts.True(t, botbooter.SlackClient(cliBot) == nil, "SlackClient nil for non-Slack bot")
 
 	_, telegramErr := botbooter.TelegramResolveAttachmentURL(context.Background(), cliBot, botbooter.Attachment{})
 	asserts.ErrorIs(t, telegramErr, botbooter.ErrNotTelegramBot, "TelegramResolveAttachmentURL rejects a non-Telegram bot")
+}
+
+func TestInitAsWhatsAppBot_MissingConfig(t *testing.T) {
+	_, err := botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{})
+	asserts.ErrorIs(t, err, botbooter.ErrMissingWhatsAppConfig, "empty config should report the sentinel")
 }
