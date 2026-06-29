@@ -4,7 +4,6 @@
 package botbooter
 
 import (
-	"context"
 	"io"
 
 	"github.com/bwmarrin/discordgo"
@@ -29,7 +28,6 @@ var (
 	// ErrMissingWhatsAppConfig is returned by InitAsWhatsAppBot when a required
 	// WhatsAppConfig field is empty.
 	ErrMissingWhatsAppConfig = whatsapp.ErrMissingConfig
-	ErrNotTelegramBot        = telegram.ErrNotTelegramBot
 )
 
 // BotType identifies the messaging platform a [Bot] is connected to.
@@ -126,15 +124,7 @@ func SlackSocketClient(b *Bot) *socketmode.Client { return slack.SocketClient(b)
 // TelegramClient returns the go-telegram bot client backing b, or nil if b is not a Telegram bot.
 func TelegramClient(b *Bot) *bot.Bot { return telegram.Client(b) }
 
-// TelegramResolveAttachmentURL resolves a downloadable URL for a Telegram
-// attachment via the Bot API getFile method. The returned URL embeds the bot
-// token in plaintext — treat it as secret and do not log it. It returns [ErrNotTelegramBot] if b is not
-// a Telegram bot, and ("", nil) if att carries no Telegram file id.
-func TelegramResolveAttachmentURL(ctx context.Context, b *Bot, att Attachment) (string, error) {
-	return telegram.ResolveAttachmentURL(ctx, b, att)
-}
-
 // TelegramEnvSuppressURLWarning names the environment variable that silences the
-// plaintext-token warning [TelegramResolveAttachmentURL] logs on every
-// successful resolve. Set it to any non-empty value to opt out.
+// plaintext-token warning logged on every successful Telegram resolve via
+// [Bot.ResolveAttachmentURL]. Set it to any non-empty value to opt out.
 const TelegramEnvSuppressURLWarning = telegram.EnvSuppressURLWarning
