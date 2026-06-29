@@ -349,6 +349,73 @@ func TestSend_Error(t *testing.T) {
 	asserts.True(t, strings.Contains(err.Error(), "24 hour"), "error should carry the response body")
 }
 
+// The adapter must satisfy the optional core capability so the unified
+// (*core.Bot).ResolveAttachmentURL routes to it rather than the att.URL
+// passthrough (guards the pointer-receiver method-set trap).
+var _ core.AttachmentResolver = (*adapter)(nil)
+
+func TestResolveAttachmentURL(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"url":"https://lookaside.fbsbx.com/media/blob","mime_type":"image/jpeg"}`)
+	}))
+	defer srv.Close()
+
+	a := testAdapter()
+	a.baseURL = srv.URL
+	a.http = srv.Client()
+	a.cfg.GraphVersion = "v23.0"
+	a.cfg.Token = "tok"
+
+	// Resolve through the unified entry point to prove the adapter is routed to.
+	b := core.New(core.WhatsAppBotType, a)
+	url, err := b.ResolveAttachmentURL(context.Background(),
+		core.Attachment{ExtraData: &Media{ID: "MID", MimeType: "image/jpeg"}})
+
+	asserts.NoError(t, err, "resolve should succeed on 200")
+	asserts.Equal(t, url, "https://lookaside.fbsbx.com/media/blob", "returns the Cloud API media url")
+	asserts.Equal(t, gotMethod, http.MethodGet, "resolve should GET")
+	asserts.Equal(t, gotPath, "/v23.0/MID", "resolve should target /{graph-version}/{media-id}")
+	asserts.Equal(t, gotAuth, "Bearer tok", "resolve should set the bearer token")
+}
+
+func TestResolveAttachmentURL_NoMediaID(t *testing.T) {
+	a := testAdapter()
+	a.http = nil // a no-op resolve must short-circuit before any HTTP call
+
+	cases := map[string]any{
+		"WrongExtraData": "not-media",
+		"NilMedia":       (*Media)(nil),
+		"EmptyID":        &Media{ID: ""},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			url, err := a.ResolveAttachmentURL(context.Background(), core.Attachment{ExtraData: extra})
+			asserts.NoError(t, err, "a missing media id is not an error")
+			asserts.Equal(t, url, "", "a missing media id yields no URL")
+		})
+	}
+}
+
+func TestResolveAttachmentURL_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid access token"}}`)
+	}))
+	defer srv.Close()
+
+	a := testAdapter()
+	a.baseURL = srv.URL
+	a.http = srv.Client()
+
+	url, err := a.ResolveAttachmentURL(context.Background(), core.Attachment{ExtraData: &Media{ID: "MID"}})
+
+	asserts.Error(t, err, "a non-2xx response should error")
+	asserts.Equal(t, url, "", "no URL is returned on error")
+	asserts.True(t, strings.Contains(err.Error(), "invalid access token"), "error carries the response body")
+}
+
 func TestAttachments(t *testing.T) {
 	a := testAdapter()
 
