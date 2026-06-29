@@ -6,9 +6,9 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/lao/botbooter)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
-Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, or stdin.
+Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, or stdin.
 
 > ⚠️ **Not production ready.** botbooter is pre-1.0 and under active development. The
 > public API may change without notice, and it has not been hardened or battle-tested for
@@ -17,7 +17,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (Cloud API webhook), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
@@ -68,6 +68,7 @@ go run ./examples/v1            # CLI mode (default, no credentials)
 go run ./examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 go run ./examples/v1 discord    # uses DISCORD_BOT_TOKEN
 go run ./examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
+go run ./examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
 ```
 
 ## Concepts
@@ -82,6 +83,7 @@ Import `botbooter` for the shared types plus the one `botbooter/<platform>` pack
 | `slack.New(appToken, botToken string)` | `*Bot` | Socket Mode (`xapp-…` + `xoxb-…`). |
 | `discord.New(token string)` | `(*Bot, error)` | Enables the message-content intent (see below). |
 | `telegram.New(token string)` | `(*Bot, error)` | Long polling via `getUpdates`; BotFather token. |
+| `whatsapp.New(cfg whatsapp.Config)` | `(*Bot, error)` | Meta Cloud API; runs an inbound webhook HTTP server. |
 
 ### Handlers, commands and middleware
 
@@ -153,8 +155,8 @@ if ev, ok := slack.RawEvent(m); ok {
 	_ = ev.ThreadTimeStamp // anything on the raw *slackevents.MessageEvent
 }
 
-// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, cli.RawData.
-// Underlying client per platform:
+// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, whatsapp.RawMessage, cli.RawData.
+// Underlying client per platform (WhatsApp has none — it speaks the Cloud API over plain HTTP):
 client := slack.Client(bot)        // *slack.Client (nil if not a Slack bot)
 session := discord.Session(bot)    // *discordgo.Session
 tg := telegram.Client(bot)         // *bot.Bot
@@ -186,6 +188,7 @@ documentation for each live in **[docs/platforms.md](docs/platforms.md)**.
 | Slack | `xapp-…` app-level token + `xoxb-…` bot token | [docs/platforms.md](docs/platforms.md#slack) |
 | Discord | bot token + Message Content Intent | [docs/platforms.md](docs/platforms.md#discord) |
 | Telegram | BotFather bot token | [docs/platforms.md](docs/platforms.md#telegram) |
+| WhatsApp | Cloud API token + phone-number id + app secret + verify token + bind addr | [docs/platforms.md](docs/platforms.md#whatsapp) |
 | CLI | nothing (local stdin/stdout) | [docs/platforms.md](docs/platforms.md#cli) |
 
 ## Development
@@ -221,9 +224,9 @@ Alternatives:
 
 ## Roadmap
 
-- [x] Slack, Discord, Telegram and CLI adapters
+- [x] Slack, Discord, Telegram, WhatsApp and CLI adapters
 - [x] Middleware and attachment abstraction
-- [ ] Microsoft Teams, WhatsApp adapters
+- [ ] Microsoft Teams adapter
 - [ ] Richer message types (blocks, embeds)
 - [ ] Unify attachment url retriavel for all implementations
 

@@ -1,8 +1,8 @@
 # Platform setup
 
 How to provision credentials for each platform botbooter supports. Slack,
-Discord and Telegram need tokens (from their app portals or BotFather); the
-CLI needs nothing.
+Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
+needs Cloud API credentials plus a public HTTPS webhook; the CLI needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/docs/platforms.md) — pkg.go.dev renders the README but not this file.
 
@@ -11,6 +11,7 @@ CLI needs nothing.
 - Slack — [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)
 - Discord — [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway)
 - Telegram — [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api)
+- WhatsApp — [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks getting started](https://developers.facebook.com/docs/graph-api/webhooks/getting-started)
 - CLI — [`examples/v1`](../examples/v1) and the [README Quickstart](../README.md#quickstart)
 
 ---
@@ -135,6 +136,80 @@ logs and retries rather than failing fast).
 | `TELEGRAM_BOT_TOKEN` | bot token from step 1 (`123456:ABC-…`) |
 
 **Official docs:** [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api) · [getUpdates / long polling](https://core.telegram.org/bots/api#getupdates)
+
+---
+
+## WhatsApp
+
+botbooter speaks the **Meta WhatsApp Business Cloud API**. Unlike the dial-out
+platforms, the Cloud API delivers inbound messages as **HTTP webhook callbacks**,
+so the adapter runs its own server: it binds a local `Addr`, and you put a
+**TLS-terminating reverse proxy** in front and register the public HTTPS URL with
+Meta. Outbound replies go back over the Cloud API.
+
+1. **Create a Meta app** at
+   [developers.facebook.com/apps](https://developers.facebook.com/apps) →
+   *Create App*, then add the **WhatsApp** product. The dashboard provides a test
+   phone number and a temporary token to get started.
+2. **Collect the credentials** (*WhatsApp → API Setup*):
+   - **Access token** (`WA_TOKEN`) — prefer a long-lived **system-user** token;
+     the default test token expires in ~24h, after which `Send` fails.
+   - **Phone number ID** (`WA_PHONE_ID`) — the sender id on the API Setup page
+     (not the display phone number).
+   - **App secret** (`WA_APP_SECRET`) — *App Settings → Basic → App Secret*. It
+     verifies the `X-Hub-Signature-256` HMAC on every inbound request; without it
+     the endpoint would accept spoofed payloads.
+3. **Choose a verify token** (`WA_VERIFY_TOKEN`) — any string you pick. Meta
+   echoes it back during the one-time webhook handshake.
+4. **Expose the webhook** — run the bot bound to `WA_ADDR` (e.g. `:8080`), put
+   HTTPS in front (a reverse proxy, or a tunnel like ngrok for local testing),
+   then in *WhatsApp → Configuration → Webhook* set the **callback URL** to your
+   public `https://…/webhook` and the **verify token** to the same
+   `WA_VERIFY_TOKEN`, and subscribe to the **messages** field.
+
+```go
+import "github.com/lao/botbooter/whatsapp"
+
+bot, err := whatsapp.New(whatsapp.Config{
+	Token:         os.Getenv("WA_TOKEN"),
+	PhoneNumberID: os.Getenv("WA_PHONE_ID"),
+	AppSecret:     os.Getenv("WA_APP_SECRET"),
+	VerifyToken:   os.Getenv("WA_VERIFY_TOKEN"),
+	Addr:          os.Getenv("WA_ADDR"), // e.g. ":8080"; a bare "8080" is accepted
+})
+```
+
+Optional `whatsapp.Config` fields: `Path` (webhook route, default `/webhook`),
+`GraphVersion` (Graph API version, default `v23.0`), and `HTTPClient` (the
+outbound HTTP client; defaults to a 30-second timeout).
+
+Inbound media arrives **by id, not URL**: `Attachment.ExtraData` holds a
+`*whatsapp.Media`; resolve the bytes with `GET /{media-id}` using your access
+token. `Send` delivers free-form text only inside the 24-hour customer-service
+window; outside it, Meta requires a pre-approved template (not yet supported).
+
+**Environment variables** (read by the bundled example):
+
+| Variable | Value |
+|---|---|
+| `WA_TOKEN` | Cloud API access token from step 2 |
+| `WA_PHONE_ID` | phone number id from step 2 |
+| `WA_APP_SECRET` | app secret from step 2 (HMAC verification) |
+| `WA_VERIFY_TOKEN` | the verify token you chose in step 3 |
+| `WA_ADDR` | local bind address, e.g. `:8080` (a bare port is accepted) |
+| `WA_PATH` | optional webhook route; defaults to `/webhook` |
+
+#### No messages?
+
+- **403 on every callback** — the `X-Hub-Signature-256` HMAC failed:
+  `WA_APP_SECRET` doesn't match the app, or a proxy mutates the request body
+  before it reaches the bot (the signature is computed over the raw bytes).
+- **Webhook won't verify** — the handshake `GET` needs `WA_VERIFY_TOKEN` to match
+  exactly and your public HTTPS URL to reach `Addr`.
+- **`Send` fails** — an expired token, or you're outside the 24-hour window
+  (a template message is required there).
+
+**Official docs:** [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks](https://developers.facebook.com/docs/graph-api/webhooks/getting-started) · [Webhook components](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components)
 
 ---
 
