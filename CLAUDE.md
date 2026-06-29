@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-botbooter is a Go library (module `github.com/lao/botbooter`, Go 1.23+) for writing a chat bot once and running it on Slack (Socket Mode), Discord (Gateway), Telegram (Bot API) or a local CLI. Consumers register regex-matched `Command` handlers plus optional `Middleware` and call `Run(ctx)`; the platform is hidden behind a single `Bot` type.
+botbooter is a Go library (module `github.com/lao/botbooter`, Go 1.23+) for writing a chat bot once and running it on Slack (Socket Mode), Discord (Gateway), Telegram (Bot API), WhatsApp (Cloud API webhook) or a local CLI. Consumers register regex-matched `Command` handlers plus optional `Middleware` and call `Run(ctx)`; the platform is hidden behind a single `Bot` type.
 
 ## Commands
 
@@ -29,9 +29,9 @@ The codebase is a **facade over internal packages**. Understanding the split is 
 
 - **`internal/core`** — the platform-agnostic engine: the `Bot` struct, command/middleware dispatch, and the connect/run/disconnect lifecycle. It depends on no platform's connection logic. The seam is the **`Adapter` interface** (`Connect`, `Disconnect`, `Send`, `Attachments`). The Bot drives an adapter and hands it an **`AdapterDeps`** struct of callbacks (`Dispatch`, `Done`, `Disconnect`) so adapters in other packages can drive the Bot's unexported internals without those internals leaking.
 
-- **`internal/{cli,slack,discord,telegram}`** — one `core.Adapter` implementation each. Each exposes `New(...)` returning a `*core.Bot` built via `core.New(botType, adapter)`, plus package-level accessors (`slack.Client`, `discord.Session`, …) that recover the concrete adapter from a `*Bot` via `core.AdapterAs[T]` and hand back the raw client.
+- **`internal/{cli,slack,discord,telegram,whatsapp}`** — one `core.Adapter` implementation each. Each exposes `New(...)` returning a `*core.Bot` built via `core.New(botType, adapter)`, plus package-level accessors (`slack.Client`, `discord.Session`, …) that recover the concrete adapter from a `*Bot` via `core.AdapterAs[T]` and hand back the raw client.
 
-- **`{cli,slack,discord,telegram}`** (public per-platform packages) — a thin wrapper over each `internal/<platform>` adapter, importing only that platform's SDK. Each exposes the typed constructor (`slack.New`, `discord.New`, `telegram.New`, `cli.New`, returning `*botbooter.Bot`) and that platform's raw/client accessors (`slack.Client(bot)`, `discord.Session(bot)`, `telegram.RawUpdate`, `telegram.ResolveAttachmentURL`, …). A consumer imports `botbooter` plus the one `botbooter/<platform>` it deploys, so unused platform SDKs never enter its build graph. Per-package `imports_test.go` guards (direct imports) and the root `isolation_deps_test.go` (transitive closure via `go list -deps`) lock this in.
+- **`{cli,slack,discord,telegram,whatsapp}`** (public per-platform packages) — a thin wrapper over each `internal/<platform>` adapter, importing only that platform's SDK (CLI and WhatsApp need none — WhatsApp speaks the Cloud API over plain HTTP). Each exposes the typed constructor (`slack.New`, `discord.New`, `telegram.New`, `whatsapp.New`, `cli.New`, returning `*botbooter.Bot`) and that platform's raw/client accessors (`slack.Client(bot)`, `discord.Session(bot)`, `telegram.RawUpdate`, `telegram.ResolveAttachmentURL`, …). A consumer imports `botbooter` plus the one `botbooter/<platform>` it deploys, so unused platform SDKs never enter its build graph. Per-package `imports_test.go` guards (direct imports) and the root `isolation_deps_test.go` (transitive closure via `go list -deps`) lock this in.
 
 **To add a platform:** add a `core.BotType` iota const + `String()` case in `internal/core`; create `internal/<platform>` implementing `core.Adapter`; add a public `<platform>/` package wrapping it with a typed `New` + accessors, **plus its `imports_test.go` SDK-ban guard and a present+absent entry in the root `isolation_deps_test.go`**; and re-export the new `BotType` const in `botbooter.go`. The lifecycle/dispatch in `core` need no changes.
 

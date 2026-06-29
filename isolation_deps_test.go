@@ -49,6 +49,7 @@ func TestIsolationDeps(t *testing.T) {
 		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram}, []string{slackgo}},
 		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram}, []string{discordgo}},
 		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo}, []string{gotelegram}},
+		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.pkg, func(t *testing.T) {

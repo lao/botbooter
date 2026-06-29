@@ -18,6 +18,8 @@ func TestBotType_String(t *testing.T) {
 	asserts.Equal(t, SlackBotType.String(), "slack", "Slack string")
 	asserts.Equal(t, DiscordBotType.String(), "discord", "Discord string")
 	asserts.Equal(t, CLIBotType.String(), "cli", "CLI string")
+	asserts.Equal(t, TelegramBotType.String(), "telegram", "Telegram string")
+	asserts.Equal(t, WhatsAppBotType.String(), "whatsapp", "WhatsApp string")
 	asserts.Equal(t, BotType(999).String(), "BotType(999)", "unknown string")
 }
 
