@@ -271,3 +271,64 @@ func TestAdapterAs(t *testing.T) {
 	_, ok = AdapterAs[*adapterMismatch](bot)
 	asserts.False(t, ok, "AdapterAs should report false for a different type")
 }
+
+// resolverStub is a stubAdapter that also implements AttachmentResolver, recording
+// the context it was handed so a test can assert ctx is threaded through.
+type resolverStub struct {
+	stubAdapter
+	url    string
+	err    error
+	gotCtx context.Context
+	called bool
+}
+
+func (r *resolverStub) ResolveAttachmentURL(ctx context.Context, _ Attachment) (string, error) {
+	r.called = true
+	r.gotCtx = ctx
+	return r.url, r.err
+}
+
+func TestBot_ResolveAttachmentURL_NilAdapter(t *testing.T) {
+	bot := &Bot{BotType: BotType(999)}
+
+	url, err := bot.ResolveAttachmentURL(context.Background(), Attachment{URL: "x"})
+
+	asserts.ErrorIs(t, err, ErrUnknownBotType, "ResolveAttachmentURL with no adapter")
+	asserts.Equal(t, url, "", "no URL when the adapter is missing")
+}
+
+func TestBot_ResolveAttachmentURL_Passthrough(t *testing.T) {
+	bot := New(SlackBotType, &stubAdapter{})
+
+	url, err := bot.ResolveAttachmentURL(context.Background(), Attachment{URL: "https://cdn/x"})
+	asserts.NoError(t, err, "passthrough is not an error")
+	asserts.Equal(t, url, "https://cdn/x", "an adapter without a resolver returns att.URL verbatim")
+
+	empty, err := bot.ResolveAttachmentURL(context.Background(), Attachment{})
+	asserts.NoError(t, err, "an empty att.URL is not an error")
+	asserts.Equal(t, empty, "", "an empty att.URL passes through as empty")
+}
+
+func TestBot_ResolveAttachmentURL_DelegatesToResolver(t *testing.T) {
+	r := &resolverStub{url: "resolved://link"}
+	bot := New(TelegramBotType, r)
+
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "sentinel")
+
+	url, err := bot.ResolveAttachmentURL(ctx, Attachment{URL: "ignored"})
+
+	asserts.NoError(t, err, "resolver success")
+	asserts.Equal(t, url, "resolved://link", "the resolver result is returned, not att.URL")
+	asserts.True(t, r.called, "the resolver was invoked")
+	asserts.True(t, r.gotCtx.Value(ctxKey{}) == "sentinel", "ctx is threaded through to the resolver")
+}
+
+func TestBot_ResolveAttachmentURL_ResolverEmptyNotOverridden(t *testing.T) {
+	bot := New(TelegramBotType, &resolverStub{url: ""})
+
+	url, err := bot.ResolveAttachmentURL(context.Background(), Attachment{URL: "should-not-leak"})
+
+	asserts.NoError(t, err, "a resolver returning empty is not an error")
+	asserts.Equal(t, url, "", "an adapter-returned empty is NOT overridden by att.URL")
+}
