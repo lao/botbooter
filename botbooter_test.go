@@ -431,12 +431,21 @@ func TestSessionAccessors(t *testing.T) {
 
 	cliBot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
 	asserts.True(t, botbooter.SlackClient(cliBot) == nil, "SlackClient nil for non-Slack bot")
-
-	_, telegramErr := botbooter.TelegramResolveAttachmentURL(context.Background(), cliBot, botbooter.Attachment{})
-	asserts.ErrorIs(t, telegramErr, botbooter.ErrNotTelegramBot, "TelegramResolveAttachmentURL rejects a non-Telegram bot")
 }
 
 func TestInitAsWhatsAppBot_MissingConfig(t *testing.T) {
 	_, err := botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{})
 	asserts.ErrorIs(t, err, botbooter.ErrMissingWhatsAppConfig, "empty config should report the sentinel")
+}
+
+// TestBot_ResolveAttachmentURL_Alias proves the unified method surfaces through
+// the Bot = core.Bot alias and, for an adapter without a resolver, passes the
+// attachment's URL through unchanged.
+func TestBot_ResolveAttachmentURL_Alias(t *testing.T) {
+	cliBot := botbooter.InitAsCLIBot(emptyReader{}, &syncBuffer{})
+
+	url, err := cliBot.ResolveAttachmentURL(context.Background(), botbooter.Attachment{URL: "/tmp/photo.jpg"})
+
+	asserts.NoError(t, err, "CLI bot resolves via the unified alias method")
+	asserts.Equal(t, url, "/tmp/photo.jpg", "an adapter without a resolver passes att.URL through")
 }
