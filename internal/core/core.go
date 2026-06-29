@@ -348,7 +348,8 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 //
 // The result is consumed DIFFERENTLY per platform and is not uniformly fetchable
 // with a bare GET:
-//   - Discord: a plain GET on a signed CDN URL (~24h; consume promptly, re-resolve on 404).
+//   - Discord: att.URL is already a signed CDN link (~24h), returned as-is via the
+//     passthrough; fetch it with a plain GET and consume promptly.
 //   - Slack: NOT directly fetchable — download via the Slack Web API client
 //     (SlackClient(b).GetFileContext), which injects the bot token.
 //   - Telegram: a plain GET on a SECRET, ~1h URL that embeds the bot token in
