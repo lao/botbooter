@@ -19,6 +19,10 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/lao/botbooter"
+	"github.com/lao/botbooter/cli"
+	"github.com/lao/botbooter/discord"
+	"github.com/lao/botbooter/slack"
+	"github.com/lao/botbooter/telegram"
 )
 
 func echoHandler(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message) {
@@ -48,7 +52,7 @@ func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botboot
 
 	// URL is empty on platforms that deliver media by id rather than link:
 	// Telegram leaves it blank by design (the FileID rides in ExtraData). Call
-	// botbooter.TelegramResolveAttachmentURL(ctx, bot, a) to fetch a download link
+	// telegram.ResolveAttachmentURL(ctx, bot, a) to fetch a download link
 	// on demand — that link embeds the bot token, so never log it in production.
 	// ExtraData below also carries user-controlled fields (e.g. a Telegram
 	// document's FileName); this demo prints it for illustration — don't log it
@@ -67,13 +71,13 @@ func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botboot
 func newBot(botType string) (*botbooter.Bot, error) {
 	switch botType {
 	case "slack":
-		return botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN")), nil
+		return slack.New(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN")), nil
 	case "discord":
-		return botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
+		return discord.New(os.Getenv("DISCORD_BOT_TOKEN"))
 	case "telegram":
-		return botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
+		return telegram.New(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	case "cli":
-		return botbooter.InitAsCLIBot(os.Stdin, os.Stdout), nil
+		return cli.New(os.Stdin, os.Stdout), nil
 	default:
 		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram or cli)", botType)
 	}
