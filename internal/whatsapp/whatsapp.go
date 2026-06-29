@@ -48,6 +48,11 @@ const (
 	// maxErrorBodyBytes caps how much of a non-2xx Send response body is read into
 	// the returned error, bounding memory and log size from an unexpected response.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
+
+	// maxMediaMetaBytes caps the getMedia metadata response decoded when resolving
+	// an attachment URL. The payload is a small JSON object (url, mime_type, ...);
+	// the cap bounds memory from an unexpected response.
+	maxMediaMetaBytes = 64 << 10 // 64 KiB
 )
 
 // ErrMissingConfig is returned by New when a required Config field is empty.
@@ -348,9 +353,11 @@ func (a *adapter) ResolveAttachmentURL(ctx context.Context, att core.Attachment)
 	var out struct {
 		URL string `json:"url"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRequestBytes)).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMediaMetaBytes)).Decode(&out); err != nil {
 		return "", fmt.Errorf("whatsapp: decode media %s response: %w", media.ID, err)
 	}
+	// Drain any trailing bytes so the connection can be reused (keep-alive).
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return out.URL, nil
 }
 
