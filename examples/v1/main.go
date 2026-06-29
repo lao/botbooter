@@ -9,9 +9,7 @@
 package main
 
 import (
-	"cmp"
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -20,114 +18,46 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/lao/botbooter"
-	"github.com/lao/botbooter/cli"
-	"github.com/lao/botbooter/discord"
-	"github.com/lao/botbooter/slack"
-	"github.com/lao/botbooter/telegram"
-	"github.com/lao/botbooter/whatsapp"
 )
 
-func echoHandler(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message) {
-	reply := "You said: " + strings.TrimPrefix(message.Content, "echo ")
-	if err := bot.SendMessageContext(ctx, message.ChannelID, reply); err != nil {
-		log.Println("failed to send message:", err)
-	}
-}
-
-// loggingMiddleware dumps every field of each incoming message plus its
-// attachments, then continues the chain
-func loggingMiddleware(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message, next botbooter.CommandHandler) {
-	// AuthorName is best-effort; empty on platforms that deliver only an id (e.g. Slack).
-	log.Printf("message from %s in channel %s:", cmp.Or(message.AuthorName, message.UserID), message.ChannelID)
-	log.Printf("  ID:         %s", message.ID)
-	log.Printf("  UserID:     %s", message.UserID)
-	log.Printf("  AuthorName: %s", message.AuthorName)
-	log.Printf("  ChannelID:  %s", message.ChannelID)
-	log.Printf("  Content:    %s", message.Content)
-	log.Printf("  Timestamp:  %s", message.Timestamp)
-	log.Printf("  ReplyToID:  %s", message.ReplyToID)
-	log.Printf("  MentionedUserIDs: %v", message.MentionedUserIDs)
-
-	// bot.ResolveAttachmentURL(ctx, a) is the unified way to get a downloadable
-	// URL: Discord returns a public CDN link; Slack returns a url_private link you
-	// must fetch via slack.Client(bot).GetFileContext (it needs the bot token);
-	// Telegram resolves a link that EMBEDS the bot token in plaintext — secret,
-	// so this demo does not print it; WhatsApp returns a link you fetch with the
-	// Cloud API bearer token; CLI returns a local file path.
-	// ExtraData also carries user-controlled fields (e.g. a Telegram document's
-	// FileName); this demo prints it for illustration — don't log it raw in production.
-	if attachments, err := bot.GetAttachments(message); err != nil {
-		log.Println("  failed to get attachments:", err)
-	} else {
-		for i, a := range attachments {
-			log.Printf("  attachment[%d]: isImage=%t url=%q extraData=%+v", i, a.IsImage, a.URL, a.ExtraData)
-			if url, err := bot.ResolveAttachmentURL(ctx, a); err != nil {
-				log.Printf("  attachment[%d]: resolve failed: %v", i, err)
-			} else if url != "" {
-				log.Printf("  attachment[%d]: resolved a downloadable URL (not printed; may embed a secret)", i)
-			}
-		}
-	}
-
-	next(ctx, bot, message)
-}
-
-func newBot(botType string) (*botbooter.Bot, error) {
-	switch botType {
-	case "slack":
-		return slack.New(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN")), nil
-	case "discord":
-		return discord.New(os.Getenv("DISCORD_BOT_TOKEN"))
-	case "telegram":
-		return telegram.New(os.Getenv("TELEGRAM_BOT_TOKEN"))
-	case "whatsapp":
-		return whatsapp.New(whatsapp.Config{
-			Token:         os.Getenv("WA_TOKEN"),
-			PhoneNumberID: os.Getenv("WA_PHONE_ID"),
-			AppSecret:     os.Getenv("WA_APP_SECRET"),
-			VerifyToken:   os.Getenv("WA_VERIFY_TOKEN"),
-			Addr:          os.Getenv("WA_ADDR"),
-			Path:          os.Getenv("WA_PATH"), // optional; defaults to /webhook
-		})
-	case "cli":
-		return cli.New(os.Stdin, os.Stdout), nil
-	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp or cli)", botType)
-	}
+type ExampleBot struct {
+	*botbooter.Bot
 }
 
 func main() {
 	_ = godotenv.Load(".env")
 
-	botType := "cli"
-	if len(os.Args) > 1 {
-		botType = strings.ToLower(os.Args[1])
-	}
-
+	botType := requestedBotType(os.Args)
 	bot, err := newBot(botType)
 	if err != nil {
 		log.Fatal(err)
 	}
+	b := &ExampleBot{Bot: bot}
 
-	bot.AddMiddleware(loggingMiddleware)
-
-	if err := bot.AddHandler(botbooter.Command{Pattern: "^echo ", Handler: echoHandler}); err != nil {
+	b.AddMiddleware(loggingMiddleware)
+	if err := b.HandleFunc("^echo ", b.echo); err != nil {
 		log.Fatal(err)
 	}
-
-	bot.SetUnknownCommandHandler(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
-		log.Printf("unknown command: %q", m.Content)
-	})
-
-	if botType == "cli" {
-		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)
-	}
+	b.SetUnknownCommandHandler(b.unknownCommand)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	log.Printf("botbooter running as %q bot", botType)
-	if err := bot.Run(ctx); err != nil {
+	if err := b.Run(ctx); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func (*ExampleBot) unknownCommand(_ context.Context, _ *botbooter.Bot, message *botbooter.Message) {
+	log.Printf("unknown command: %q", message.Content)
+}
+
+func (b *ExampleBot) echo(ctx context.Context, _ *botbooter.Bot, message *botbooter.Message) {
+	log.Printf("echo command: %q", message.Content)
+
+	reply := "You said: " + strings.TrimPrefix(message.Content, "echo ")
+	if err := b.SendMessageContext(ctx, message.ChannelID, reply); err != nil {
+		log.Println("failed to send message:", err)
 	}
 }
