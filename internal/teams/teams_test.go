@@ -6,8 +6,10 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +35,12 @@ const testKID = "test-kid"
 // allowedServiceURL is a real-looking, allowlisted Bot Framework serviceUrl so
 // inbound tests exercise the happy path without a live host.
 const allowedServiceURL = "https://smba.trafficmanager.net/amer/"
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 func signingKey(t *testing.T) *rsa.PrivateKey {
 	t.Helper()
@@ -197,6 +205,16 @@ func TestNew_NormalizesBareAddr(t *testing.T) {
 			asserts.Equal(t, a.cfg.Addr, want, "Addr should be normalized")
 		})
 	}
+}
+
+func TestNew_NormalizesPath(t *testing.T) {
+	cfg := validConfig()
+	cfg.Path = "messages"
+
+	a, err := newAdapter(cfg)
+
+	asserts.NoError(t, err, "newAdapter should succeed")
+	asserts.Equal(t, a.cfg.Path, "/messages", "Path should start with a slash")
 }
 
 func TestNew_MissingConfig(t *testing.T) {
@@ -372,6 +390,9 @@ func TestPublicKey_RefreshesOnKidMiss(t *testing.T) {
 	k, err := a.publicKey(ctx, testKID)
 	asserts.NoError(t, err, "known kid resolves after fetch")
 	asserts.NotNil(t, k, "key returned")
+	cached, err := a.publicKey(ctx, testKID)
+	asserts.NoError(t, err, "known kid resolves from cache")
+	asserts.Equal(t, cached, k, "cached key returned")
 
 	// Now the cache is fresh: an unknown kid is rejected without a re-fetch.
 	_, err = a.publicKey(ctx, "rotated-kid")
@@ -488,6 +509,31 @@ func TestSend_Error(t *testing.T) {
 	asserts.Error(t, err, "non-2xx send should error")
 }
 
+func TestSend_RequestError(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.token = cachedToken{value: "token", expiry: time.Now().Add(time.Hour)}
+	a.recordConversation("conv-1", ":")
+
+	err = a.Send(context.Background(), "conv-1", "hi")
+
+	asserts.Error(t, err, "malformed service URL should fail request creation")
+}
+
+func TestSend_TransportError(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.token = cachedToken{value: "token", expiry: time.Now().Add(time.Hour)}
+	a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transport failed")
+	})}
+	a.recordConversation("conv-1", allowedServiceURL)
+
+	err = a.Send(context.Background(), "conv-1", "hi")
+
+	asserts.Error(t, err, "transport failure should fail Send")
+}
+
 func TestAccessToken_Caches(t *testing.T) {
 	var hits int
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -520,6 +566,16 @@ func TestRecordConversation_BoundedEviction(t *testing.T) {
 	asserts.Equal(t, len(a.convs), maxConversations, "map capped at maxConversations")
 	_, firstPresent := a.convs["c0"]
 	asserts.False(t, firstPresent, "oldest entry evicted")
+}
+
+func TestRecordConversation_IgnoresIncompleteMapping(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+
+	a.recordConversation("", allowedServiceURL)
+	a.recordConversation("conv-1", "")
+
+	asserts.Equal(t, len(a.convs), 0, "incomplete mappings should not be recorded")
 }
 
 func TestAttachments(t *testing.T) {
@@ -616,6 +672,42 @@ func TestAccessToken_HTTPError(t *testing.T) {
 	asserts.Error(t, err, "non-2xx token response should error")
 }
 
+func TestAccessToken_RequestError(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.tokenURL = ":"
+
+	_, err = a.accessToken(context.Background())
+
+	asserts.Error(t, err, "malformed token URL should fail request creation")
+}
+
+func TestAccessToken_TransportError(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transport failed")
+	})}
+
+	_, err = a.accessToken(context.Background())
+
+	asserts.Error(t, err, "transport failure should fail token request")
+}
+
+func TestAccessToken_InvalidJSON(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "not-json")
+	}))
+	defer tokenSrv.Close()
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.tokenURL = tokenSrv.URL
+
+	_, err = a.accessToken(context.Background())
+
+	asserts.Error(t, err, "invalid token response should fail decoding")
+}
+
 func TestAccessToken_MissingToken(t *testing.T) {
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"expires_in": 3600})
@@ -671,6 +763,66 @@ func TestPublicKey_OpenIDError(t *testing.T) {
 	asserts.Error(t, err, "OpenID metadata error should propagate")
 }
 
+func TestValidateInbound_RejectsUnexpectedSigningMethod(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, validClaims(a.cfg.AppID, allowedServiceURL))
+	tok.Header["kid"] = testKID
+	raw, err := tok.SignedString([]byte("secret"))
+	asserts.NoError(t, err, "sign token")
+
+	err = a.validateInbound(context.Background(), "Bearer "+raw, allowedServiceURL)
+
+	asserts.ErrorIs(t, err, errUnauthorized, "non-RS256 token should be unauthorized")
+}
+
+func TestFetchJWKS_MissingURI(t *testing.T) {
+	openid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer openid.Close()
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.openIDURL = openid.URL
+
+	_, err = a.fetchJWKS(context.Background())
+
+	asserts.Error(t, err, "metadata without jwks_uri should fail")
+}
+
+func TestFetchJWKS_SkipsInvalidKeys(t *testing.T) {
+	pub := signingKey(t).Public().(*rsa.PublicKey)
+	validN := base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
+	validE := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes())
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openid", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": base + "/keys"})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{
+			{"kid": "not-rsa", "kty": "EC", "n": validN, "e": validE},
+			{"kid": "bad-modulus", "kty": "RSA", "n": "!", "e": validE},
+			{"kid": "bad-exponent", "kty": "RSA", "n": validN, "e": "!"},
+			{"kid": "wide-exponent", "kty": "RSA", "n": validN, "e": base64.RawURLEncoding.EncodeToString(make([]byte, 9))},
+			{"kid": "small-modulus", "kty": "RSA", "n": base64.RawURLEncoding.EncodeToString([]byte{1}), "e": validE},
+			{"kid": testKID, "kty": "RSA", "n": validN, "e": validE},
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	base = srv.URL
+	defer srv.Close()
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.openIDURL = base + "/openid"
+
+	keys, err := a.fetchJWKS(context.Background())
+
+	asserts.NoError(t, err, "valid key should keep JWKS usable")
+	asserts.Equal(t, len(keys), 1, "invalid keys should be skipped")
+	asserts.NotNil(t, keys[testKID], "valid key should be retained")
+}
+
 func TestPublicKey_NoUsableKeys(t *testing.T) {
 	var base string
 	mux := http.NewServeMux()
@@ -700,6 +852,59 @@ func TestConnect_BadAddr(t *testing.T) {
 		Disconnect: func() error { return nil },
 	})
 	asserts.Error(t, err, "binding an invalid address should fail Connect")
+}
+
+func TestConnect_RejectsNonPOST(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	asserts.NoError(t, err, "reserve loopback address")
+	addr := ln.Addr().String()
+	asserts.NoError(t, ln.Close(), "release loopback address")
+
+	cfg := validConfig()
+	cfg.Addr = addr
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "newAdapter")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := core.AdapterDeps{Done: func(error) {}, Disconnect: a.Disconnect}
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+	defer func() { asserts.NoError(t, a.Disconnect(), "Disconnect") }()
+
+	resp, err := http.Get("http://" + addr + a.cfg.Path)
+	asserts.NoError(t, err, "GET webhook")
+	defer func() { _ = resp.Body.Close() }()
+
+	asserts.Equal(t, resp.StatusCode, http.StatusMethodNotAllowed, "webhook should require POST")
+}
+
+func TestGetJSON_Errors(t *testing.T) {
+	t.Run("request", func(t *testing.T) {
+		a, err := newAdapter(validConfig())
+		asserts.NoError(t, err, "newAdapter")
+		err = a.getJSON(context.Background(), ":", &struct{}{})
+		asserts.Error(t, err, "malformed URL should fail request creation")
+	})
+
+	t.Run("transport", func(t *testing.T) {
+		a, err := newAdapter(validConfig())
+		asserts.NoError(t, err, "newAdapter")
+		a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("transport failed")
+		})}
+		err = a.getJSON(context.Background(), "https://example.com", &struct{}{})
+		asserts.Error(t, err, "transport failure should propagate")
+	})
+
+	t.Run("decode", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "not-json")
+		}))
+		defer srv.Close()
+		a, err := newAdapter(validConfig())
+		asserts.NoError(t, err, "newAdapter")
+		err = a.getJSON(context.Background(), srv.URL, &struct{}{})
+		asserts.Error(t, err, "invalid JSON should fail decoding")
+	})
 }
 
 func TestConnect_ContextCancelDisconnects(t *testing.T) {
