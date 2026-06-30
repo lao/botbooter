@@ -44,7 +44,9 @@ token* (`xapp-…`) and a *bot token* (`xoxb-…`).
    **human** account — the bot ignores its own and other bots' messages.
 
 ```go
-bot := botbooter.InitAsSlackBot(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
+import "github.com/lao/botbooter/slack"
+
+bot := slack.New(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
 ```
 
 **Environment variables** (read by the bundled example):
@@ -86,7 +88,9 @@ botbooter connects over the **Gateway** and requests the privileged
    permissions, then open the generated URL to add it to a server.
 
 ```go
-bot, err := botbooter.InitAsDiscordBot(os.Getenv("DISCORD_BOT_TOKEN"))
+import "github.com/lao/botbooter/discord"
+
+bot, err := discord.New(os.Getenv("DISCORD_BOT_TOKEN"))
 ```
 
 **Environment variables** (read by the bundled example):
@@ -116,7 +120,9 @@ dial-out model of Slack Socket Mode and the Discord Gateway).
    from a **human** account. The bot ignores its own and other bots' messages.
 
 ```go
-bot, err := botbooter.InitAsTelegramBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
+import "github.com/lao/botbooter/telegram"
+
+bot, err := telegram.New(os.Getenv("TELEGRAM_BOT_TOKEN"))
 ```
 
 An empty token is rejected at construction; an otherwise-invalid token is not —
@@ -170,7 +176,9 @@ Meta. Outbound replies go back over the Cloud API.
    `WA_VERIFY_TOKEN`, and subscribe to the **messages** field.
 
 ```go
-bot, err := botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{
+import "github.com/lao/botbooter/whatsapp"
+
+bot, err := whatsapp.New(whatsapp.Config{
 	Token:         os.Getenv("WA_TOKEN"),
 	PhoneNumberID: os.Getenv("WA_PHONE_ID"),
 	AppSecret:     os.Getenv("WA_APP_SECRET"),
@@ -179,12 +187,12 @@ bot, err := botbooter.InitAsWhatsAppBot(botbooter.WhatsAppConfig{
 })
 ```
 
-Optional `WhatsAppConfig` fields: `Path` (webhook route, default `/webhook`),
+Optional `whatsapp.Config` fields: `Path` (webhook route, default `/webhook`),
 `GraphVersion` (Graph API version, default `v23.0`), and `HTTPClient` (the
 outbound HTTP client; defaults to a 30-second timeout).
 
 Inbound media arrives **by id, not URL**: `Attachment.ExtraData` holds a
-`*WhatsAppMedia`; resolve the bytes with `GET /{media-id}` using your access
+`*whatsapp.Media`; resolve the bytes with `GET /{media-id}` using your access
 token. `Send` delivers free-form text only inside the 24-hour customer-service
 window; outside it, Meta requires a pre-approved template (not yet supported).
 

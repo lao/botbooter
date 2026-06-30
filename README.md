@@ -45,10 +45,11 @@ import (
 	"strings"
 
 	"github.com/lao/botbooter"
+	"github.com/lao/botbooter/cli"
 )
 
 func main() {
-	bot := botbooter.InitAsCLIBot(os.Stdin, os.Stdout)
+	bot := cli.New(os.Stdin, os.Stdout)
 
 	_ = bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
@@ -74,13 +75,15 @@ go run ./examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / 
 
 ### Constructing a bot
 
+Import `botbooter` for the shared types plus the one `botbooter/<platform>` package you deploy — each constructor lives in its platform package, so a bot that uses one platform never compiles the others' SDKs into its binary:
+
 | Constructor | Signature | Notes |
 |---|---|---|
-| `InitAsCLIBot(in io.Reader, out io.Writer)` | `*Bot` | Local adapter; `nil` defaults to stdin/stdout. |
-| `InitAsSlackBot(appToken, botToken string)` | `*Bot` | Socket Mode (`xapp-…` + `xoxb-…`). |
-| `InitAsDiscordBot(token string)` | `(*Bot, error)` | Enables the message-content intent (see below). |
-| `InitAsTelegramBot(token string)` | `(*Bot, error)` | Long polling via `getUpdates`; BotFather token. |
-| `InitAsWhatsAppBot(cfg WhatsAppConfig)` | `(*Bot, error)` | Meta Cloud API; runs an inbound webhook HTTP server. |
+| `cli.New(in io.Reader, out io.Writer)` | `*Bot` | Local adapter; `nil` defaults to stdin/stdout. |
+| `slack.New(appToken, botToken string)` | `*Bot` | Socket Mode (`xapp-…` + `xoxb-…`). |
+| `discord.New(token string)` | `(*Bot, error)` | Enables the message-content intent (see below). |
+| `telegram.New(token string)` | `(*Bot, error)` | Long polling via `getUpdates`; BotFather token. |
+| `whatsapp.New(cfg whatsapp.Config)` | `(*Bot, error)` | Meta Cloud API; runs an inbound webhook HTTP server. |
 
 ### Handlers, commands and middleware
 
@@ -145,19 +148,20 @@ are best-effort and stay at their zero value when a platform cannot supply them:
 ### Raw platform access
 
 When you need something the normalized fields don't carry, reach the originating
-event or the underlying SDK client through typed accessors — `internal/core`
-stays free of every platform SDK, so these live on the facade:
+event or the underlying SDK client through typed accessors on each platform
+package — `botbooter` and `internal/core` stay free of every platform SDK, so
+these live on `botbooter/<platform>`:
 
 ```go
-if ev, ok := botbooter.SlackRawEvent(m); ok {
+if ev, ok := slack.RawEvent(m); ok {
 	_ = ev.ThreadTimeStamp // anything on the raw *slackevents.MessageEvent
 }
 
-// Raw event per platform: DiscordRawEvent, SlackRawEvent, TelegramRawEvent, WhatsAppRawEvent, CLIRawEvent.
+// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, whatsapp.RawMessage, cli.RawData.
 // Underlying client per platform (WhatsApp has none — it speaks the Cloud API over plain HTTP):
-client := botbooter.SlackClient(bot)         // *slack.Client (nil if not a Slack bot)
-session := botbooter.DiscordSession(bot)     // *discordgo.Session
-tg := botbooter.TelegramClient(bot)          // *bot.Bot
+client := slack.Client(bot)        // *slack.Client (nil if not a Slack bot)
+session := discord.Session(bot)    // *discordgo.Session
+tg := telegram.Client(bot)         // *bot.Bot
 ```
 
 ### Lifecycle
@@ -227,6 +231,7 @@ Alternatives:
 - [ ] Microsoft Teams adapter
 - [ ] Richer message types (blocks, embeds)
 - [ ] Unify attachment url retriavel for all implementations
+- [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend
 
 ## Contributing
 
