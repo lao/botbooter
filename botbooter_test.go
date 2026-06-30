@@ -454,3 +454,47 @@ func TestBot_ResolveAttachmentURL_Alias(t *testing.T) {
 	asserts.NoError(t, err, "CLI bot resolves via the unified alias method")
 	asserts.Equal(t, url, "/tmp/photo.jpg", "an adapter without a resolver passes att.URL through")
 }
+
+// TestCLIBot_Flow_EndToEnd drives a whole multi-step flow through the root API and
+// the serial CLI adapter: trigger, three answers (one validated, one secret),
+// completion. It exercises NewFlow/Ask/Validate/Secret/OnComplete/Answers and
+// Bot.HandleFlow purely through the botbooter package.
+func TestCLIBot_Flow_EndToEnd(t *testing.T) {
+	in := strings.NewReader("signup\nAlice\nalice@example.com\nhunter2\n")
+	out := &syncBuffer{}
+	bot := cli.New(in, out)
+
+	var got botbooter.Answers
+	flow := botbooter.NewFlow("signup").
+		Ask("name", "Name?").
+		Ask("email", "Email?", botbooter.Validate(func(s string) error {
+			if !strings.Contains(s, "@") {
+				return errors.New("need an @")
+			}
+			return nil
+		})).
+		Ask("password", "Password?", botbooter.Secret()).
+		OnComplete(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message, a botbooter.Answers) {
+			got = a
+			_ = b.SendMessageContext(ctx, m.ChannelID, "done")
+		})
+	asserts.NoError(t, bot.HandleFlow("^signup$", flow), "register a flow through the root API")
+
+	asserts.NoError(t, bot.Run(context.Background()), "Run to EOF")
+
+	asserts.Equal(t, got.Get("name"), "Alice", "name collected end-to-end")
+	asserts.Equal(t, got.Get("email"), "alice@example.com", "validated email collected")
+	asserts.Equal(t, got.Get("password"), "hunter2", "secret answer collected and delivered to OnComplete")
+
+	output := out.String()
+	asserts.True(t, strings.Contains(output, "Name?"), "first prompt was sent")
+	asserts.True(t, strings.Contains(output, "done"), "completion message was sent")
+}
+
+// TestHandleFlow_RootSentinel proves the flow-contract sentinels surface through
+// the root package and are errors.Is-checkable.
+func TestHandleFlow_RootSentinel(t *testing.T) {
+	bot := cli.New(emptyReader{}, &syncBuffer{})
+	noComplete := botbooter.NewFlow("x").Ask("a", "a?")
+	asserts.ErrorIs(t, bot.HandleFlow("^x$", noComplete), botbooter.ErrFlowNoOnComplete, "missing OnComplete sentinel via root package")
+}

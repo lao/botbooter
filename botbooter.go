@@ -19,6 +19,16 @@ var (
 	ErrAlreadyConnected = core.ErrAlreadyConnected
 )
 
+// Errors returned by [Bot.HandleFlow]; check them with errors.Is.
+var (
+	ErrFlowEmptyID           = core.ErrFlowEmptyID
+	ErrFlowNoSteps           = core.ErrFlowNoSteps
+	ErrFlowEmptyStepKey      = core.ErrFlowEmptyStepKey
+	ErrFlowDuplicateKey      = core.ErrFlowDuplicateKey
+	ErrFlowNoOnComplete      = core.ErrFlowNoOnComplete
+	ErrFlowAlreadyRegistered = core.ErrFlowAlreadyRegistered
+)
+
 // BotType identifies the messaging platform a [Bot] is connected to.
 type BotType = core.BotType
 
@@ -46,4 +56,23 @@ type (
 	CommandHandler = core.CommandHandler
 	// Middleware wraps message dispatch. See [core.Middleware].
 	Middleware = core.Middleware
+
+	// Flow is a declarative multi-step conversational dialog. See [core.Flow].
+	Flow = core.Flow
+	// Answers is the read-only set of answers collected by a flow. See [core.Answers].
+	Answers = core.Answers
+	// AskOption configures a flow step (see [Validate], [Secret]). See [core.AskOption].
+	AskOption = core.AskOption
 )
+
+// NewFlow starts building a multi-step conversational [Flow] with the given
+// stable id, registered via [Bot.HandleFlow]. See [core.NewFlow].
+func NewFlow(id string) *Flow { return core.NewFlow(id) }
+
+// Validate attaches a validator to a flow step; a non-nil error re-prompts the
+// step. See [core.Validate].
+func Validate(fn func(string) error) AskOption { return core.Validate(fn) }
+
+// Secret marks a flow step's answer sensitive: kept out of framework logs and any
+// serialized Store state. It is not encryption. See [core.Secret].
+func Secret() AskOption { return core.Secret() }

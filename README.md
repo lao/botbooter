@@ -113,6 +113,51 @@ bot.AddMiddleware(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Messa
 
 `AddHandler` / `HandleFunc` return an error if the pattern is not a valid regular expression.
 
+### Conversational flows
+
+A `Flow` runs a multi-step, context-aware dialog — ask a question, wait for that
+user's reply, optionally validate it, advance to the next — without hand-writing a
+per-user state machine. Register it like a command; a matching message starts it,
+and each later message from that conversation is routed to the active flow.
+
+```go
+signup := botbooter.NewFlow("signup"). // id must be stable (load-bearing for persistence)
+	Ask("name", "What's your name?").
+	Ask("email", "What's your email?", botbooter.Validate(validEmail)).
+	Ask("password", "Choose a password.", botbooter.Secret()).
+	OnComplete(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message, a botbooter.Answers) {
+		createUser(a.Get("name"), a.Get("email"), a.Get("password"))
+		_ = b.SendMessageContext(ctx, m.ChannelID, "You're all set 🎉")
+	})
+
+if err := bot.HandleFlow("^sign ?up$", signup); err != nil {
+	log.Fatal(err)
+}
+```
+
+`HandleFlow` validates the flow and returns an `errors.Is`-checkable sentinel
+(`ErrFlowEmptyID`, `ErrFlowNoSteps`, `ErrFlowDuplicateKey`, `ErrFlowNoOnComplete`,
+`ErrFlowAlreadyRegistered`, …) — plus the pattern error from a bad regexp.
+`Validate(fn)` re-prompts the same step on a non-nil error (using `err.Error()` as
+the nudge); an empty/whitespace reply is a non-answer and also re-prompts.
+
+Things to know (v1):
+
+- **DM-intended.** While a flow is active it shadows the command table, so *every*
+  message in that conversation becomes an answer until it completes, the user types
+  the cancel word (default `"cancel"`, set with `CancelWord`, disable with `""`), or
+  it times out (per-step idle TTL, default 10m via `Timeout`, slides each step). In a
+  public channel this means a flow consumes everyone's messages — run flows in DMs.
+- **`Secret()`** keeps an answer out of framework logs and any future serialized
+  `Store` state. It is **not** encryption, does not police your own middleware, and
+  does not hide the answer from other members of a public channel.
+- **In-memory only.** In-flight flows live in memory and are lost on restart;
+  v1 is single-instance. (A pluggable `Store` and multi-instance are on the roadmap.)
+- **Best-effort ordering.** State is never corrupted under concurrent delivery, but a
+  user who sends faster than prompts arrive may have an answer matched to a later step.
+- **Restart needs cancel.** Re-triggering a flow while it is active is consumed as an
+  answer; cancel first to start over.
+
 ### Attachments
 
 ```go
@@ -231,7 +276,44 @@ Alternatives:
 - [ ] Microsoft Teams adapter
 - [ ] Richer message types (blocks, embeds)
 - [ ] Unify attachment url retriavel for all implementations
+- [x] Conversational flows — multi-step forms via `HandleFlow` (linear, in-memory, single-instance)
 - [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend
+
+### Conversational flows — deferred work
+
+v1 flows are **linear, plain-text, in-memory and single-instance** (see the caveats
+under [Conversational flows](#conversational-flows)). The following each reuse the v1
+engine with no state migration:
+
+1. **Branching.** Add via `Next func(Answers) string` (step id → next step id) or
+   `AskIf(cond, …)`. The state already stores `Answers`, so branching needs no migration.
+2. **DM-only / mention-gated flows.** Requires a cross-platform `Message.IsDirect` (and/or
+   "addressed to bot") signal that `Message` lacks today. Until then, channel scoping is
+   documented (§4), not enforced.
+3. **Command allowlist during a flow.** An opt-in set of global commands (e.g. `help`) that
+   pierce an active flow, instead of cancel/expiry being the only exits.
+4. **`Store`-backed persistence** (§5) and **§2 blocking `Ask`** (with the non-blocking
+   delivery + atomic-clear requirements already specified in §2).
+5. **Multi-instance / horizontal scaling.** Gated on the shared `Store` (item 4) **plus** a
+   concurrency redesign — the §4 in-process striped locks must be replaced by store-level
+   atomicity, because the validator is user Go code and cannot run inside a Redis
+   transaction. Plan: **optimistic compare-and-swap** on the `Version` field — read
+   `(state, version)` → run validator in Go → write only if `version` is unchanged; on
+   conflict the other replica already advanced, so drop (or re-read) the message. One CAS
+   wins → no double-advance. Residual issues to handle then: (a) the prompt send happens
+   outside the CAS, so two replicas can both validate-and-send before either writes →
+   **duplicate prompt**; make sends idempotent (key by inbound message id) or accept the
+   rare dup. (b) Platform delivery constraints remain even with a shared store —
+   **Discord** needs gateway **sharding** (one replica owns a conversation) to stop
+   duplicate event delivery; **Telegram** must switch from getUpdates to **webhook** mode
+   (getUpdates is single-consumer). Until all of this lands, v1 is single-instance (§4, §5).
+6. **Normalized validators.** `Validate(func(string) (string, error))` storing the parsed
+   value, so `OnComplete` does not re-parse (e.g. `age` to int). v1 keeps the simpler
+   `func(string) error` plus `Answers.Lookup`.
+7. **Replace-active-flow.** v1 decision: a `HandleFlow` trigger received *during* an active
+   flow is consumed as input (the command table is shadowed); to restart, the user cancels
+   first. Documented. A future reserved "restart" word or replace-on-retrigger can layer on.
+
 
 ## Contributing
 

@@ -25,7 +25,7 @@ The suite is hermetic by default. `TestConnectSlack_StartsAndStops` does real Sl
 
 The codebase is a **facade over internal packages**. Understanding the split is the key to navigating it.
 
-- **`botbooter.go`** (package `botbooter`) — the **SDK-free shared-types** package: every exported type is a **type alias** (`Bot = core.Bot`, `Message = core.Message`, …) re-exported from `internal/core`, plus the `BotType` consts and the two error sentinels. It imports only `internal/core` and **no platform SDK**. Because aliases are identities, an `internal/core.Bot` *is* a public `botbooter.Bot` — no conversion. Construction lives in the per-platform packages (below), not here.
+- **`botbooter.go`** (package `botbooter`) — the **SDK-free shared-types** package: every exported type is a **type alias** (`Bot = core.Bot`, `Message = core.Message`, `Flow = core.Flow`, …) re-exported from `internal/core`, plus the `BotType` consts, the error sentinels, and a few thin **constructor/builder function** re-exports (`NewFlow`, `Validate`, `Secret`) that just forward to `internal/core`. It imports only `internal/core` and **no platform SDK**. Because aliases are identities, an `internal/core.Bot` *is* a public `botbooter.Bot` — no conversion. Construction lives in the per-platform packages (below), not here.
 
 - **`internal/core`** — the platform-agnostic engine: the `Bot` struct, command/middleware dispatch, and the connect/run/disconnect lifecycle. It depends on no platform's connection logic. The seam is the **`Adapter` interface** (`Connect`, `Disconnect`, `Send`, `Attachments`). The Bot drives an adapter and hands it an **`AdapterDeps`** struct of callbacks (`Dispatch`, `Done`, `Disconnect`) so adapters in other packages can drive the Bot's unexported internals without those internals leaking.
 
@@ -55,4 +55,4 @@ The CLI has no real upload channel, so `parseMessage` treats any whitespace-sepa
 
 - Tests use the in-repo **`internal/asserts`** helpers (`asserts.Equal`, `NoError`, `ErrorIs`, …), not testify — testify is only an indirect dependency. Match that style in new tests.
 - Errors are sentinel values (`ErrUnknownBotType`, `ErrAlreadyConnected`) re-exported through the root package; check with `errors.Is`.
-- Pre-1.0: the public API may still change, but keep `botbooter.go` SDK-free (shared-type aliases, `BotType` consts and error sentinels only) and the per-platform `{cli,slack,discord,telegram,whatsapp}` packages thin — put real logic in `internal/`.
+- Pre-1.0: the public API may still change, but keep `botbooter.go` SDK-free (shared-type aliases, `BotType` consts, error sentinels, and thin constructor/builder function re-exports that forward to `internal/core` — no platform SDK, no real logic) and the per-platform `{cli,slack,discord,telegram,whatsapp}` packages thin — put real logic in `internal/`.
