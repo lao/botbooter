@@ -24,6 +24,7 @@ import (
 	"github.com/lao/botbooter/discord"
 	"github.com/lao/botbooter/internal/asserts"
 	"github.com/lao/botbooter/slack"
+	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
 	"github.com/lao/botbooter/whatsapp"
 )
@@ -409,6 +410,13 @@ func TestRawAccessors(t *testing.T) {
 		asserts.True(t, got == wm, "same pointer")
 	})
 
+	t.Run("Teams", func(t *testing.T) {
+		tm := &teams.Message{Text: "hi"}
+		got, ok := teams.RawMessage(&botbooter.Message{Raw: tm})
+		asserts.True(t, ok, "teams.RawMessage")
+		asserts.True(t, got == tm, "same pointer")
+	})
+
 	t.Run("WrongPlatform", func(t *testing.T) {
 		_, ok := slack.RawEvent(&botbooter.Message{Raw: &discordgo.MessageCreate{}})
 		asserts.False(t, ok, "slack.RawEvent on a Discord message reports false")
@@ -434,6 +442,12 @@ func TestSessionAccessors(t *testing.T) {
 	asserts.NoError(t, err, "whatsapp.New")
 	asserts.Equal(t, whatsappBot.BotType, botbooter.WhatsAppBotType, "WhatsApp bot type")
 
+	teamsBot, err := teams.New(teams.Config{
+		AppID: "app", AppPassword: "secret", Addr: ":0",
+	})
+	asserts.NoError(t, err, "teams.New")
+	asserts.Equal(t, teamsBot.BotType, botbooter.TeamsBotType, "Teams bot type")
+
 	cliBot := cli.New(emptyReader{}, &syncBuffer{})
 	asserts.True(t, slack.Client(cliBot) == nil, "SlackClient nil for non-Slack bot")
 }
@@ -441,6 +455,22 @@ func TestSessionAccessors(t *testing.T) {
 func TestWhatsAppNew_MissingConfig(t *testing.T) {
 	_, err := whatsapp.New(whatsapp.Config{})
 	asserts.ErrorIs(t, err, whatsapp.ErrMissingConfig, "empty config should report the sentinel")
+}
+
+func TestTeamsNew_MissingConfig(t *testing.T) {
+	cases := map[string]func(*teams.Config){
+		"appID":       func(c *teams.Config) { c.AppID = "" },
+		"appPassword": func(c *teams.Config) { c.AppPassword = "" },
+		"addr":        func(c *teams.Config) { c.Addr = "" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := teams.Config{AppID: "app", AppPassword: "secret", Addr: ":0"}
+			mutate(&cfg)
+			_, err := teams.New(cfg)
+			asserts.ErrorIs(t, err, teams.ErrMissingConfig, "missing field should report the sentinel")
+		})
+	}
 }
 
 // TestBot_ResolveAttachmentURL_Alias proves the unified method surfaces through
