@@ -11,6 +11,23 @@ import (
 // overrides or disables it.
 const defaultCancelWord = "cancel"
 
+// Errors returned by [Bot.HandleFlow], wrapped with the flow id (and key) for
+// context. Check them with errors.Is.
+var (
+	// ErrFlowEmptyID is returned when a flow's id is empty.
+	ErrFlowEmptyID = errors.New("botbooter: flow id must not be empty")
+	// ErrFlowNoSteps is returned when a flow has no Ask steps.
+	ErrFlowNoSteps = errors.New("botbooter: flow has no steps")
+	// ErrFlowEmptyStepKey is returned when a flow has an Ask step with an empty key.
+	ErrFlowEmptyStepKey = errors.New("botbooter: flow step has an empty key")
+	// ErrFlowDuplicateKey is returned when a flow has two Ask steps with the same key.
+	ErrFlowDuplicateKey = errors.New("botbooter: flow has a duplicate Ask key")
+	// ErrFlowNoOnComplete is returned when a flow has no OnComplete callback.
+	ErrFlowNoOnComplete = errors.New("botbooter: flow has no OnComplete")
+	// ErrFlowAlreadyRegistered is returned when a flow id is registered twice.
+	ErrFlowAlreadyRegistered = errors.New("botbooter: flow id already registered")
+)
+
 // NewFlow starts building a Flow with the given stable id. The id is load-bearing
 // for persistence and must stay stable across deploys: a future Store keys
 // in-flight state by it, and a renamed id orphans that state. The flow recognizes
@@ -91,37 +108,37 @@ func (f *Flow) Timeout(d time.Duration) *Flow {
 // validate enforces the HandleFlow contract on f, independent of the pattern.
 func (f *Flow) validate() error {
 	if f.id == "" {
-		return errors.New("botbooter: flow id must not be empty")
+		return ErrFlowEmptyID
 	}
 	if len(f.steps) == 0 {
-		return fmt.Errorf("botbooter: flow %q has no steps", f.id)
+		return fmt.Errorf("botbooter: flow %q: %w", f.id, ErrFlowNoSteps)
 	}
 	seen := make(map[string]bool, len(f.steps))
 	for _, s := range f.steps {
 		if s.key == "" {
-			return fmt.Errorf("botbooter: flow %q has a step with an empty key", f.id)
+			return fmt.Errorf("botbooter: flow %q: %w", f.id, ErrFlowEmptyStepKey)
 		}
 		if seen[s.key] {
-			return fmt.Errorf("botbooter: flow %q has duplicate Ask key %q", f.id, s.key)
+			return fmt.Errorf("botbooter: flow %q: %q: %w", f.id, s.key, ErrFlowDuplicateKey)
 		}
 		seen[s.key] = true
 	}
 	if f.onComplete == nil {
-		return fmt.Errorf("botbooter: flow %q has no OnComplete", f.id)
+		return fmt.Errorf("botbooter: flow %q: %w", f.id, ErrFlowNoOnComplete)
 	}
 	return nil
 }
 
 // secretKeys returns the set of answer keys marked Secret(), or nil if none.
 func (f *Flow) secretKeys() map[string]bool {
-	var secrets map[string]bool
+	secrets := make(map[string]bool)
 	for _, s := range f.steps {
 		if s.secret {
-			if secrets == nil {
-				secrets = make(map[string]bool)
-			}
 			secrets[s.key] = true
 		}
+	}
+	if len(secrets) == 0 {
+		return nil
 	}
 	return secrets
 }
@@ -130,6 +147,12 @@ func (f *Flow) secretKeys() map[string]bool {
 // persist: answers from Secret() steps are omitted, so a durable Store never
 // receives them. It does not mutate state. flow must be the registered flow for
 // state.FlowID; a nil flow returns state unchanged.
+//
+// v1 has no durable Store: the only ConversationStore is the volatile in-memory
+// one, which legitimately holds secrets (the Secret() contract keeps them in
+// volatile memory only). This is therefore the seam the future Store path applies
+// at its persist boundary — it is intentionally not yet wired into advance, which
+// would strip secrets from the in-memory store and starve OnComplete.
 func serializableState(state ConversationState, flow *Flow) ConversationState {
 	if flow == nil {
 		return state
@@ -163,7 +186,7 @@ func (b *Bot) HandleFlow(pattern string, flow *Flow) error {
 		b.flows = make(map[string]*Flow)
 	}
 	if _, exists := b.flows[flow.id]; exists {
-		return fmt.Errorf("botbooter: flow id %q already registered", flow.id)
+		return fmt.Errorf("botbooter: flow id %q: %w", flow.id, ErrFlowAlreadyRegistered)
 	}
 	if b.conversations == nil {
 		b.conversations = newConversationManager()

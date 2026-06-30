@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -320,17 +321,18 @@ func TestBot_dispatch_RoutesActiveFlow(t *testing.T) {
 func TestBot_SweeperLifecycle_ConnectDisconnect(t *testing.T) {
 	bot := New(SlackBotType, &recordingAdapter{})
 
+	// The recording adapter spawns no goroutine of its own, so Connect adds only
+	// the sweeper; Disconnect cancels its run context and it must exit.
+	before := runtime.NumGoroutine()
 	asserts.NoError(t, bot.Connect(context.Background()), "connect")
-	bot.mu.Lock()
-	done := bot.sweeperDone
-	bot.mu.Unlock()
-	asserts.True(t, done != nil, "sweeper started on Connect")
-
 	asserts.NoError(t, bot.Disconnect(), "disconnect")
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("sweeper did not stop after Disconnect (goroutine leak)")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > before {
+		if time.Now().After(deadline) {
+			t.Fatalf("sweeper goroutine leaked after Disconnect: before=%d now=%d", before, runtime.NumGoroutine())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

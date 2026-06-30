@@ -145,11 +145,10 @@ type Bot struct {
 	conversations *conversationManager
 	flows         map[string]*Flow
 
-	mu          sync.Mutex
-	cancel      context.CancelFunc
-	done        chan error
-	stop        func() error
-	sweeperDone <-chan struct{}
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	done   chan error
+	stop   func() error
 }
 
 // New creates a Bot of the given type backed by adapter.
@@ -252,10 +251,7 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// in-memory flow state itself is per-Bot and survives a transient reconnect;
 	// only background sweeping pauses for that window (lazy expiry still applies).
 	if b.conversations != nil {
-		done := b.conversations.startSweeper(runCtx, defaultSweepInterval)
-		b.mu.Lock()
-		b.sweeperDone = done
-		b.mu.Unlock()
+		b.conversations.startSweeper(runCtx, defaultSweepInterval)
 	}
 	return nil
 }

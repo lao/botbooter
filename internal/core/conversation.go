@@ -4,6 +4,7 @@ import (
 	"context"
 	"hash/fnv"
 	"log"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -302,98 +303,122 @@ func (m *conversationManager) start(ctx context.Context, b *Bot, msg *Message, f
 
 // advance routes msg into the active flow for its conversation, returning true
 // when it consumed the message (the caller must then NOT fall through to the
-// command table). The state transition and the step validator run under the shard
-// lock; the prompt send and every lifecycle callback run AFTER the lock is
-// released — they are user code and/or network I/O and must never hold a shard.
-//
-// A state whose FlowID is no longer registered is reaped and reported as not
-// handled, so dispatch falls through to the command table instead of wedging.
+// command table). It runs the state machine under the shard lock and performs the
+// resulting prompt send or lifecycle callback AFTER releasing it — those are user
+// code and/or network I/O and must never hold a shard.
 func (m *conversationManager) advance(ctx context.Context, b *Bot, msg *Message) bool {
 	key := conversationKey(msg)
 	now := time.Now()
 
 	var (
 		handled bool
-		action  func() // user-facing work, run after the lock is released
+		action  func()
 	)
 	m.withLock(key, func() {
-		state, ok := m.store.Get(key)
-		if !ok {
-			return // no active flow; dispatch continues to the command table
-		}
-		handled = true
-
-		flow, ok := b.flowByID(state.FlowID)
-		if !ok {
-			// State outlived its flow registration (e.g. a renamed flow); reap it
-			// and fall through rather than panic.
-			m.store.Delete(key)
-			handled = false
-			return
-		}
-
-		if state.isExpired(now) {
-			m.store.Delete(key)
-			if flow.onTimeout != nil {
-				action = func() { flow.onTimeout(ctx, b, msg) }
-			}
-			return
-		}
-
-		content := strings.TrimSpace(msg.Content)
-
-		// The cancel word shadows every step, so it precedes validation.
-		if flow.cancelWord != "" && content == flow.cancelWord {
-			m.store.Delete(key)
-			if flow.onCancel != nil {
-				action = func() { flow.onCancel(ctx, b, msg) }
-			}
-			return
-		}
-
-		step := flow.steps[state.Step]
-
-		// Empty/whitespace answers are non-answers: re-prompt without storing.
-		if content == "" {
-			action = func() { b.sendFlowMessage(ctx, msg.ChannelID, step.prompt) }
-			return
-		}
-
-		// The validator runs under the lock; it is documented as "keep it fast".
-		if step.validate != nil {
-			if err := step.validate(content); err != nil {
-				nudge := step.prompt
-				if e := err.Error(); e != "" {
-					nudge = e
-				}
-				action = func() { b.sendFlowMessage(ctx, msg.ChannelID, nudge) }
-				return
-			}
-		}
-
-		if state.Answers == nil {
-			state.Answers = map[string]string{}
-		}
-		state.Answers[step.key] = content
-
-		// Last step → clear state and complete.
-		if state.Step == len(flow.steps)-1 {
-			answers := Answers(state.Answers)
-			m.store.Delete(key)
-			action = func() { flow.onComplete(ctx, b, msg, answers) }
-			return
-		}
-
-		// Otherwise advance, slide the TTL, and send the next prompt.
-		state.Step++
-		state.ExpiresAt = now.Add(flow.timeoutOrDefault())
-		m.store.Set(key, state)
-		next := flow.steps[state.Step].prompt
-		action = func() { b.sendFlowMessage(ctx, msg.ChannelID, next) }
+		handled, action = m.transitionLocked(ctx, b, key, msg, now)
 	})
 
 	if action != nil {
 		action()
 	}
 	return handled
+}
+
+// transitionLocked runs the flow state machine for a single message and MUST be
+// called with key's shard lock held. It returns whether the message was consumed
+// and the post-lock work to run after the lock is released (a prompt send or a
+// lifecycle callback). It performs no I/O itself.
+//
+// Reaping asymmetry: an unregistered or out-of-range state is reaped and reported
+// NOT handled, so dispatch falls through to the command table; an expired state is
+// reaped but reported handled (consuming the trigger) and runs the optional
+// OnTimeout. The asymmetry is deliberate — see the design spec.
+func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key string, msg *Message, now time.Time) (handled bool, action func()) {
+	state, ok := m.store.Get(key)
+	if !ok {
+		return false, nil // no active flow; dispatch continues to the command table
+	}
+
+	flow, ok := b.flowByID(state.FlowID)
+	if !ok {
+		// State outlived its flow registration (e.g. a renamed flow); reap and
+		// fall through rather than panic.
+		m.store.Delete(key)
+		return false, nil
+	}
+
+	// A Store-loaded state whose flow has since lost steps could index out of
+	// range; reap and fall through instead of panicking. (A bare panic would be
+	// eaten by dispatch's recover but leave the state in place to wedge every
+	// later message until its TTL.)
+	if state.Step < 0 || state.Step >= len(flow.steps) {
+		m.store.Delete(key)
+		return false, nil
+	}
+
+	if state.isExpired(now) {
+		m.store.Delete(key)
+		if flow.onTimeout != nil {
+			return true, func() { flow.onTimeout(ctx, b, msg) }
+		}
+		return true, nil
+	}
+
+	send := func(text string) func() {
+		return func() { b.sendFlowMessage(ctx, msg.ChannelID, text) }
+	}
+
+	content := strings.TrimSpace(msg.Content)
+
+	// The cancel word shadows every step, so it precedes validation.
+	if flow.cancelWord != "" && content == flow.cancelWord {
+		m.store.Delete(key)
+		if flow.onCancel != nil {
+			return true, func() { flow.onCancel(ctx, b, msg) }
+		}
+		return true, nil
+	}
+
+	step := flow.steps[state.Step]
+
+	// Empty/whitespace answers are non-answers: re-prompt without storing.
+	if content == "" {
+		return true, send(step.prompt)
+	}
+
+	// The validator runs under the lock; it is documented as "keep it fast".
+	if step.validate != nil {
+		if err := step.validate(content); err != nil {
+			nudge := step.prompt
+			if e := err.Error(); e != "" {
+				nudge = e
+			}
+			return true, send(nudge)
+		}
+	}
+
+	if state.Answers == nil {
+		// Defensive: the built-in store always stores a non-nil map, but a custom
+		// ConversationStore could return a zero-value state.
+		state.Answers = map[string]string{}
+	}
+	state.Answers[step.key] = content
+
+	// Last step → clear state and complete. onComplete receives an exclusive copy
+	// of the answers, so a consumer that retains the map is never surprised by the
+	// engine reusing the underlying map.
+	if state.Step == len(flow.steps)-1 {
+		answers := Answers(maps.Clone(state.Answers))
+		m.store.Delete(key)
+		return true, func() { flow.onComplete(ctx, b, msg, answers) }
+	}
+
+	// Otherwise advance, slide the TTL, and send the next prompt. The in-memory
+	// store volatile-holds the full state (secrets included, per the Secret()
+	// contract); secret exclusion happens only at the future durable-Store
+	// boundary via serializableState.
+	state.Step++
+	state.ExpiresAt = now.Add(flow.timeoutOrDefault())
+	m.store.Set(key, state)
+	return true, send(flow.steps[state.Step].prompt)
 }

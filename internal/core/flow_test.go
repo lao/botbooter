@@ -335,6 +335,86 @@ func TestFlow_ConcurrentDoubleStart(t *testing.T) {
 	asserts.Equal(t, len(adapter.messages()), 1, "concurrent starts yield exactly one first prompt")
 }
 
+func TestBot_HandleFlow_SentinelErrors(t *testing.T) {
+	newFlow := func() *Flow { return NewFlow("f").Ask("a", "a?").OnComplete(noopComplete) }
+
+	t.Run("EmptyID", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		err := bot.HandleFlow("^f$", NewFlow("").Ask("a", "a?").OnComplete(noopComplete))
+		asserts.ErrorIs(t, err, ErrFlowEmptyID, "empty id sentinel")
+	})
+	t.Run("NoSteps", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		asserts.ErrorIs(t, bot.HandleFlow("^f$", NewFlow("f").OnComplete(noopComplete)), ErrFlowNoSteps, "no-steps sentinel")
+	})
+	t.Run("EmptyStepKey", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		asserts.ErrorIs(t, bot.HandleFlow("^f$", NewFlow("f").Ask("", "a?").OnComplete(noopComplete)), ErrFlowEmptyStepKey, "empty-step-key sentinel")
+	})
+	t.Run("DuplicateKey", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		f := NewFlow("f").Ask("a", "a?").Ask("a", "b?").OnComplete(noopComplete)
+		asserts.ErrorIs(t, bot.HandleFlow("^f$", f), ErrFlowDuplicateKey, "duplicate-key sentinel")
+	})
+	t.Run("NoOnComplete", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		asserts.ErrorIs(t, bot.HandleFlow("^f$", NewFlow("f").Ask("a", "a?")), ErrFlowNoOnComplete, "no-OnComplete sentinel")
+	})
+	t.Run("AlreadyRegistered", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		asserts.NoError(t, bot.HandleFlow("^f$", newFlow()), "first registration")
+		asserts.ErrorIs(t, bot.HandleFlow("^g$", newFlow()), ErrFlowAlreadyRegistered, "already-registered sentinel")
+	})
+	t.Run("InvalidPatternStillErrors", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		asserts.Error(t, bot.HandleFlow("[bad(", newFlow()), "invalid pattern still errors")
+	})
+}
+
+func TestFlow_OutOfRangeStepFallsThrough(t *testing.T) {
+	bot := New(SlackBotType, &recordingAdapter{})
+	f := NewFlow("f").Ask("a", "a?").Ask("b", "b?").OnComplete(noopComplete)
+	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
+	key := conversationKey(msgFrom("u", "c", ""))
+
+	// A durable store could load a state whose flow has since lost steps.
+	bot.conversations.store.Set(key, ConversationState{
+		FlowID:    "f",
+		Step:      99,
+		ExpiresAt: time.Now().Add(time.Hour),
+		Answers:   map[string]string{},
+	})
+
+	handled := bot.conversations.advance(context.Background(), bot, msgFrom("u", "c", "hi"))
+	asserts.False(t, handled, "out-of-range step falls through to the command table")
+	_, ok := bot.conversations.store.Get(key)
+	asserts.False(t, ok, "corrupt state is reaped, not left to wedge")
+
+	handled2 := bot.conversations.advance(context.Background(), bot, msgFrom("u", "c", "again"))
+	asserts.False(t, handled2, "subsequent message is clean after the reap")
+}
+
+func TestFlow_SecretAnswerReachesOnComplete(t *testing.T) {
+	bot := New(SlackBotType, &recordingAdapter{})
+	ctx := context.Background()
+
+	var got Answers
+	f := NewFlow("signup").
+		Ask("name", "name?").
+		Ask("password", "pw?", Secret()).
+		OnComplete(func(_ context.Context, _ *Bot, _ *Message, a Answers) { got = a })
+	asserts.NoError(t, bot.HandleFlow("^signup$", f), "register")
+
+	bot.conversations.start(ctx, bot, msgFrom("u", "c", "signup"), f)
+	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "Alice"))   // name
+	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "hunter2")) // secret password
+
+	// v1 keeps secrets in volatile memory and delivers them to OnComplete; the
+	// secret exclusion applies only to the future durable-Store serialized form.
+	asserts.Equal(t, got.Get("name"), "Alice", "name delivered to OnComplete")
+	asserts.Equal(t, got.Get("password"), "hunter2", "secret answer reaches OnComplete from volatile memory")
+}
+
 // TestFlow_ConcurrentAdvanceNoDeadlock fires many concurrent answers at one
 // conversation. The shard lock must serialize them with no deadlock, no panic,
 // and no map corruption (run under -race). State ends either completed (reaped) or
