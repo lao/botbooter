@@ -174,6 +174,68 @@ func TestConversationManager_SweeperReapsExpired(t *testing.T) {
 	}
 }
 
+// panicStore is a ConversationStore whose Delete panics, used to prove the
+// background sweeper recovers rather than crashing the process. expiredKeys/Get
+// are promoted from the embedded memConversationStore.
+type panicStore struct {
+	*memConversationStore
+}
+
+func (p *panicStore) Delete(string) { panic("store delete exploded") }
+
+func TestConversationManager_SweeperRecoversFromStorePanic(t *testing.T) {
+	store := newMemConversationStore()
+	store.Set("k", ConversationState{FlowID: "f", ExpiresAt: time.Now().Add(-time.Minute)})
+	m := &conversationManager{store: &panicStore{memConversationStore: store}}
+
+	// sweepRecovered must swallow the store's panic; if it propagated, the test
+	// binary would crash here.
+	m.sweepRecovered(time.Now())
+
+	// Delete panicked before removing the entry, so it remains — and the manager
+	// is still alive.
+	_, ok := store.Get("k")
+	asserts.True(t, ok, "a panicking Delete is recovered; the sweeper did not crash")
+}
+
+// TestConversationManager_SweepConcurrentWithAdvance hammers sweep against a
+// goroutine that keeps refreshing a key's TTL under the shard lock. Both touch
+// the same shard, so under -race this asserts no data race and that an actively
+// refreshed entry is never reaped (the under-lock re-check always sees a future
+// ExpiresAt).
+func TestConversationManager_SweepConcurrentWithAdvance(t *testing.T) {
+	m := newConversationManager()
+	key := "u\x00c"
+	m.store.Set(key, ConversationState{FlowID: "f", ExpiresAt: time.Now().Add(time.Hour)})
+
+	const rounds = 2000
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			m.withLock(key, func() {
+				st, ok := m.store.Get(key)
+				if !ok {
+					st = ConversationState{FlowID: "f"}
+				}
+				st.ExpiresAt = time.Now().Add(time.Hour)
+				m.store.Set(key, st)
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			m.sweep(time.Now())
+		}
+	}()
+	wg.Wait()
+
+	_, ok := m.store.Get(key)
+	asserts.True(t, ok, "an actively-refreshed entry is never swept")
+}
+
 // TestConversationManager_ConcurrentWithLock proves the shard locks serialize the
 // read-modify-write for a key: 50 increments across 5 keys land exactly once each
 // with no lost updates. Run under -race to also assert no data race on the map.

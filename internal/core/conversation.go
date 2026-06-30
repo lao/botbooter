@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"hash/fnv"
+	"log"
 	"sync"
 	"time"
 )
@@ -20,15 +21,24 @@ const defaultSweepInterval = time.Minute
 // ConversationState is the per-conversation flow state the engine carries between
 // messages. It is flat and serializable by design so a future durable Store can
 // persist it without migration; secret answers are excluded from any serialized
-// form (see flow.go). Version bumps on every Set — unused by the single-instance
-// v1 (the in-process striped locks suffice), but exercised from day one so the
-// eventual Store-backed compare-and-swap path needs no state change.
+// form (see flow.go). Version bumps on every Set within a key's lifetime; it is
+// unused by the single-instance v1 (the in-process striped locks suffice) and is
+// exercised from day one so the eventual Store-backed compare-and-swap path needs
+// no state change. It is not preserved across a delete-and-recreate of the same
+// key (a swept conversation that restarts begins again at 1) — the multi-instance
+// CAS path owns cross-lifetime versioning when it lands.
 type ConversationState struct {
 	FlowID    string
 	Step      int
 	Answers   map[string]string
 	ExpiresAt time.Time
 	Version   uint64
+}
+
+// isExpired reports whether s has a set expiry that is at or before now. A zero
+// ExpiresAt never expires.
+func (s ConversationState) isExpired(now time.Time) bool {
+	return !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(now)
 }
 
 // ConversationStore persists per-conversation flow state by key. The default
@@ -94,7 +104,7 @@ func (s *memConversationStore) expiredKeys(now time.Time) []string {
 	defer s.mu.RUnlock()
 	var expired []string
 	for k, st := range s.m {
-		if !st.ExpiresAt.IsZero() && !st.ExpiresAt.After(now) {
+		if st.isExpired(now) {
 			expired = append(expired, k)
 		}
 	}
@@ -133,6 +143,18 @@ func (m *conversationManager) withLock(key string, fn func()) {
 	fn()
 }
 
+// sweepRecovered runs sweep with a recover so a panic in a custom
+// ConversationStore cannot take down the sweeper goroutine (and with it the
+// process), mirroring the recover that guards dispatch in core.go.
+func (m *conversationManager) sweepRecovered(now time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("botbooter: recovered from panic in conversation sweeper: %v", r)
+		}
+	}()
+	m.sweep(now)
+}
+
 // sweep deletes every expired entry as of now. It takes each key's shard lock and
 // re-checks expiry under it, so it can never race a concurrent advance that just
 // refreshed the entry's TTL. A store without the expirer capability is a no-op.
@@ -143,7 +165,7 @@ func (m *conversationManager) sweep(now time.Time) {
 	}
 	for _, key := range ex.expiredKeys(now) {
 		m.withLock(key, func() {
-			if st, ok := m.store.Get(key); ok && !st.ExpiresAt.IsZero() && !st.ExpiresAt.After(now) {
+			if st, ok := m.store.Get(key); ok && st.isExpired(now) {
 				m.store.Delete(key)
 			}
 		})
@@ -168,7 +190,7 @@ func (m *conversationManager) startSweeper(ctx context.Context, interval time.Du
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				m.sweep(time.Now())
+				m.sweepRecovered(time.Now())
 			}
 		}
 	}()
