@@ -13,8 +13,8 @@ test-race:
 	go test -race ./...
 
 cover:
-	go test -race -covermode=atomic -coverprofile=coverage.out ./...
-	go tool cover -func=coverage.out | tail -1
+	go test -race -covermode=atomic -coverprofile=coverage.txt ./...
+	go tool cover -func=coverage.txt | tail -1
 
 lint:
 	golangci-lint run ./...
@@ -33,4 +33,4 @@ tidy:
 	go mod tidy
 
 clean:
-	rm -f coverage.out
+	rm -f coverage.txt
