@@ -10,6 +10,9 @@ coverage.txt
 # Build artifacts
 /bin/
 /dist/
+# Compiled example binary (go build ./_examples/v1); anchored so it does not
+# match the _examples/v1 source directory.
+/v1
 
 # Editor / OS noise
 .DS_Store
@@ -18,5 +21,4 @@ coverage.txt
 .claude/
 .plans/
 todo.md
-docs/superpowers/
-v1
+_docs/superpowers/
