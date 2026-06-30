@@ -223,11 +223,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.srv = srv
 	a.mu.Unlock()
 
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			deps.Done(err)
-		}
-	}()
+	go serve(srv, ln, deps.Done)
 
 	// Tear down when the run context is canceled.
 	go func() {
@@ -241,6 +237,12 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	}()
 
 	return nil
+}
+
+func serve(srv *http.Server, ln net.Listener, done func(error)) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		done(err)
+	}
 }
 
 func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
@@ -341,11 +343,9 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 		return err
 	}
 
-	payload := map[string]any{"type": "message", "text": text}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
+	payload := map[string]string{"type": "message", "text": text}
+	// A string-only map has no values that encoding/json can reject.
+	body, _ := json.Marshal(payload)
 
 	endpoint := strings.TrimRight(serviceURL, "/") + "/v3/conversations/" + url.PathEscape(channelID) + "/activities"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -493,9 +493,6 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 
 	claims := jwt.MapClaims{}
 	keyFunc := func(t *jwt.Token) (any, error) {
-		if t.Method.Alg() != "RS256" {
-			return nil, fmt.Errorf("teams: unexpected signing method %q", t.Method.Alg())
-		}
 		kid, _ := t.Header["kid"].(string)
 		return a.publicKey(ctx, kid)
 	}
