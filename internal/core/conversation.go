@@ -4,6 +4,7 @@ import (
 	"context"
 	"hash/fnv"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,6 +18,11 @@ const conversationShards = 256
 // defaultSweepInterval is how often the background sweeper reaps expired flow
 // state when started without an explicit interval.
 const defaultSweepInterval = time.Minute
+
+// defaultFlowTimeout is the per-step idle TTL applied when a Flow sets none. The
+// TTL slides on each successful step, so a long but actively-progressing form does
+// not time out mid-fill.
+const defaultFlowTimeout = 10 * time.Minute
 
 // ConversationState is the per-conversation flow state the engine carries between
 // messages. It is flat and serializable by design so a future durable Store can
@@ -195,4 +201,198 @@ func (m *conversationManager) startSweeper(ctx context.Context, interval time.Du
 		}
 	}()
 	return done
+}
+
+// Answers is the read-only set of answers collected so far in a flow, handed to a
+// Flow's OnComplete callback. Get returns "" for a missing key; Lookup
+// distinguishes a missing key from one answered with an empty string.
+type Answers map[string]string
+
+// Get returns the answer stored under key, or "" if there is none.
+func (a Answers) Get(key string) string { return a[key] }
+
+// Lookup returns the answer stored under key and whether it was present.
+func (a Answers) Lookup(key string) (string, bool) {
+	v, ok := a[key]
+	return v, ok
+}
+
+// flowStep is one question in a Flow: a prompt, the key its answer is stored
+// under, and an optional validator. (The secret marker is added with the
+// serialization logic that reads it, in flow.go.)
+type flowStep struct {
+	key      string
+	prompt   string
+	validate func(string) error
+}
+
+// Flow is a declarative multi-step dialog: an ordered list of questions plus
+// lifecycle callbacks. Build it with NewFlow and register it with Bot.HandleFlow
+// (see flow.go). The engine reads the fields here; the builder writes them.
+type Flow struct {
+	id         string
+	steps      []flowStep
+	onComplete func(ctx context.Context, b *Bot, m *Message, a Answers)
+	onCancel   func(ctx context.Context, b *Bot, m *Message)
+	onTimeout  func(ctx context.Context, b *Bot, m *Message)
+	cancelWord string
+	timeout    time.Duration
+}
+
+// timeoutOrDefault is the flow's per-step idle TTL, falling back to
+// defaultFlowTimeout when unset.
+func (f *Flow) timeoutOrDefault() time.Duration {
+	if f.timeout > 0 {
+		return f.timeout
+	}
+	return defaultFlowTimeout
+}
+
+// conversationKey composes the per-conversation store key from a message. It is
+// per-user AND per-channel, so one user can run independent flows in a DM and in a
+// channel. The NUL separator is unambiguous because no supported platform's UserID
+// or ChannelID contains a NUL byte (Slack/Discord/Telegram ids are numeric or
+// alphanumeric, WhatsApp ids are numeric, and the CLI is single-user trusted
+// input).
+func conversationKey(m *Message) string {
+	return m.UserID + "\x00" + m.ChannelID
+}
+
+// flowByID returns the registered flow with id, if any. A nil registry (a Bot not
+// built via New) reports not-found rather than panicking.
+func (b *Bot) flowByID(id string) (*Flow, bool) {
+	f, ok := b.flows[id]
+	return f, ok
+}
+
+// sendFlowMessage sends a flow prompt, logging (not propagating) a send error so a
+// transient platform failure cannot wedge the dispatch goroutine.
+func (b *Bot) sendFlowMessage(ctx context.Context, channelID, text string) {
+	if err := b.SendMessageContext(ctx, channelID, text); err != nil {
+		log.Printf("botbooter: failed to send flow prompt: %v", err)
+	}
+}
+
+// start begins flow for msg's conversation. Under the shard lock it records the
+// initial state if and only if none exists (set-if-absent); after releasing the
+// lock it sends the first prompt. A losing racer — state already present — is a
+// no-op, and its trigger message is dropped, never consumed as the first answer.
+func (m *conversationManager) start(ctx context.Context, b *Bot, msg *Message, flow *Flow) {
+	key := conversationKey(msg)
+
+	var started bool
+	m.withLock(key, func() {
+		if _, ok := m.store.Get(key); ok {
+			return // already active for this conversation; drop the trigger
+		}
+		m.store.Set(key, ConversationState{
+			FlowID:    flow.id,
+			Step:      0,
+			Answers:   map[string]string{},
+			ExpiresAt: time.Now().Add(flow.timeoutOrDefault()),
+		})
+		started = true
+	})
+
+	if started {
+		b.sendFlowMessage(ctx, msg.ChannelID, flow.steps[0].prompt)
+	}
+}
+
+// advance routes msg into the active flow for its conversation, returning true
+// when it consumed the message (the caller must then NOT fall through to the
+// command table). The state transition and the step validator run under the shard
+// lock; the prompt send and every lifecycle callback run AFTER the lock is
+// released — they are user code and/or network I/O and must never hold a shard.
+//
+// A state whose FlowID is no longer registered is reaped and reported as not
+// handled, so dispatch falls through to the command table instead of wedging.
+func (m *conversationManager) advance(ctx context.Context, b *Bot, msg *Message) bool {
+	key := conversationKey(msg)
+	now := time.Now()
+
+	var (
+		handled bool
+		action  func() // user-facing work, run after the lock is released
+	)
+	m.withLock(key, func() {
+		state, ok := m.store.Get(key)
+		if !ok {
+			return // no active flow; dispatch continues to the command table
+		}
+		handled = true
+
+		flow, ok := b.flowByID(state.FlowID)
+		if !ok {
+			// State outlived its flow registration (e.g. a renamed flow); reap it
+			// and fall through rather than panic.
+			m.store.Delete(key)
+			handled = false
+			return
+		}
+
+		if state.isExpired(now) {
+			m.store.Delete(key)
+			if flow.onTimeout != nil {
+				action = func() { flow.onTimeout(ctx, b, msg) }
+			}
+			return
+		}
+
+		content := strings.TrimSpace(msg.Content)
+
+		// The cancel word shadows every step, so it precedes validation.
+		if flow.cancelWord != "" && content == flow.cancelWord {
+			m.store.Delete(key)
+			if flow.onCancel != nil {
+				action = func() { flow.onCancel(ctx, b, msg) }
+			}
+			return
+		}
+
+		step := flow.steps[state.Step]
+
+		// Empty/whitespace answers are non-answers: re-prompt without storing.
+		if content == "" {
+			action = func() { b.sendFlowMessage(ctx, msg.ChannelID, step.prompt) }
+			return
+		}
+
+		// The validator runs under the lock; it is documented as "keep it fast".
+		if step.validate != nil {
+			if err := step.validate(content); err != nil {
+				nudge := step.prompt
+				if e := err.Error(); e != "" {
+					nudge = e
+				}
+				action = func() { b.sendFlowMessage(ctx, msg.ChannelID, nudge) }
+				return
+			}
+		}
+
+		if state.Answers == nil {
+			state.Answers = map[string]string{}
+		}
+		state.Answers[step.key] = content
+
+		// Last step → clear state and complete.
+		if state.Step == len(flow.steps)-1 {
+			answers := Answers(state.Answers)
+			m.store.Delete(key)
+			action = func() { flow.onComplete(ctx, b, msg, answers) }
+			return
+		}
+
+		// Otherwise advance, slide the TTL, and send the next prompt.
+		state.Step++
+		state.ExpiresAt = now.Add(flow.timeoutOrDefault())
+		m.store.Set(key, state)
+		next := flow.steps[state.Step].prompt
+		action = func() { b.sendFlowMessage(ctx, msg.ChannelID, next) }
+	})
+
+	if action != nil {
+		action()
+	}
+	return handled
 }

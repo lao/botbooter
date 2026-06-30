@@ -174,6 +174,166 @@ func TestConversationManager_SweeperReapsExpired(t *testing.T) {
 	}
 }
 
+// recordingAdapter is a core.Adapter that records the prompts a flow sends, so a
+// routing test can assert what reached the user.
+type recordingAdapter struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (r *recordingAdapter) Connect(context.Context, AdapterDeps) error { return nil }
+func (r *recordingAdapter) Disconnect() error                          { return nil }
+func (r *recordingAdapter) Attachments(*Message) ([]Attachment, error) { return nil, nil }
+func (r *recordingAdapter) Send(_ context.Context, _, text string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent = append(r.sent, text)
+	return nil
+}
+
+func (r *recordingAdapter) messages() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.sent...)
+}
+
+func msgFrom(user, channel, content string) *Message {
+	return &Message{UserID: user, ChannelID: channel, Content: content}
+}
+
+func TestConversationManager_AdvanceHappyPath(t *testing.T) {
+	adapter := &recordingAdapter{}
+	bot := New(SlackBotType, adapter)
+	ctx := context.Background()
+
+	var completed Answers
+	flow := &Flow{
+		id:         "signup",
+		steps:      []flowStep{{key: "name", prompt: "name?"}, {key: "color", prompt: "color?"}},
+		onComplete: func(_ context.Context, _ *Bot, _ *Message, a Answers) { completed = a },
+		cancelWord: "cancel",
+	}
+	bot.flows[flow.id] = flow
+
+	// No active flow yet → advance does not consume the message.
+	asserts.False(t, bot.conversations.advance(ctx, bot, msgFrom("u", "c", "hi")), "no active flow yet")
+
+	bot.conversations.start(ctx, bot, msgFrom("u", "c", "signup"), flow)
+	asserts.True(t, bot.conversations.advance(ctx, bot, msgFrom("u", "c", "Alice")), "first answer consumed")
+	asserts.True(t, bot.conversations.advance(ctx, bot, msgFrom("u", "c", "blue")), "final answer consumed")
+
+	asserts.Equal(t, completed.Get("name"), "Alice", "name captured")
+	asserts.Equal(t, completed.Get("color"), "blue", "color captured")
+
+	got := adapter.messages()
+	asserts.Equal(t, len(got), 2, "exactly two prompts (no third after the last step)")
+	asserts.Equal(t, got[0], "name?", "first prompt")
+	asserts.Equal(t, got[1], "color?", "second prompt")
+
+	_, ok := bot.conversations.store.Get(conversationKey(msgFrom("u", "c", "")))
+	asserts.False(t, ok, "state cleared after completion")
+}
+
+func TestConversationManager_StartSetIfAbsent(t *testing.T) {
+	adapter := &recordingAdapter{}
+	bot := New(SlackBotType, adapter)
+	ctx := context.Background()
+	flow := &Flow{id: "f", steps: []flowStep{{key: "a", prompt: "a?"}}, onComplete: func(context.Context, *Bot, *Message, Answers) {}}
+	bot.flows[flow.id] = flow
+
+	m := msgFrom("u", "c", "f")
+	bot.conversations.start(ctx, bot, m, flow)
+	bot.conversations.start(ctx, bot, m, flow) // second start must be a no-op
+
+	asserts.Equal(t, len(adapter.messages()), 1, "only one first prompt despite a double start")
+}
+
+func TestConversationManager_PerUserChannelKeying(t *testing.T) {
+	adapter := &recordingAdapter{}
+	bot := New(SlackBotType, adapter)
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	results := map[string]string{}
+	flow := &Flow{
+		id:    "f",
+		steps: []flowStep{{key: "a", prompt: "a?"}},
+		onComplete: func(_ context.Context, _ *Bot, m *Message, a Answers) {
+			mu.Lock()
+			results[m.UserID+"/"+m.ChannelID] = a.Get("a")
+			mu.Unlock()
+		},
+	}
+	bot.flows[flow.id] = flow
+
+	// Same user in two channels, plus a different user — three independent flows.
+	bot.conversations.start(ctx, bot, msgFrom("u1", "c1", "f"), flow)
+	bot.conversations.start(ctx, bot, msgFrom("u1", "c2", "f"), flow)
+	bot.conversations.start(ctx, bot, msgFrom("u2", "c1", "f"), flow)
+
+	bot.conversations.advance(ctx, bot, msgFrom("u1", "c1", "alpha"))
+	bot.conversations.advance(ctx, bot, msgFrom("u1", "c2", "beta"))
+	bot.conversations.advance(ctx, bot, msgFrom("u2", "c1", "gamma"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	asserts.Equal(t, results["u1/c1"], "alpha", "u1/c1 isolated")
+	asserts.Equal(t, results["u1/c2"], "beta", "same user, different channel is isolated")
+	asserts.Equal(t, results["u2/c1"], "gamma", "u2/c1 isolated")
+}
+
+func TestBot_dispatch_RoutesActiveFlow(t *testing.T) {
+	adapter := &recordingAdapter{}
+	bot := New(SlackBotType, adapter)
+
+	mwCount := 0
+	bot.AddMiddleware(func(ctx context.Context, b *Bot, m *Message, next CommandHandler) {
+		mwCount++
+		next(ctx, b, m)
+	})
+
+	done := false
+	flow := &Flow{
+		id:         "signup",
+		steps:      []flowStep{{key: "name", prompt: "name?"}, {key: "color", prompt: "color?"}},
+		onComplete: func(context.Context, *Bot, *Message, Answers) { done = true },
+		cancelWord: "cancel",
+	}
+	bot.flows[flow.id] = flow
+	mustAddHandler(t, bot, "^signup$", func(ctx context.Context, b *Bot, m *Message) {
+		b.conversations.start(ctx, b, m, flow)
+	})
+	fellThrough := false
+	bot.SetUnknownCommandHandler(func(context.Context, *Bot, *Message) { fellThrough = true })
+
+	send := func(text string) { bot.dispatch(context.Background(), msgFrom("u", "c", text)) }
+	send("signup") // start
+	send("Alice")  // step 1
+	send("blue")   // step 2 → complete
+
+	asserts.True(t, done, "OnComplete ran through dispatch routing")
+	asserts.Equal(t, mwCount, 3, "middleware wraps every flow step")
+	asserts.False(t, fellThrough, "flow answers never reach the unknown-command handler")
+	asserts.Equal(t, len(adapter.messages()), 2, "two prompts sent")
+}
+
+func TestBot_SweeperLifecycle_ConnectDisconnect(t *testing.T) {
+	bot := New(SlackBotType, &recordingAdapter{})
+
+	asserts.NoError(t, bot.Connect(context.Background()), "connect")
+	bot.mu.Lock()
+	done := bot.sweeperDone
+	bot.mu.Unlock()
+	asserts.True(t, done != nil, "sweeper started on Connect")
+
+	asserts.NoError(t, bot.Disconnect(), "disconnect")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweeper did not stop after Disconnect (goroutine leak)")
+	}
+}
+
 // panicStore is a ConversationStore whose Delete panics, used to prove the
 // background sweeper recovers rather than crashing the process. expiredKeys/Get
 // are promoted from the embedded memConversationStore.

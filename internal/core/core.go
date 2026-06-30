@@ -142,15 +142,24 @@ type Bot struct {
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan error
-	stop   func() error
+	conversations *conversationManager
+	flows         map[string]*Flow
+
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	done        chan error
+	stop        func() error
+	sweeperDone <-chan struct{}
 }
 
 // New creates a Bot of the given type backed by adapter.
 func New(botType BotType, adapter Adapter) *Bot {
-	return &Bot{BotType: botType, adapter: adapter}
+	return &Bot{
+		BotType:       botType,
+		adapter:       adapter,
+		conversations: newConversationManager(),
+		flows:         make(map[string]*Flow),
+	}
 }
 
 // AdapterAs returns the Bot's adapter as T, reporting whether it is that type.
@@ -236,6 +245,17 @@ func (b *Bot) Connect(ctx context.Context) error {
 		cancel()
 		b.clearConnection()
 		return err
+	}
+
+	// Start the conversation sweeper on the per-connection context so it stops
+	// when this connection is torn down and a reconnect installs a fresh one. The
+	// in-memory flow state itself is per-Bot and survives a transient reconnect;
+	// only background sweeping pauses for that window (lazy expiry still applies).
+	if b.conversations != nil {
+		done := b.conversations.startSweeper(runCtx, defaultSweepInterval)
+		b.mu.Lock()
+		b.sweeperDone = done
+		b.mu.Unlock()
 	}
 	return nil
 }
@@ -380,6 +400,12 @@ func (b *Bot) dispatch(ctx context.Context, message *Message) {
 	}()
 
 	handler := func(ctx context.Context, bot *Bot, message *Message) {
+		// An active flow for this conversation consumes the message before the
+		// command table; advance reports false (and we fall through) when no flow
+		// is active or its state outlived its registration.
+		if bot.conversations != nil && bot.conversations.advance(ctx, bot, message) {
+			return
+		}
 		for i := range bot.commands {
 			if bot.commands[i].match(message.Content) {
 				bot.commands[i].Handler(ctx, bot, message)
