@@ -45,6 +45,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		for scanner.Scan() {
 			select {
 			case <-ctx.Done():
+				deps.Done(nil)
 				return
 			default:
 			}
