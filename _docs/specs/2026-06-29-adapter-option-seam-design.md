@@ -97,7 +97,7 @@ func New(a Adapter, opts ...Option) *Bot {
 
 - **Consumers: none.** `cli/slack/discord/telegram/whatsapp.New` keep identical signatures via the shims. The public API only *gains* `botbooter.New`, the `Adapter` and `Option` aliases, and the five `Adapter()` constructors.
 - **Internal:** `core.New` signature changes (internal only); each internal adapter gains `Type()` and an exported `Adapter()` constructor; each public package gains `Adapter()` and reimplements `New` as a shim.
-- `examples/v1` and existing tests are unchanged (they still call the per-platform `New`). Optionally add one short example exercising `botbooter.New(slack.Adapter(...))` to document the seam.
+- `_examples/v1` and existing tests are unchanged (they still call the per-platform `New`). Optionally add one short example exercising `botbooter.New(slack.Adapter(...))` to document the seam.
 
 ### 6. Testing
 

@@ -4,7 +4,7 @@ How to provision credentials for each platform botbooter supports. Slack,
 Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
 needs Cloud API credentials plus a public HTTPS webhook; the CLI needs nothing.
 
-> 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/docs/platforms.md) — pkg.go.dev renders the README but not this file.
+> 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/_docs/platforms.md) — pkg.go.dev renders the README but not this file.
 
 **Official documentation**
 
@@ -12,7 +12,7 @@ needs Cloud API credentials plus a public HTTPS webhook; the CLI needs nothing.
 - Discord — [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway)
 - Telegram — [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api)
 - WhatsApp — [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks getting started](https://developers.facebook.com/docs/graph-api/webhooks/getting-started)
-- CLI — [`examples/v1`](../examples/v1) and the [README Quickstart](../README.md#quickstart)
+- CLI — [`_examples/v1`](../_examples/v1) and the [README Quickstart](../README.md#quickstart)
 
 ---
 
@@ -227,7 +227,7 @@ No credentials, no portal, no setup. The CLI adapter reads from stdin and
 writes to stdout, so it's the fastest way to develop and test handlers:
 
 ```bash
-go run ./examples/v1            # CLI mode (default)
+go run ./_examples/v1            # CLI mode (default)
 ```
 
 **Environment variables:** none.
@@ -236,7 +236,7 @@ A terminal has no real upload channel, so the CLI treats any local file path
 in a message as an attachment — see [Attachments](../README.md#attachments)
 in the README. **Use it with trusted local input only.**
 
-**Official docs:** the bundled [`examples/v1`](../examples/v1) and the
+**Official docs:** the bundled [`_examples/v1`](../_examples/v1) and the
 [README Quickstart](../README.md#quickstart).
 
 ---
