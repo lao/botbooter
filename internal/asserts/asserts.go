@@ -1,13 +1,18 @@
 // Package asserts holds tiny test assertion helpers shared across botbooter.
 package asserts
 
-import (
-	"errors"
-	"testing"
-)
+import "errors"
+
+// TestingT is the subset of *testing.T the assertions use. Accepting the
+// interface (which *testing.T satisfies) lets the helpers themselves be
+// unit-tested with a recording fake.
+type TestingT interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
 
 // Equal fails the test with message if got is not equal to expected.
-func Equal[T comparable](t *testing.T, got, expected T, message string) {
+func Equal[T comparable](t TestingT, got, expected T, message string) {
 	t.Helper()
 	if got != expected {
 		t.Errorf("%s: got %v, expected %v", message, got, expected)
@@ -15,7 +20,7 @@ func Equal[T comparable](t *testing.T, got, expected T, message string) {
 }
 
 // NotNil fails the test with message if got is nil.
-func NotNil(t *testing.T, got any, message string) {
+func NotNil(t TestingT, got any, message string) {
 	t.Helper()
 	if got == nil {
 		t.Errorf("%s: expected non-nil, got nil", message)
@@ -23,7 +28,7 @@ func NotNil(t *testing.T, got any, message string) {
 }
 
 // Error fails the test with message if err is nil.
-func Error(t *testing.T, err error, message string) {
+func Error(t TestingT, err error, message string) {
 	t.Helper()
 	if err == nil {
 		t.Errorf("%s: expected error, got nil", message)
@@ -31,7 +36,7 @@ func Error(t *testing.T, err error, message string) {
 }
 
 // ErrorIs fails the test with message if err does not match target under errors.Is.
-func ErrorIs(t *testing.T, err, target error, message string) {
+func ErrorIs(t TestingT, err, target error, message string) {
 	t.Helper()
 	if !errors.Is(err, target) {
 		t.Errorf("%s: got %v, want errors.Is %v", message, err, target)
@@ -39,7 +44,7 @@ func ErrorIs(t *testing.T, err, target error, message string) {
 }
 
 // NoError fails the test with message if err is non-nil.
-func NoError(t *testing.T, err error, message string) {
+func NoError(t TestingT, err error, message string) {
 	t.Helper()
 	if err != nil {
 		t.Errorf("%s: expected no error, got %v", message, err)
@@ -47,7 +52,7 @@ func NoError(t *testing.T, err error, message string) {
 }
 
 // True fails the test with message if got is false.
-func True(t *testing.T, got bool, message string) {
+func True(t TestingT, got bool, message string) {
 	t.Helper()
 	if !got {
 		t.Errorf("%s: expected true, got false", message)
@@ -55,7 +60,7 @@ func True(t *testing.T, got bool, message string) {
 }
 
 // False fails the test with message if got is true.
-func False(t *testing.T, got bool, message string) {
+func False(t TestingT, got bool, message string) {
 	t.Helper()
 	if got {
 		t.Errorf("%s: expected false, got true", message)
