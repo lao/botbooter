@@ -232,7 +232,7 @@ Alternatives:
 - [x] Slack, Discord, Telegram, WhatsApp and CLI adapters
 - [x] Middleware and attachment abstraction
 - [x] Unify attachment URL retrieval for all implementations
-- [ ] Microsoft Teams, WeChat, Mastodon adapter
+- [ ] Microsoft Teams, WeChat, Mastodon adapters
 - [ ] Richer message types (blocks, embeds)
 - [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend
 - [ ] **Conversational flows** (multi-step, context-aware dialogs) — a handler can pause and own the *next* message from the same user instead of re-routing it, so a sign-up form (name → email → address → profession → age → password) asks one question, waits for the reply, validates, then advances to the next. Per-user state lives in the pluggable `Store` above; the goal is a declarative, minimal-boilerplate API for defining the steps.
