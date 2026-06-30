@@ -218,12 +218,13 @@ func (a Answers) Lookup(key string) (string, bool) {
 }
 
 // flowStep is one question in a Flow: a prompt, the key its answer is stored
-// under, and an optional validator. (The secret marker is added with the
-// serialization logic that reads it, in flow.go.)
+// under, an optional validator, and whether the answer is a secret (excluded from
+// any serialized state — see flow.go).
 type flowStep struct {
 	key      string
 	prompt   string
 	validate func(string) error
+	secret   bool
 }
 
 // Flow is a declarative multi-step dialog: an ordered list of questions plus
