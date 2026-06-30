@@ -3,7 +3,7 @@
 .env.*
 
 # Test & coverage artifacts
-coverage.out
+coverage.txt
 *.out
 *.test
 

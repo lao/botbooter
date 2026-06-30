@@ -35,11 +35,11 @@ The codebase is a **facade over internal packages**. Understanding the split is 
 
 **To add a platform:** add a `core.BotType` iota const + `String()` case in `internal/core`; create `internal/<platform>` implementing `core.Adapter`; add a public `<platform>/` package wrapping it with a typed `New` + accessors, **plus its `imports_test.go` SDK-ban guard and a present+absent entry in the root `isolation_deps_test.go`**; and re-export the new `BotType` const in `botbooter.go`. The lifecycle/dispatch in `core` need no changes.
 
-### Dispatch (`core.dispatch`)
+### Dispatch (`core.Bot.dispatch`)
 
 Commands are regex patterns compiled once in `AddHandler` (invalid patterns return an error there). Matching is **first-match-wins**; no match falls through to the unknown-command handler if set. Middleware is composed inner-to-outer so registration order = execution order, each calling `next`. The whole dispatch is wrapped in a `recover` — a panicking handler is logged, not fatal.
 
-### Lifecycle (the subtle part — read `core.go` before touching it)
+### Lifecycle (the subtle part — read `internal/core/core.go` before touching it)
 
 - `Connect` is **non-blocking**: adapters start their event loop in a goroutine and report termination via `deps.Done(err)`. `Run` blocks, selecting on `ctx.Done()` vs the done channel, then disconnects.
 - Each connection installs a fresh `stop` closure guarded by its **own `sync.Once`**. This is deliberate: a reconnect installs a new closure instead of resetting a shared `Once`, so a lingering disconnect goroutine from a prior connection can't race the new one. Don't collapse this back to a single shared `Once`.
