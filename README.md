@@ -136,8 +136,9 @@ if err := bot.HandleFlow("^sign ?up$", signup); err != nil {
 ```
 
 `HandleFlow` validates the flow and returns an `errors.Is`-checkable sentinel
-(`ErrFlowEmptyID`, `ErrFlowNoSteps`, `ErrFlowDuplicateKey`, `ErrFlowNoOnComplete`,
-`ErrFlowAlreadyRegistered`, …) — plus the pattern error from a bad regexp.
+(`ErrFlowEmptyID`, `ErrFlowNoSteps`, `ErrFlowEmptyStepKey`, `ErrFlowDuplicateKey`,
+`ErrFlowNoOnComplete`, `ErrFlowAlreadyRegistered`) — plus the pattern error from a
+bad regexp, and a nil-flow error.
 `Validate(fn)` re-prompts the same step on a non-nil error (using `err.Error()` as
 the nudge); an empty/whitespace reply is a non-answer and also re-prompts.
 

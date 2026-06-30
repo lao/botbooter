@@ -74,5 +74,5 @@ func NewFlow(id string) *Flow { return core.NewFlow(id) }
 func Validate(fn func(string) error) AskOption { return core.Validate(fn) }
 
 // Secret marks a flow step's answer sensitive: kept out of framework logs and any
-// serialized Store state. It is not encryption. See [core.Secret].
+// future serialized Store state. It is not encryption. See [core.Secret].
 func Secret() AskOption { return core.Secret() }

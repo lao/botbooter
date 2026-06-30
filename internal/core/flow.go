@@ -179,6 +179,9 @@ func serializableState(state ConversationState, flow *Flow) ConversationState {
 // unique, it has no OnComplete, or another flow with the same id is already
 // registered. On any error nothing is registered.
 func (b *Bot) HandleFlow(pattern string, flow *Flow) error {
+	if flow == nil {
+		return errors.New("botbooter: HandleFlow: flow must not be nil")
+	}
 	if err := flow.validate(); err != nil {
 		return err
 	}

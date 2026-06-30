@@ -369,6 +369,10 @@ func TestBot_HandleFlow_SentinelErrors(t *testing.T) {
 		bot := New(SlackBotType, &recordingAdapter{})
 		asserts.Error(t, bot.HandleFlow("[bad(", newFlow()), "invalid pattern still errors")
 	})
+	t.Run("NilFlow", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		asserts.Error(t, bot.HandleFlow("^x$", nil), "a nil flow returns an error, not a panic")
+	})
 }
 
 func TestFlow_OutOfRangeStepFallsThrough(t *testing.T) {
