@@ -42,6 +42,19 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+type failingListener struct {
+	err error
+}
+
+func (l failingListener) Accept() (net.Conn, error) { return nil, l.err }
+func (failingListener) Close() error                { return nil }
+func (failingListener) Addr() net.Addr              { return testAddr("failing") }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "test" }
+func (a testAddr) String() string { return string(a) }
+
 func signingKey(t *testing.T) *rsa.PrivateKey {
 	t.Helper()
 	keyOnce.Do(func() {
@@ -407,6 +420,44 @@ func TestPublicKey_RefreshesOnKidMiss(t *testing.T) {
 	asserts.Error(t, err, "still unknown after refresh")
 }
 
+func TestPublicKey_ConcurrentRefreshRechecksCache(t *testing.T) {
+	a := testAdapter(t)
+
+	type result struct {
+		key *rsa.PublicKey
+		err error
+	}
+	known := make(chan result, 1)
+	missing1 := make(chan result, 1)
+	missing2 := make(chan result, 1)
+	started := make(chan struct{})
+	run := func(kid string, out chan<- result) {
+		go func() {
+			started <- struct{}{}
+			key, err := a.publicKey(context.Background(), kid)
+			out <- result{key: key, err: err}
+		}()
+	}
+
+	// Make every caller observe the stale cache before allowing one of them to
+	// refresh it. The remaining callers then re-check the newly populated cache.
+	a.fetchMu.Lock()
+	run(testKID, known)
+	run("missing-1", missing1)
+	run("missing-2", missing2)
+	<-started
+	<-started
+	<-started
+	time.Sleep(20 * time.Millisecond)
+	a.fetchMu.Unlock()
+
+	knownResult := <-known
+	asserts.NoError(t, knownResult.err, "known kid")
+	asserts.NotNil(t, knownResult.key, "known kid should use refreshed cache")
+	asserts.Error(t, (<-missing1).err, "first unknown kid")
+	asserts.Error(t, (<-missing2).err, "second unknown kid")
+}
+
 func TestPublicKey_RejectsForeignJWKSURI(t *testing.T) {
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -604,6 +655,22 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
 }
 
+func TestServe_ReportsUnexpectedError(t *testing.T) {
+	want := errors.New("accept failed")
+	done := make(chan error, 1)
+
+	serve(&http.Server{}, failingListener{err: want}, func(err error) {
+		done <- err
+	})
+
+	select {
+	case got := <-done:
+		asserts.ErrorIs(t, got, want, "unexpected serve error should be reported")
+	default:
+		t.Fatal("unexpected serve error was not reported")
+	}
+}
+
 // TestAccessToken_Network exercises the real Azure AD client-credentials flow.
 // It is hermetic-suite-excluded: skipped unless BOTBOOTER_TEAMS_NETWORK_TEST is
 // set together with live app credentials (mirrors BOTBOOTER_SLACK_NETWORK_TEST).
@@ -790,6 +857,27 @@ func TestFetchJWKS_MissingURI(t *testing.T) {
 	asserts.Error(t, err, "metadata without jwks_uri should fail")
 }
 
+func TestFetchJWKS_KeyEndpointError(t *testing.T) {
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openid", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": base + "/keys"})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	base = srv.URL
+	defer srv.Close()
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.openIDURL = base + "/openid"
+
+	_, err = a.fetchJWKS(context.Background())
+
+	asserts.Error(t, err, "JWKS endpoint error should propagate")
+}
+
 func TestFetchJWKS_SkipsInvalidKeys(t *testing.T) {
 	pub := signingKey(t).Public().(*rsa.PublicKey)
 	validN := base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
@@ -854,7 +942,7 @@ func TestConnect_BadAddr(t *testing.T) {
 	asserts.Error(t, err, "binding an invalid address should fail Connect")
 }
 
-func TestConnect_RejectsNonPOST(t *testing.T) {
+func TestConnect_RoutesWebhookMethods(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	asserts.NoError(t, err, "reserve loopback address")
 	addr := ln.Addr().String()
@@ -872,9 +960,13 @@ func TestConnect_RejectsNonPOST(t *testing.T) {
 
 	resp, err := http.Get("http://" + addr + a.cfg.Path)
 	asserts.NoError(t, err, "GET webhook")
-	defer func() { _ = resp.Body.Close() }()
-
 	asserts.Equal(t, resp.StatusCode, http.StatusMethodNotAllowed, "webhook should require POST")
+	_ = resp.Body.Close()
+
+	resp, err = http.Post("http://"+addr+a.cfg.Path, "application/json", strings.NewReader("{"))
+	asserts.NoError(t, err, "POST webhook")
+	defer func() { _ = resp.Body.Close() }()
+	asserts.Equal(t, resp.StatusCode, http.StatusBadRequest, "POST should reach message handler")
 }
 
 func TestGetJSON_Errors(t *testing.T) {
