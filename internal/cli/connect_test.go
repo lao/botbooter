@@ -46,16 +46,18 @@ func TestConnect_DispatchesLines(t *testing.T) {
 	}
 }
 
-// A context cancelled before Connect must stop the read loop without dispatching.
+// A context cancelled before Connect must stop the read loop without dispatching
+// and must still signal termination via deps.Done.
 func TestConnect_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	a := newAdapter(strings.NewReader("late\n"), io.Discard)
 	msgs := make(chan *core.Message, 1)
+	done := make(chan error, 1)
 	deps := core.AdapterDeps{
 		Dispatch: func(_ context.Context, m *core.Message) { msgs <- m },
-		Done:     func(error) {},
+		Done:     func(err error) { done <- err },
 	}
 
 	asserts.NoError(t, a.Connect(ctx, deps), "connect")
@@ -64,6 +66,13 @@ func TestConnect_ContextCancelled(t *testing.T) {
 	case m := <-msgs:
 		t.Fatalf("dispatched %q despite cancelled context", m.Content)
 	case <-time.After(100 * time.Millisecond):
+	}
+
+	select {
+	case err := <-done:
+		asserts.NoError(t, err, "done error on cancelled context")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deps.Done on cancelled context")
 	}
 }
 
