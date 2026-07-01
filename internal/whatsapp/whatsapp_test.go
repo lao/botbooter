@@ -1,14 +1,18 @@
 package whatsapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -497,6 +501,15 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
 }
 
+func TestDrainDispatch_ContextCancel(t *testing.T) {
+	a := testAdapter()
+	a.inflight.Add(1) // never decremented
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.drainDispatch(ctx) // must return promptly on a canceled ctx
+	asserts.Equal(t, a.inflight.Load(), int64(1), "drain returns on ctx cancel without waiting")
+}
+
 func TestDrainDispatch_WaitsForInflight(t *testing.T) {
 	a := testAdapter()
 	a.inflight.Add(1)
@@ -553,4 +566,96 @@ func TestConnect_BindError(t *testing.T) {
 func TestDisconnect_NeverConnected(t *testing.T) {
 	a := testAdapter()
 	asserts.NoError(t, a.Disconnect(), "Disconnect before Connect should be safe")
+}
+
+// TestDisconnect_SlowShutdownDoesNotStarveDrain is the end-to-end regression
+// for the two-budget Disconnect: a slow client keeps a connection active so
+// srv.Shutdown burns its full deadline, and the drain must still get its own
+// deadline to let an already-acked in-flight dispatch finish. With one shared
+// context (the bug) drain would inherit ~0s and abandon the goroutine. It takes
+// ~6s of real time, so it is gated behind an env var to keep the default suite
+// hermetic and fast.
+func TestDisconnect_SlowShutdownDoesNotStarveDrain(t *testing.T) {
+	if os.Getenv("BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST") == "" {
+		t.Skip("set BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST to run the ~6s slow-shutdown drain timing test")
+	}
+
+	// Bind a concrete free port so raw client connections can target it; Connect
+	// does not expose its listener address.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	asserts.NoError(t, err, "probe listen")
+	addr := probe.Addr().String()
+	asserts.NoError(t, probe.Close(), "probe close")
+
+	a := testAdapter()
+	a.cfg.Addr = addr
+
+	// The acked dispatch outlives Shutdown's 5s deadline: if drain shared that
+	// deadline it would get ~0s and never wait for this goroutine.
+	dispatchDone := make(chan struct{})
+	deps := core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+		Dispatch: func(context.Context, *core.Message) {
+			time.Sleep(6 * time.Second)
+			close(dispatchDone)
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+
+	// 1) A valid webhook: the handler acks 200 and spawns the in-flight dispatch.
+	body := []byte(textWebhook)
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+defaultPath, bytes.NewReader(body))
+	asserts.NoError(t, err, "build webhook request")
+	req.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	resp, err := http.DefaultClient.Do(req)
+	asserts.NoError(t, err, "post webhook")
+	_ = resp.Body.Close()
+	asserts.Equal(t, resp.StatusCode, http.StatusOK, "webhook acked")
+
+	// Wait until the dispatch goroutine has registered as in-flight.
+	deadline := time.Now().Add(time.Second)
+	for a.inflight.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	asserts.Equal(t, a.inflight.Load(), int64(1), "dispatch is in-flight")
+
+	// 2) A slow client promises a body it never sends, so the handler blocks
+	//    reading it and the connection stays active through Shutdown.
+	slow, err := net.Dial("tcp", addr)
+	asserts.NoError(t, err, "slow dial")
+	defer func() { _ = slow.Close() }()
+	_, err = slow.Write([]byte("POST " + defaultPath + " HTTP/1.1\r\nHost: x\r\n" +
+		signatureHeader + ": bad\r\nContent-Length: 1000000\r\n\r\n"))
+	asserts.NoError(t, err, "slow write")
+	time.Sleep(100 * time.Millisecond) // let the server mark the connection active
+
+	// 3) Disconnect: Shutdown burns ~5s on the slow client; drain must still get
+	//    its own budget so the acked dispatch (6s) finishes.
+	start := time.Now()
+	err = a.Disconnect()
+	elapsed := time.Since(start)
+	// Shutdown times out waiting on the slow client, so a deadline error here is
+	// expected; the point of the test is that drain still saved the dispatch.
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unexpected Disconnect error: %v", err)
+	}
+
+	asserts.Equal(t, a.inflight.Load(), int64(0),
+		"an acked in-flight dispatch must survive a slow shutdown (separate drain budget)")
+
+	// Guard the harness itself: if Shutdown returned fast the slow-client hold
+	// failed and the scenario never exercised the shared-budget path.
+	if elapsed < 4*time.Second {
+		t.Fatalf("expected Shutdown to burn ~5s on the slow client, elapsed=%s", elapsed)
+	}
+
+	select {
+	case <-dispatchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch goroutine never completed")
+	}
 }
