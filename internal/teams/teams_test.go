@@ -288,6 +288,49 @@ func TestSameServiceURL(t *testing.T) {
 	asserts.False(t, sameServiceURL("https://x", "https://y"), "different urls differ")
 }
 
+func TestBearerToken(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+		want   string
+		ok     bool
+	}{
+		{"canonical", "Bearer abc.def.ghi", "abc.def.ghi", true},
+		{"lowercase scheme", "bearer abc.def.ghi", "abc.def.ghi", true},
+		{"uppercase scheme", "BEARER abc.def.ghi", "abc.def.ghi", true},
+		{"multiple separating spaces", "Bearer    abc", "abc", true},
+		{"surrounding whitespace", "  Bearer abc  ", "abc", true},
+		{"empty header", "", "", false},
+		{"scheme only", "Bearer", "", false},
+		{"scheme and spaces only", "Bearer   ", "", false},
+		{"no separating space", "Bearerabc", "", false},
+		{"wrong scheme", "Basic abc", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := bearerToken(tc.header)
+		asserts.Equal(t, ok, tc.ok, "bearerToken ok "+tc.name)
+		asserts.Equal(t, got, tc.want, "bearerToken token "+tc.name)
+	}
+}
+
+func TestSameSchemeHost(t *testing.T) {
+	const openID = "https://login.botframework.com/v1/.well-known/openidconfiguration"
+	cases := []struct {
+		name string
+		jwks string
+		want bool
+	}{
+		{"identical host", "https://login.botframework.com/v1/.well-known/keys", true},
+		{"explicit default port on jwks_uri", "https://login.botframework.com:443/v1/.well-known/keys", true},
+		{"case-insensitive host", "https://Login.BotFramework.com/v1/.well-known/keys", true},
+		{"different host", "https://evil.example.com/v1/.well-known/keys", false},
+		{"scheme downgrade", "http://login.botframework.com/v1/.well-known/keys", false},
+	}
+	for _, tc := range cases {
+		asserts.Equal(t, sameSchemeHost(openID, tc.jwks), tc.want, "sameSchemeHost "+tc.name)
+	}
+}
+
 func TestParseTimestamp(t *testing.T) {
 	got := parseTimestamp("2026-06-30T12:00:00Z")
 	asserts.Equal(t, got.IsZero(), false, "valid RFC3339 should parse")
