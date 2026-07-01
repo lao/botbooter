@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -166,9 +167,12 @@ func (a *adapter) Disconnect() error {
 	a.drainDispatch(drainCtx)
 
 	// If the drain timed out, cancelDispatch below force-aborts the stragglers; log
-	// that, since force-aborting an acked message is operationally significant.
+	// that and surface it to the caller, since force-aborting an acked message is
+	// operationally significant and must not read as a clean shutdown.
+	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
 		log.Printf("teams: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		drainErr = fmt.Errorf("teams: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 
 	// Clear the shared fields only if a reconnect has not installed a newer
@@ -185,7 +189,10 @@ func (a *adapter) Disconnect() error {
 	if cancelDispatch != nil {
 		cancelDispatch()
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return drainErr
 }
 
 // drainDispatch waits (bounded by ctx) for in-flight dispatch to finish so an acked

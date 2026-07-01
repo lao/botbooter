@@ -286,8 +286,10 @@ func (a *adapter) Disconnect() error {
 	// cancelDispatch below force-aborts them; surface that instead of aborting
 	// silently, since a forced abort of an already-acked message is operationally
 	// significant.
+	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
 		log.Printf("whatsapp: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		drainErr = fmt.Errorf("whatsapp: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 
 	// Clear the shared fields only if a reconnect has not already installed a newer
@@ -307,7 +309,10 @@ func (a *adapter) Disconnect() error {
 	if cancelDispatch != nil {
 		cancelDispatch()
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return drainErr
 }
 
 // drainDispatch waits for in-flight dispatch goroutines to finish so an acked
