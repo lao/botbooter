@@ -79,6 +79,12 @@ const (
 	// jwksMinRefreshInterval rate-limits JWKS re-fetches so a flood of tokens
 	// carrying unknown kids cannot turn into a fetch-per-request DoS.
 	jwksMinRefreshInterval = time.Minute
+	// jwksMaxAge bounds how long a cached signing-key set is trusted before a
+	// refresh is forced even for a known kid. Without it a key Microsoft has
+	// retired would stay accepted until an unseen-kid token happened to flush the
+	// map; the forced refresh replaces the whole set, dropping retired keys. The
+	// reference Bot Framework SDK uses the same fixed 24h refresh interval.
+	jwksMaxAge = 24 * time.Hour
 	// tokenRefreshSkew refreshes the outbound token a little before it expires.
 	tokenRefreshSkew = time.Minute
 )
@@ -168,7 +174,13 @@ type adapter struct {
 	convOrder []string                // FIFO insertion order for bounded eviction
 	token     cachedToken
 	keys      map[string]*rsa.PublicKey // kid -> signing key
-	keysAt    time.Time
+	// keysAt is the time of the last JWKS fetch *attempt* (success or failure); it
+	// rate-limits refreshes to at most one per jwksMinRefreshInterval, bounding the
+	// fetch rate even during an upstream outage. keysFreshAt is the time of the
+	// last *successful* refresh; it drives the jwksMaxAge staleness gate so a
+	// retired key cannot stay trusted indefinitely between unknown-kid misses.
+	keysAt      time.Time
+	keysFreshAt time.Time
 
 	// fetchMu serializes JWKS refreshes so a burst of tokens carrying an unknown
 	// kid triggers a single upstream fetch rather than one per request.
@@ -295,11 +307,14 @@ func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *
 	w.WriteHeader(http.StatusOK)
 
 	// Only user message Activities are dispatched; skip conversationUpdate,
-	// typing, etc., and drop the bot's own messages to avoid reply loops.
+	// typing, etc., and drop bot-authored messages to avoid reply loops. Teams
+	// marks the sender's account with from.role == "bot" for the bot's own echo
+	// and for any other bot in a shared channel; that role is the reliable signal
+	// (from.id never equals recipient.id, since recipient is always this bot).
 	if act.Type != "message" {
 		return
 	}
-	if act.From.ID != "" && act.From.ID == act.Recipient.ID {
+	if strings.EqualFold(act.From.Role, "bot") {
 		return
 	}
 
@@ -402,12 +417,11 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		return fmt.Errorf("teams: send failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	// A reply has no response body to decode; decodeJSON just validates the status
+	// and drains for keep-alive.
+	if err := decodeJSON(resp, nil); err != nil {
+		return fmt.Errorf("teams: send failed: %w", err)
 	}
-	// Drain the success body so the connection can be reused (keep-alive).
-	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -493,20 +507,13 @@ func (a *adapter) accessToken(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		return "", fmt.Errorf("teams: token request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-
 	var out struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int64  `json:"expires_in"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetaBytes)).Decode(&out); err != nil {
-		return "", fmt.Errorf("teams: decode token response: %w", err)
+	if err := decodeJSON(resp, &out); err != nil {
+		return "", fmt.Errorf("teams: token request: %w", err)
 	}
-	// Drain any trailing bytes so the connection can be reused (keep-alive).
-	_, _ = io.Copy(io.Discard, resp.Body)
 	if out.AccessToken == "" {
 		return "", errors.New("teams: token response missing access_token")
 	}
@@ -575,50 +582,72 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 	return nil
 }
 
-// publicKey returns the signing key for kid, refreshing the JWKS once on a miss
-// (to handle key rotation) but no more often than jwksMinRefreshInterval.
+// publicKey returns the signing key for kid. A cached key is served directly
+// while the key set is within jwksMaxAge; once it ages past that a refresh is
+// forced even on a hit, so a key Microsoft has retired stops being trusted
+// rather than lingering until an unknown-kid token flushes it. An unknown kid
+// also triggers a refresh (to pick up key rotation). Refreshes happen at most
+// once per jwksMinRefreshInterval, and a refresh that fails falls back to the
+// cached key so a transient JWKS outage does not reject otherwise-valid tokens.
 func (a *adapter) publicKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	a.mu.Lock()
 	k := a.keys[kid]
-	stale := time.Since(a.keysAt) >= jwksMinRefreshInterval
+	fresh := time.Since(a.keysFreshAt) < jwksMaxAge
+	rateLimited := time.Since(a.keysAt) < jwksMinRefreshInterval
 	a.mu.Unlock()
-	if k != nil {
+	if k != nil && fresh {
 		return k, nil
 	}
-	if !stale {
+	if rateLimited {
+		// Within the rate-limit window we cannot re-fetch: serve the cached key if
+		// present (fallback while a refresh is pending), else report the unknown kid.
+		if k != nil {
+			return k, nil
+		}
 		return nil, fmt.Errorf("teams: unknown signing key %q", kid)
 	}
 
-	// Serialize refreshes so a burst of unknown-kid tokens makes a single upstream
-	// fetch. After winning fetchMu, re-check the cache: a concurrent refresh may
-	// have already resolved this kid or reset the staleness window.
+	// Serialize refreshes so a burst of unknown-kid or simultaneously-aged tokens
+	// makes a single upstream fetch. After winning fetchMu, re-check the cache: a
+	// concurrent refresh may have already resolved this kid or reset the windows.
 	a.fetchMu.Lock()
 	defer a.fetchMu.Unlock()
 
 	a.mu.Lock()
 	k = a.keys[kid]
-	stale = time.Since(a.keysAt) >= jwksMinRefreshInterval
+	fresh = time.Since(a.keysFreshAt) < jwksMaxAge
+	rateLimited = time.Since(a.keysAt) < jwksMinRefreshInterval
 	a.mu.Unlock()
-	if k != nil {
+	if k != nil && fresh {
 		return k, nil
 	}
-	if !stale {
+	if rateLimited {
+		if k != nil {
+			return k, nil
+		}
 		return nil, fmt.Errorf("teams: unknown signing key %q", kid)
 	}
 
-	// Advance keysAt before fetching, not just on success, so a failed fetch is
-	// still rate-limited to once per jwksMinRefreshInterval. Otherwise, during a
-	// JWKS-endpoint outage every unknown-kid request would re-trigger a fetch.
+	// Advance keysAt (the attempt clock) before fetching, not just on success, so
+	// a failed fetch is still rate-limited to once per jwksMinRefreshInterval.
+	// Otherwise, during a JWKS-endpoint outage every request would re-trigger a
+	// fetch. keysFreshAt (the max-age clock) advances only on success below.
 	a.mu.Lock()
 	a.keysAt = time.Now()
 	a.mu.Unlock()
 
 	keys, err := a.fetchJWKS(ctx)
 	if err != nil {
+		// Fall back to the cached key (if any) so a transient JWKS outage does not
+		// reject otherwise-valid tokens; a genuine unknown-kid miss surfaces err.
+		if k != nil {
+			return k, nil
+		}
 		return nil, err
 	}
 	a.mu.Lock()
 	a.keys = keys
+	a.keysFreshAt = time.Now()
 	k = a.keys[kid]
 	a.mu.Unlock()
 	if k == nil {
@@ -702,11 +731,30 @@ func (a *adapter) getJSON(ctx context.Context, endpoint string, v any) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("teams: GET %s failed with status %d", endpoint, resp.StatusCode)
+	if err := decodeJSON(resp, v); err != nil {
+		return fmt.Errorf("teams: GET %s: %w", endpoint, err)
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetaBytes)).Decode(v); err != nil {
-		return fmt.Errorf("teams: decode %s: %w", endpoint, err)
+	return nil
+}
+
+// decodeJSON is the shared tail for the adapter's outbound HTTP calls. It treats
+// a non-2xx status as an error (naming the status and a capped snippet of the
+// body), decodes the 2xx body as JSON into v when v is non-nil (reading at most
+// maxMetaBytes), then drains any trailing bytes so the connection can be reused
+// (keep-alive). Pass a nil v for calls with no response body to decode (e.g. a
+// reply POST) — the status check and keep-alive drain still run. Callers wrap the
+// returned error with call-site context. Keeping this in one place means a later
+// tweak to the non-2xx handling or the keep-alive drain applies to Send,
+// accessToken and getJSON alike.
+func decodeJSON(resp *http.Response, v any) error {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if v != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetaBytes)).Decode(v); err != nil {
+			return fmt.Errorf("decode body: %w", err)
+		}
 	}
 	// Drain any trailing bytes so the connection can be reused (keep-alive).
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -746,6 +794,10 @@ func sameServiceURL(a, b string) bool {
 type channelAccount struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Role is the Bot Framework RoleType of the account: "user" or "bot". Teams
+	// sets from.role to "bot" on messages authored by a bot (the bot's own echo,
+	// or another bot in a shared channel), which is how those are dropped.
+	Role string `json:"role"`
 }
 
 type activityAttachment struct {

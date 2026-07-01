@@ -165,6 +165,25 @@ func activityJSON(typ, text, serviceURL, fromID, recipientID, convID string) str
 	return string(b)
 }
 
+// activityJSONFromRole builds an inbound message Activity whose from account
+// carries the given Bot Framework role ("user"/"bot"). Teams sets from.role to
+// "bot" on messages authored by a bot (the bot's own echo or another bot in a
+// shared channel), which is how such messages are identified and dropped.
+func activityJSONFromRole(role, serviceURL, fromID, recipientID, convID string) string {
+	act := map[string]any{
+		"type":         "message",
+		"id":           "act-1",
+		"text":         "hi",
+		"serviceUrl":   serviceURL,
+		"timestamp":    "2026-06-30T12:00:00Z",
+		"from":         map[string]string{"id": fromID, "name": "Ada", "role": role},
+		"recipient":    map[string]string{"id": recipientID},
+		"conversation": map[string]string{"id": convID},
+	}
+	b, _ := json.Marshal(act)
+	return string(b)
+}
+
 // post drives handleMessages with a body and Authorization header, returning the
 // recorder.
 func post(a *adapter, deps core.AdapterDeps, body, auth string) *httptest.ResponseRecorder {
@@ -404,13 +423,19 @@ func TestHandleMessages_DropsBotMessage(t *testing.T) {
 	var got []*core.Message
 	deps := captureDeps(&got, nil)
 
-	// from.id == recipient.id marks the bot's own message.
-	body := activityJSON("message", "echo", allowedServiceURL, "bot-1", "bot-1", "conv-1")
+	// A real bot-authored Activity — the bot's own echo, or another bot in a
+	// shared channel — has from != recipient (recipient is always this bot) but
+	// carries from.role == "bot". That role is what marks it, per the Teams docs.
+	body := activityJSONFromRole("bot", allowedServiceURL, "bot-2", "bot-1", "conv-1")
 	token := mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL))
 	w := post(a, deps, body, "Bearer "+token)
 
 	asserts.Equal(t, w.Code, http.StatusOK, "still acked")
-	asserts.Equal(t, len(got), 0, "bot's own message not dispatched")
+	// Dispatch is async, so assert on the synchronous side effect: a dropped
+	// Activity returns before recordConversation, so no conversation is recorded.
+	_, recorded := a.convs["conv-1"]
+	asserts.False(t, recorded, "a bot-role message is dropped before dispatch")
+	asserts.Equal(t, len(got), 0, "a bot-role message is not dispatched")
 }
 
 func TestHandleMessages_IgnoresNonMessage(t *testing.T) {
@@ -550,6 +575,104 @@ func TestPublicKey_RejectsForeignJWKSURI(t *testing.T) {
 	// vector and must be rejected before any key fetch.
 	_, err = a.publicKey(context.Background(), "any-kid")
 	asserts.Error(t, err, "foreign jwks_uri host must be rejected")
+}
+
+func TestPublicKey_ExpiresStaleKeysPastMaxAge(t *testing.T) {
+	// A cached kid that Microsoft has rotated out must stop being accepted once
+	// the key set ages past jwksMaxAge. The forced refresh replaces the whole map,
+	// so the retired kid no longer resolves; without the max-age gate it would be
+	// served from cache indefinitely until an unseen-kid token happened to flush it.
+	pub := signingKey(t).Public().(*rsa.PublicKey)
+	var serveKID, base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openid", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": base + "/keys"})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+			"kid": serveKID,
+			"kty": "RSA",
+			"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+		}}})
+	})
+	srv := httptest.NewServer(mux)
+	base = srv.URL
+	t.Cleanup(srv.Close)
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.openIDURL = srv.URL + "/openid"
+	ctx := context.Background()
+
+	// First fetch caches the original kid.
+	serveKID = "old-kid"
+	k, err := a.publicKey(ctx, "old-kid")
+	asserts.NoError(t, err, "old kid resolves on first fetch")
+	asserts.NotNil(t, k, "key returned")
+
+	// Microsoft rotates: the endpoint now serves only a new kid. Within jwksMaxAge
+	// the old kid is still served from cache without a refresh.
+	serveKID = "new-kid"
+	cached, err := a.publicKey(ctx, "old-kid")
+	asserts.NoError(t, err, "old kid still cached within max age")
+	asserts.Equal(t, cached, k, "cached key returned within max age")
+
+	// Age the key set past jwksMaxAge: the next lookup forces a refresh that
+	// replaces the map and drops the retired kid.
+	a.mu.Lock()
+	a.keysFreshAt = time.Now().Add(-2 * jwksMaxAge)
+	a.keysAt = time.Now().Add(-2 * jwksMaxAge)
+	a.mu.Unlock()
+
+	_, err = a.publicKey(ctx, "old-kid")
+	asserts.Error(t, err, "retired kid rejected after max-age refresh")
+
+	nk, err := a.publicKey(ctx, "new-kid")
+	asserts.NoError(t, err, "rotated-in kid resolves after refresh")
+	asserts.NotNil(t, nk, "new key returned")
+}
+
+func TestPublicKey_ServesCachedKeyWhenRefreshFails(t *testing.T) {
+	// A max-age-triggered refresh that fails must fall back to the cached key so a
+	// transient JWKS outage does not reject otherwise-valid tokens (the reference
+	// Bot Framework SDK likewise keeps serving cached keys when a refresh fails).
+	pub := signingKey(t).Public().(*rsa.PublicKey)
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openid", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": base + "/keys"})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+			"kid": testKID,
+			"kty": "RSA",
+			"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+		}}})
+	})
+	srv := httptest.NewServer(mux)
+	base = srv.URL
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.openIDURL = srv.URL + "/openid"
+	ctx := context.Background()
+
+	k, err := a.publicKey(ctx, testKID)
+	asserts.NoError(t, err, "warm cache")
+	asserts.NotNil(t, k, "key returned")
+
+	// Simulate a JWKS outage and age the cache past jwksMaxAge.
+	srv.Close()
+	a.mu.Lock()
+	a.keysFreshAt = time.Now().Add(-2 * jwksMaxAge)
+	a.keysAt = time.Now().Add(-2 * jwksMaxAge)
+	a.mu.Unlock()
+
+	got, err := a.publicKey(ctx, testKID)
+	asserts.NoError(t, err, "known kid served from cache when refresh fails")
+	asserts.NotNil(t, got, "cached key returned on refresh failure")
 }
 
 func TestSend(t *testing.T) {
