@@ -355,6 +355,19 @@ func TestToMessage_Mapping(t *testing.T) {
 	asserts.Equal(t, tm.ServiceURL, allowedServiceURL, "ServiceURL carried on raw message")
 }
 
+func TestToMessage_ReplyToID(t *testing.T) {
+	// A threaded reply carries replyToId; a top-level message omits it.
+	withReply := `{"type":"message","id":"act-2","text":"re","replyToId":"act-1"}`
+	var act inboundActivity
+	asserts.NoError(t, json.Unmarshal([]byte(withReply), &act), "unmarshal reply activity")
+	m := toMessage(&act, json.RawMessage(withReply))
+	asserts.Equal(t, m.ReplyToID, "act-1", "ReplyToID populated from replyToId")
+
+	var plain inboundActivity
+	asserts.NoError(t, json.Unmarshal([]byte(`{"type":"message","id":"act-3"}`), &plain), "unmarshal plain activity")
+	asserts.Equal(t, toMessage(&plain, nil).ReplyToID, "", "ReplyToID empty when absent")
+}
+
 func TestHandleMessages_DispatchesText(t *testing.T) {
 	a := testAdapter(t)
 	var got []*core.Message
