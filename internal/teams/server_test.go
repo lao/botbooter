@@ -1,0 +1,472 @@
+package teams
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/lao/botbooter/internal/asserts"
+	"github.com/lao/botbooter/internal/core"
+)
+
+type failingListener struct {
+	err error
+}
+
+func (l failingListener) Accept() (net.Conn, error) { return nil, l.err }
+func (failingListener) Close() error                { return nil }
+func (failingListener) Addr() net.Addr              { return testAddr("failing") }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "test" }
+func (a testAddr) String() string { return string(a) }
+
+// channelActivityJSON builds an inbound message Activity carrying the given
+// channelId (the field the endorsement check reads), for the endorsement tests.
+func channelActivityJSON(channelID string) string {
+	return activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1", channelID)
+}
+
+func captureDeps(got *[]*core.Message, done chan<- struct{}) core.AdapterDeps {
+	return core.AdapterDeps{
+		Dispatch: func(_ context.Context, m *core.Message) {
+			*got = append(*got, m)
+			if done != nil {
+				done <- struct{}{}
+			}
+		},
+	}
+}
+
+func awaitDispatch(t *testing.T, done <-chan struct{}, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for dispatch %d of %d", i+1, n)
+		}
+	}
+}
+
+// activityJSONFromRole builds an inbound message Activity whose from account
+// carries the given Bot Framework role ("user"/"bot"). Teams sets from.role to
+// "bot" on messages authored by a bot (the bot's own echo or another bot in a
+// shared channel), which is how such messages are identified and dropped.
+func activityJSONFromRole(role, serviceURL, fromID, recipientID, convID string) string {
+	act := map[string]any{
+		"type":         "message",
+		"id":           "act-1",
+		"text":         "hi",
+		"serviceUrl":   serviceURL,
+		"timestamp":    "2026-06-30T12:00:00Z",
+		"from":         map[string]string{"id": fromID, "name": "Ada", "role": role},
+		"recipient":    map[string]string{"id": recipientID},
+		"conversation": map[string]string{"id": convID},
+	}
+	b, _ := json.Marshal(act)
+	return string(b)
+}
+
+// post drives handleMessages with a body and Authorization header, returning the
+// recorder.
+func post(a *adapter, deps core.AdapterDeps, body, auth string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
+	if auth != "" {
+		r.Header.Set("Authorization", auth)
+	}
+	w := httptest.NewRecorder()
+	a.handleMessages(context.Background(), context.Background(), w, r, deps)
+	return w
+}
+
+func TestHandleMessages_DispatchesText(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	done := make(chan struct{}, 1)
+	deps := captureDeps(&got, done)
+
+	body := activityJSON("message", "hi there", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	token := mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL))
+
+	w := post(a, deps, body, "Bearer "+token)
+	asserts.Equal(t, w.Code, http.StatusOK, "valid request should be 200")
+
+	awaitDispatch(t, done, 1)
+	asserts.Equal(t, len(got), 1, "one message dispatched")
+	asserts.Equal(t, got[0].Content, "hi there", "dispatched content")
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	asserts.Equal(t, a.convs["conv-1"].serviceURL, allowedServiceURL, "conversation serviceUrl recorded")
+	asserts.Equal(t, a.convs["conv-1"].bot.ID, "bot-1", "bot account recorded for replies")
+}
+
+// TestHandleMessages_DispatchesOnDetachedCtx guards the drain: core cancels the run
+// context before Disconnect drains in-flight dispatch, so dispatch must ride the
+// detached context passed in, not runCtx — otherwise a handler's reply would fail
+// with "context canceled" mid-drain.
+func TestHandleMessages_DispatchesOnDetachedCtx(t *testing.T) {
+	a := testAdapter(t)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
+	defer cancelDispatch()
+
+	gotCtx := make(chan context.Context, 1)
+	deps := core.AdapterDeps{
+		Dispatch: func(c context.Context, _ *core.Message) { gotCtx <- c },
+	}
+
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	a.handleMessages(runCtx, dispatchCtx, httptest.NewRecorder(), r, deps)
+
+	select {
+	case c := <-gotCtx:
+		cancelRun() // core cancels runCtx at shutdown, before draining.
+		asserts.NoError(t, c.Err(), "dispatch ctx must not cancel with the run ctx")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch")
+	}
+}
+
+func TestHandleMessages_RejectsMissingToken(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	w := post(a, deps, body, "")
+
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "no token should be 401")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_RejectsBadSignature(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	// Sign with the right key but claim the wrong audience.
+	token := mintToken(t, testKID, validClaims("someone-else", allowedServiceURL))
+	w := post(a, deps, body, "Bearer "+token)
+
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "wrong audience should be 401")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_RejectsServiceURLClaimMismatch(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	// Token is otherwise valid but its serviceurl claim does not match the body.
+	token := mintToken(t, testKID, validClaims(a.cfg.AppID, "https://smba.trafficmanager.net/other/"))
+	w := post(a, deps, body, "Bearer "+token)
+
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "serviceurl mismatch should be 401")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_RejectsNonAllowlistedHost(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	const evil = "https://evil.example.com/"
+	body := activityJSON("message", "hi", evil, "user-1", "bot-1", "conv-1")
+	// Token validates (claim matches the body), but the host is not allowlisted.
+	token := mintToken(t, testKID, validClaims(a.cfg.AppID, evil))
+	w := post(a, deps, body, "Bearer "+token)
+
+	asserts.Equal(t, w.Code, http.StatusForbidden, "non-allowlisted serviceUrl should be 403")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_DropsBotMessage(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	// A real bot-authored Activity — the bot's own echo, or another bot in a
+	// shared channel — has from != recipient (recipient is always this bot) but
+	// carries from.role == "bot". That role is what marks it, per the Teams docs.
+	body := activityJSONFromRole("bot", allowedServiceURL, "bot-2", "bot-1", "conv-1")
+	token := mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL))
+	w := post(a, deps, body, "Bearer "+token)
+
+	asserts.Equal(t, w.Code, http.StatusOK, "still acked")
+	// Dispatch is async, so assert on the synchronous side effect: a dropped
+	// Activity returns before recordConversation, so no conversation is recorded.
+	_, recorded := a.convs["conv-1"]
+	asserts.False(t, recorded, "a bot-role message is dropped before dispatch")
+	asserts.Equal(t, len(got), 0, "a bot-role message is not dispatched")
+}
+
+func TestHandleMessages_IgnoresNonMessage(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	body := activityJSON("conversationUpdate", "", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	token := mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL))
+	w := post(a, deps, body, "Bearer "+token)
+
+	asserts.Equal(t, w.Code, http.StatusOK, "still acked")
+	asserts.Equal(t, len(got), 0, "non-message activity not dispatched")
+}
+
+func TestHandleMessages_AcceptsEndorsedChannel(t *testing.T) {
+	a := testAdapter(t, "msteams")
+	var got []*core.Message
+	done := make(chan struct{}, 1)
+	deps := captureDeps(&got, done)
+
+	body := channelActivityJSON("msteams")
+	w := post(a, deps, body, "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	asserts.Equal(t, w.Code, http.StatusOK, "activity on an endorsed channel is accepted")
+	awaitDispatch(t, done, 1)
+	asserts.Equal(t, len(got), 1, "dispatched")
+}
+
+func TestHandleMessages_RejectsUnendorsedChannel(t *testing.T) {
+	a := testAdapter(t, "msteams")
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	// Key endorsed for msteams only; an Activity claiming another channel must fail
+	// even though its signature/aud/iss/serviceurl are all valid.
+	body := channelActivityJSON("directline")
+	w := post(a, deps, body, "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "channel not in the key's endorsements is rejected")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_RejectsBlankChannelWhenEndorsed(t *testing.T) {
+	a := testAdapter(t, "msteams")
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	// A blank channelId must not skip an endorsed key's channel check.
+	body := channelActivityJSON("")
+	w := post(a, deps, body, "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "blank channelId rejected for an endorsed key")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_UnendorsedKeyExemptFromChannelCheck(t *testing.T) {
+	// A key with no endorsements (Emulator/Skill) authenticates regardless of
+	// channelId — the exemption the auth tests without a channelId rely on.
+	a := testAdapter(t)
+	var got []*core.Message
+	done := make(chan struct{}, 1)
+	deps := captureDeps(&got, done)
+
+	body := channelActivityJSON("")
+	w := post(a, deps, body, "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	asserts.Equal(t, w.Code, http.StatusOK, "unendorsed key is exempt from the channel check")
+	awaitDispatch(t, done, 1)
+	asserts.Equal(t, len(got), 1, "dispatched")
+}
+
+func TestHandleMessages_BadJSON(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	w := post(a, captureDeps(&got, nil), "{not json", "")
+	asserts.Equal(t, w.Code, http.StatusBadRequest, "unparseable body should be 400")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_OversizedBody(t *testing.T) {
+	a := testAdapter(t)
+	var got []*core.Message
+	big := strings.Repeat("a", maxRequestBytes+16)
+	w := post(a, captureDeps(&got, nil), big, "")
+	asserts.Equal(t, w.Code, http.StatusBadRequest, "oversized body should be 400")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestConnectDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	deps := core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	}
+
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should bind and start")
+	asserts.NoError(t, a.Disconnect(), "Disconnect should shut down cleanly")
+	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
+}
+
+// TestDisconnect_CancelsDispatchContext guards the leak fix: Disconnect must cancel
+// the connection's detached dispatch context after the drain, so a handler blocked
+// on ctx.Done() cannot leak past shutdown. The connection's cancel is wired by hand
+// so the test controls the exact context the handler dispatches on.
+func TestDisconnect_CancelsDispatchContext(t *testing.T) {
+	a := testAdapter(t)
+	dispatchCtx, cancelDispatch := context.WithCancel(context.WithoutCancel(context.Background()))
+	// srv must be non-nil so Disconnect runs its teardown rather than early-returning;
+	// an unstarted server's Shutdown returns immediately.
+	a.mu.Lock()
+	a.srv = &http.Server{}
+	a.detachedCancel = cancelDispatch
+	a.mu.Unlock()
+
+	gotCtx := make(chan context.Context, 1)
+	deps := core.AdapterDeps{Dispatch: func(c context.Context, _ *core.Message) { gotCtx <- c }}
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	a.handleMessages(context.Background(), dispatchCtx, httptest.NewRecorder(), r, deps)
+
+	var c context.Context
+	select {
+	case c = <-gotCtx:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch")
+	}
+	asserts.NoError(t, c.Err(), "dispatch ctx live before Disconnect")
+	asserts.NoError(t, a.Disconnect(), "Disconnect")
+	asserts.ErrorIs(t, c.Err(), context.Canceled, "dispatch ctx canceled after drain")
+}
+
+func TestServe_ReportsUnexpectedError(t *testing.T) {
+	want := errors.New("accept failed")
+	done := make(chan error, 1)
+
+	serve(&http.Server{}, failingListener{err: want}, func(err error) {
+		done <- err
+	})
+
+	select {
+	case got := <-done:
+		asserts.ErrorIs(t, got, want, "unexpected serve error should be reported")
+	default:
+		t.Fatal("unexpected serve error was not reported")
+	}
+}
+
+func TestConnect_BadAddr(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.cfg.Addr = "127.0.0.1:999999" // port out of range
+	err = a.Connect(context.Background(), core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	})
+	asserts.Error(t, err, "binding an invalid address should fail Connect")
+}
+
+func TestConnect_RoutesWebhookMethods(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	asserts.NoError(t, err, "reserve loopback address")
+	addr := ln.Addr().String()
+	asserts.NoError(t, ln.Close(), "release loopback address")
+
+	cfg := validConfig()
+	cfg.Addr = addr
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "newAdapter")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := core.AdapterDeps{Done: func(error) {}, Disconnect: a.Disconnect}
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+	defer func() { asserts.NoError(t, a.Disconnect(), "Disconnect") }()
+
+	resp, err := http.Get("http://" + addr + a.cfg.Path)
+	asserts.NoError(t, err, "GET webhook")
+	asserts.Equal(t, resp.StatusCode, http.StatusMethodNotAllowed, "webhook should require POST")
+	_ = resp.Body.Close()
+
+	resp, err = http.Post("http://"+addr+a.cfg.Path, "application/json", strings.NewReader("{"))
+	asserts.NoError(t, err, "POST webhook")
+	defer func() { _ = resp.Body.Close() }()
+	asserts.Equal(t, resp.StatusCode, http.StatusBadRequest, "POST should reach message handler")
+}
+
+func TestConnect_ContextCancelDisconnects(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	ctx, cancel := context.WithCancel(context.Background())
+	disc := make(chan struct{}, 1)
+	deps := core.AdapterDeps{
+		Done: func(error) {},
+		Disconnect: func() error {
+			disc <- struct{}{}
+			return a.Disconnect()
+		},
+	}
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+	cancel()
+	select {
+	case <-disc:
+	case <-time.After(2 * time.Second):
+		t.Fatal("context cancel did not trigger Disconnect")
+	}
+}
+
+func TestDrainDispatch_ContextCancel(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.inflight.Add(1) // never decremented
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.drainDispatch(ctx) // must return promptly on a canceled ctx
+	asserts.Equal(t, a.inflight.Load(), int64(1), "drain returns on ctx cancel without waiting")
+}
+
+func TestDrainDispatch_WaitsForInflight(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.inflight.Add(1)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		a.inflight.Add(-1)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.drainDispatch(ctx)
+
+	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
+}
+
+func TestRecordConversation_BoundedEviction(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	// Insert one over the cap; the oldest must be evicted.
+	for i := 0; i <= maxConversations; i++ {
+		a.recordConversation("c"+strconv.Itoa(i), allowedServiceURL, channelAccount{})
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	asserts.Equal(t, len(a.convs), maxConversations, "map capped at maxConversations")
+	_, firstPresent := a.convs["c0"]
+	asserts.False(t, firstPresent, "oldest entry evicted")
+}
+
+func TestRecordConversation_IgnoresIncompleteMapping(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+
+	a.recordConversation("", allowedServiceURL, channelAccount{})
+	a.recordConversation("conv-1", "", channelAccount{})
+
+	asserts.Equal(t, len(a.convs), 0, "incomplete mappings should not be recorded")
+}
