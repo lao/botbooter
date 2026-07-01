@@ -533,8 +533,8 @@ func (a *adapter) accessToken(ctx context.Context) (string, error) {
 // against the Bot Connector JWKS, audience == AppID, the expected issuer, exp,
 // and a serviceurl claim equal to the Activity's serviceUrl.
 func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServiceURL string) error {
-	raw, ok := strings.CutPrefix(authHeader, "Bearer ")
-	if !ok || raw == "" {
+	raw, ok := bearerToken(authHeader)
+	if !ok {
 		return fmt.Errorf("%w: missing or malformed Authorization header", errUnauthorized)
 	}
 
@@ -670,13 +670,13 @@ func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*rsa.PublicKey, err
 	}
 	// Pin jwks_uri to the same scheme AND host as the (hardcoded, TLS) OpenID
 	// metadata endpoint so a tampered/redirected document cannot point key fetching
-	// at an arbitrary host or downgrade it to cleartext. Matching the metadata
-	// scheme (https in production) rather than hardcoding "https" keeps the
-	// httptest-based tests, which serve both over http, exercising this path.
-	ou, ouErr := url.Parse(a.openIDURL)
-	ju, juErr := url.Parse(meta.JWKSURI)
-	if ouErr != nil || juErr != nil ||
-		!strings.EqualFold(ou.Scheme, ju.Scheme) || !strings.EqualFold(ou.Host, ju.Host) {
+	// at an arbitrary host or downgrade it to cleartext. The host match ignores an
+	// explicit port (via url.Hostname), matching isAllowedServiceHost, so a default
+	// port Microsoft might include on jwks_uri (e.g. login.botframework.com:443)
+	// does not spuriously reject a legitimate document. Matching the metadata scheme
+	// (https in production) rather than hardcoding "https" keeps the httptest-based
+	// tests, which serve both over http, exercising this path.
+	if !sameSchemeHost(a.openIDURL, meta.JWKSURI) {
 		return nil, errors.New("teams: jwks_uri scheme/host does not match the OpenID metadata endpoint")
 	}
 
@@ -789,6 +789,46 @@ func isAllowedServiceHost(serviceURL string) bool {
 // the .NET reference SDK compares the serviceUrl claim case-insensitively.
 func sameServiceURL(a, b string) bool {
 	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
+}
+
+// bearerToken extracts the credential from an Authorization header. Per RFC 7235
+// the auth-scheme is matched case-insensitively, and RFC 6750 allows one or more
+// spaces between "Bearer" and the token, so this accepts e.g. "bearer <t>" and
+// collapses extra surrounding/separating whitespace rather than demanding an
+// exact "Bearer " prefix. It returns the token and whether the header is a
+// well-formed bearer credential; the token itself is still fully validated by the
+// JWT parser, so lenient scheme parsing does not weaken auth.
+func bearerToken(authHeader string) (string, bool) {
+	const scheme = "bearer"
+	h := strings.TrimSpace(authHeader)
+	if len(h) <= len(scheme) || !strings.EqualFold(h[:len(scheme)], scheme) {
+		return "", false
+	}
+	// The scheme must be followed by whitespace, else "BearerX" would match.
+	rest := h[len(scheme):]
+	if rest[0] != ' ' && rest[0] != '\t' {
+		return "", false
+	}
+	token := strings.TrimSpace(rest)
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+// sameSchemeHost reports whether two URLs share a scheme and host, comparing
+// case-insensitively and ignoring any explicit port. It pins a fetched jwks_uri
+// to the origin of the hardcoded OpenID metadata endpoint. url.Hostname strips
+// the port (unlike url.Host, which is "host or host:port"), so an explicit
+// default port on either side does not reject an otherwise-matching host — the
+// same port-insensitive stance isAllowedServiceHost takes.
+func sameSchemeHost(a, b string) bool {
+	au, aErr := url.Parse(a)
+	bu, bErr := url.Parse(b)
+	if aErr != nil || bErr != nil {
+		return false
+	}
+	return strings.EqualFold(au.Scheme, bu.Scheme) && strings.EqualFold(au.Hostname(), bu.Hostname())
 }
 
 type channelAccount struct {
