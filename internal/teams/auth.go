@@ -97,10 +97,11 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 		// failing check. iss/aud are echoed from the rejected token for comparison.
 		gotIss, _ := claims["iss"].(string)
 		gotAud := claims["aud"]
+		gotAudStr := fmt.Sprintf("%v", gotAud)
 		// %q (not %v): the rejected token's aud is attacker-controlled and logged,
 		// so escape it to prevent log injection.
 		return fmt.Errorf("%w: token validation failed (want aud=%q iss=%q; got aud=%q iss=%q): %w",
-			errUnauthorized, a.cfg.AppID, botConnectorIssuer, gotAud, gotIss, err)
+			errUnauthorized, a.cfg.AppID, botConnectorIssuer, gotAudStr, gotIss, err)
 	}
 	if !tok.Valid {
 		return fmt.Errorf("%w: token reported invalid", errUnauthorized)
