@@ -501,6 +501,28 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
 }
 
+// TestDisconnect_CancelsDetachedDispatchCtx guards the leak fix: the detached
+// context that parents dispatch goroutines must be live while connected and
+// canceled once Disconnect has drained, so a handler blocked on ctx.Done() cannot
+// leak past shutdown.
+func TestDisconnect_CancelsDetachedDispatchCtx(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a := testAdapter()
+	deps := core.AdapterDeps{Done: func(error) {}, Disconnect: func() error { return nil }}
+
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+	a.mu.Lock()
+	dctx := a.detachedCtx
+	a.mu.Unlock()
+	asserts.NotNil(t, dctx, "detached dispatch ctx installed on Connect")
+	asserts.NoError(t, dctx.Err(), "detached ctx live while connected")
+
+	asserts.NoError(t, a.Disconnect(), "Disconnect")
+	asserts.ErrorIs(t, dctx.Err(), context.Canceled, "detached dispatch ctx canceled after drain")
+}
+
 func TestDrainDispatch_ContextCancel(t *testing.T) {
 	a := testAdapter()
 	a.inflight.Add(1) // never decremented
