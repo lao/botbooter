@@ -534,6 +534,44 @@ func TestDisconnect_CancelsDispatchContext(t *testing.T) {
 	asserts.ErrorIs(t, c.Err(), context.Canceled, "dispatch ctx canceled after drain")
 }
 
+// TestDisconnect_DrainTimeoutReturnsError guards that a drain which cannot finish
+// within its deadline surfaces an error rather than masquerading as a clean
+// shutdown: Disconnect force-cancels the straggler and must report it. The drain
+// budget is a hardcoded 5s, so this takes ~5s of real time and is env-gated to
+// keep the default suite fast (mirrors the slow-shutdown drain timing test).
+func TestDisconnect_DrainTimeoutReturnsError(t *testing.T) {
+	if os.Getenv("BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST") == "" {
+		t.Skip("set BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST to run the ~5s drain-timeout test")
+	}
+	a := testAdapter()
+	// Unstarted server: Shutdown returns immediately, so only the drain can time out.
+	a.mu.Lock()
+	a.srv = &http.Server{}
+	a.detachedCancel = func() {}
+	a.mu.Unlock()
+
+	release := make(chan struct{})
+	defer close(release)
+	dispatched := make(chan struct{}, 1)
+	deps := core.AdapterDeps{Dispatch: func(context.Context, *core.Message) {
+		dispatched <- struct{}{}
+		<-release // block past the 5s drain deadline
+	}}
+
+	body := []byte(textWebhook)
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	a.handleWebhook(context.Background(), httptest.NewRecorder(), r, deps)
+
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch to start")
+	}
+
+	asserts.Error(t, a.Disconnect(), "drain timeout should surface an error, not a clean nil")
+}
+
 func TestDrainDispatch_ContextCancel(t *testing.T) {
 	a := testAdapter()
 	a.inflight.Add(1) // never decremented

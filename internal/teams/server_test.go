@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -344,6 +345,44 @@ func TestDisconnect_CancelsDispatchContext(t *testing.T) {
 	asserts.NoError(t, c.Err(), "dispatch ctx live before Disconnect")
 	asserts.NoError(t, a.Disconnect(), "Disconnect")
 	asserts.ErrorIs(t, c.Err(), context.Canceled, "dispatch ctx canceled after drain")
+}
+
+// TestDisconnect_DrainTimeoutReturnsError guards that a drain which cannot finish
+// within its deadline surfaces an error rather than masquerading as a clean
+// shutdown: Disconnect force-cancels the straggler and must report it. The drain
+// budget is a hardcoded 5s, so this takes ~5s of real time and is env-gated to
+// keep the default suite fast (mirrors the whatsapp slow-drain timing test).
+func TestDisconnect_DrainTimeoutReturnsError(t *testing.T) {
+	if os.Getenv("BOTBOOTER_TEAMS_DRAIN_TIMING_TEST") == "" {
+		t.Skip("set BOTBOOTER_TEAMS_DRAIN_TIMING_TEST to run the ~5s drain-timeout test")
+	}
+	a := testAdapter(t)
+	// Unstarted server: Shutdown returns immediately, so only the drain can time out.
+	a.mu.Lock()
+	a.srv = &http.Server{}
+	a.detachedCancel = func() {}
+	a.mu.Unlock()
+
+	release := make(chan struct{})
+	defer close(release)
+	dispatched := make(chan struct{}, 1)
+	deps := core.AdapterDeps{Dispatch: func(context.Context, *core.Message) {
+		dispatched <- struct{}{}
+		<-release // block past the 5s drain deadline
+	}}
+
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	a.handleMessages(context.Background(), context.Background(), httptest.NewRecorder(), r, deps)
+
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch to start")
+	}
+
+	asserts.Error(t, a.Disconnect(), "drain timeout should surface an error, not a clean nil")
 }
 
 func TestServe_ReportsUnexpectedError(t *testing.T) {
