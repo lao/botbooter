@@ -118,7 +118,7 @@ dial-out model of Slack Socket Mode and the Discord Gateway).
    bot → Disable*) so the bot receives **all** group messages, not only those
    that start with `/` or @-mention it. Private chats always deliver every
    message; this setting only affects groups.
-3. **Message the bot** open a private chat (or add it to a group) and post
+3. **Message the bot** — open a private chat (or add it to a group) and post
    from a **human** account. The bot ignores its own and other bots' messages.
 
 ```go
