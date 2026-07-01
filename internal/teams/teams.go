@@ -520,10 +520,18 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 // omitted (a known Teams channel-upload quirk) — the contentUrl and its image/*
 // contentType are used as-is.
 func toAttachment(at activityAttachment) core.Attachment {
-	if at.ContentType == fileDownloadInfoType && at.Content.DownloadURL != "" {
+	if at.ContentType == fileDownloadInfoType {
+		// content.downloadUrl is the directly fetchable link; fall back to the
+		// top-level contentUrl (a SharePoint page) when the content object is omitted,
+		// a known Teams channel-upload quirk. The image flag comes from
+		// content.fileType either way — the wrapper contentType is never image/*.
+		url := at.Content.DownloadURL
+		if url == "" {
+			url = at.ContentURL
+		}
 		return core.Attachment{
 			IsImage: imageFileExts[strings.ToLower(at.Content.FileType)],
-			URL:     at.Content.DownloadURL,
+			URL:     url,
 		}
 	}
 	return core.Attachment{
@@ -681,9 +689,11 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 
 	// The signing key's endorsements bind it to a set of channels. A token may only
 	// speak for a channel the key is endorsed for. An empty endorsements list is the
-	// Emulator/Skill exemption (those keys carry none), left to pass. Teams always
-	// sets channelId to "msteams", so a blank channelId on an endorsed key is
-	// rejected rather than silently skipping the check.
+	// Emulator/Skill exemption (those keys carry none), left to pass — this trusts, as
+	// the reference SDKs do, that Microsoft's JWKS never lists a production channel's
+	// key with empty endorsements. Teams always sets channelId to "msteams", so a
+	// blank channelId on an endorsed key is rejected rather than silently skipping the
+	// check.
 	if len(keyEndorsements) > 0 {
 		if activityChannelID == "" {
 			return fmt.Errorf("%w: activity missing channelId for an endorsed signing key", errUnauthorized)
@@ -1059,14 +1069,15 @@ func stripRecipientMention(act *inboundActivity) string {
 		return act.Text
 	}
 	text := act.Text
-	stripped := false
 	for _, e := range act.Entities {
 		if strings.EqualFold(e.Type, "mention") && e.Text != "" && e.Mentioned.ID == act.Recipient.ID {
 			text = strings.Replace(text, e.Text, "", 1)
-			stripped = true
 		}
 	}
-	if !stripped {
+	// Trim only when a mention was actually removed. Comparing to the original also
+	// covers a matching entity whose markup is not literally present in the text (a
+	// no-op Replace): nothing changed, so it is passed through byte-for-byte.
+	if text == act.Text {
 		return act.Text
 	}
 	return strings.TrimSpace(text)
