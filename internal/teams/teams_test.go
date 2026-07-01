@@ -388,7 +388,6 @@ func TestHandleMessages_DispatchesText(t *testing.T) {
 	defer a.mu.Unlock()
 	asserts.Equal(t, a.convs["conv-1"].serviceURL, allowedServiceURL, "conversation serviceUrl recorded")
 	asserts.Equal(t, a.convs["conv-1"].bot.ID, "bot-1", "bot account recorded for replies")
-	asserts.Equal(t, a.convs["conv-1"].user.ID, "user-1", "user account recorded for replies")
 }
 
 // TestHandleMessages_DispatchCtxSurvivesRunCtxCancel guards the drain: core
@@ -750,7 +749,7 @@ func TestSend(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 	a.tokenURL = tokenSrv.URL
-	a.recordConversation("conv-1", srv.URL, channelAccount{ID: "bot-1", Name: "Bot"}, channelAccount{ID: "user-1", Name: "User"})
+	a.recordConversation("conv-1", srv.URL, channelAccount{ID: "bot-1", Name: "Bot"})
 
 	err = a.Send(context.Background(), "conv-1", "hello world")
 	asserts.NoError(t, err, "Send should succeed")
@@ -759,7 +758,7 @@ func TestSend(t *testing.T) {
 	asserts.True(t, strings.Contains(gotBody, `"text":"hello world"`), "text in body")
 	asserts.True(t, strings.Contains(gotBody, `"type":"message"`), "type in body")
 	asserts.True(t, strings.Contains(gotBody, `"from":{"id":"bot-1"`), "bot from account in body")
-	asserts.True(t, strings.Contains(gotBody, `"recipient":{"id":"user-1"`), "user recipient in body")
+	asserts.False(t, strings.Contains(gotBody, "recipient"), "no recipient in reply body (delivery is by conversation id)")
 }
 
 func TestSend_EscapesConversationID(t *testing.T) {
@@ -781,7 +780,7 @@ func TestSend_EscapesConversationID(t *testing.T) {
 	// A realistic Teams conversation id carries ':' and '@', both valid in a path
 	// segment and preserved verbatim by url.PathEscape (it escapes spaces and '/').
 	const convID = "19:abc@thread.tacv2"
-	a.recordConversation(convID, srv.URL, channelAccount{}, channelAccount{})
+	a.recordConversation(convID, srv.URL, channelAccount{})
 
 	err = a.Send(context.Background(), convID, "hi")
 	asserts.NoError(t, err, "Send should succeed")
@@ -809,7 +808,7 @@ func TestSend_Error(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 	a.tokenURL = tokenSrv.URL
-	a.recordConversation("conv-1", srv.URL, channelAccount{}, channelAccount{})
+	a.recordConversation("conv-1", srv.URL, channelAccount{})
 
 	err = a.Send(context.Background(), "conv-1", "hi")
 	asserts.Error(t, err, "non-2xx send should error")
@@ -819,7 +818,7 @@ func TestSend_RequestError(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 	a.token = cachedToken{value: "token", expiry: time.Now().Add(time.Hour)}
-	a.recordConversation("conv-1", ":", channelAccount{}, channelAccount{})
+	a.recordConversation("conv-1", ":", channelAccount{})
 
 	err = a.Send(context.Background(), "conv-1", "hi")
 
@@ -833,7 +832,7 @@ func TestSend_TransportError(t *testing.T) {
 	a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("transport failed")
 	})}
-	a.recordConversation("conv-1", allowedServiceURL, channelAccount{}, channelAccount{})
+	a.recordConversation("conv-1", allowedServiceURL, channelAccount{})
 
 	err = a.Send(context.Background(), "conv-1", "hi")
 
@@ -865,7 +864,7 @@ func TestRecordConversation_BoundedEviction(t *testing.T) {
 	asserts.NoError(t, err, "newAdapter")
 	// Insert one over the cap; the oldest must be evicted.
 	for i := 0; i <= maxConversations; i++ {
-		a.recordConversation("c"+strconv.Itoa(i), allowedServiceURL, channelAccount{}, channelAccount{})
+		a.recordConversation("c"+strconv.Itoa(i), allowedServiceURL, channelAccount{})
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -878,8 +877,8 @@ func TestRecordConversation_IgnoresIncompleteMapping(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 
-	a.recordConversation("", allowedServiceURL, channelAccount{}, channelAccount{})
-	a.recordConversation("conv-1", "", channelAccount{}, channelAccount{})
+	a.recordConversation("", allowedServiceURL, channelAccount{})
+	a.recordConversation("conv-1", "", channelAccount{})
 
 	asserts.Equal(t, len(a.convs), 0, "incomplete mappings should not be recorded")
 }
@@ -1068,7 +1067,7 @@ func TestSend_TokenError(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 	a.tokenURL = tokenSrv.URL
-	a.recordConversation("conv-1", allowedServiceURL, channelAccount{}, channelAccount{})
+	a.recordConversation("conv-1", allowedServiceURL, channelAccount{})
 	err = a.Send(context.Background(), "conv-1", "hi")
 	asserts.Error(t, err, "token failure should fail Send")
 }
