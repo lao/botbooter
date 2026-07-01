@@ -1,6 +1,7 @@
 package teams
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -310,7 +311,9 @@ func TestHandleMessages_DispatchesText(t *testing.T) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	asserts.Equal(t, a.convs["conv-1"], allowedServiceURL, "conversation serviceUrl recorded")
+	asserts.Equal(t, a.convs["conv-1"].serviceURL, allowedServiceURL, "conversation serviceUrl recorded")
+	asserts.Equal(t, a.convs["conv-1"].bot.ID, "bot-1", "bot account recorded for replies")
+	asserts.Equal(t, a.convs["conv-1"].user.ID, "user-1", "user account recorded for replies")
 }
 
 func TestHandleMessages_RejectsMissingToken(t *testing.T) {
@@ -420,6 +423,49 @@ func TestPublicKey_RefreshesOnKidMiss(t *testing.T) {
 	asserts.Error(t, err, "still unknown after refresh")
 }
 
+func TestPublicKey_LargeJWKSDecodes(t *testing.T) {
+	// Regression: the real Bot Connector JWKS is ~1 MB (hundreds of keys). A read
+	// cap below that truncates the body mid-object and json decode fails with
+	// "unexpected EOF", leaving the key map empty so every request 401s. Serve a
+	// JWKS larger than the old 256 KiB cap and confirm the target kid resolves.
+	pub := signingKey(t).Public().(*rsa.PublicKey)
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openid", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": base + "/keys"})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		keys := []map[string]string{{
+			"kid": testKID,
+			"kty": "RSA",
+			"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+		}}
+		// Pad with enough filler keys to push the body well past 256 KiB.
+		filler := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte("a"), 2048))
+		for i := 0; i < 200; i++ {
+			keys = append(keys, map[string]string{
+				"kid": "pad-" + strconv.Itoa(i),
+				"kty": "RSA",
+				"n":   filler,
+				"e":   "AQAB",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+	})
+	srv := httptest.NewServer(mux)
+	base = srv.URL
+	t.Cleanup(srv.Close)
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.openIDURL = srv.URL + "/openid"
+
+	k, err := a.publicKey(context.Background(), testKID)
+	asserts.NoError(t, err, "target kid resolves from a >256 KiB JWKS")
+	asserts.NotNil(t, k, "key returned")
+}
+
 func TestPublicKey_ConcurrentRefreshRechecksCache(t *testing.T) {
 	a := testAdapter(t)
 
@@ -497,7 +543,7 @@ func TestSend(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 	a.tokenURL = tokenSrv.URL
-	a.recordConversation("conv-1", srv.URL)
+	a.recordConversation("conv-1", srv.URL, channelAccount{ID: "bot-1", Name: "Bot"}, channelAccount{ID: "user-1", Name: "User"})
 
 	err = a.Send(context.Background(), "conv-1", "hello world")
 	asserts.NoError(t, err, "Send should succeed")
@@ -505,6 +551,8 @@ func TestSend(t *testing.T) {
 	asserts.Equal(t, gotAuth, "Bearer tok-123", "bearer token applied")
 	asserts.True(t, strings.Contains(gotBody, `"text":"hello world"`), "text in body")
 	asserts.True(t, strings.Contains(gotBody, `"type":"message"`), "type in body")
+	asserts.True(t, strings.Contains(gotBody, `"from":{"id":"bot-1"`), "bot from account in body")
+	asserts.True(t, strings.Contains(gotBody, `"recipient":{"id":"user-1"`), "user recipient in body")
 }
 
 func TestSend_EscapesConversationID(t *testing.T) {
@@ -526,7 +574,7 @@ func TestSend_EscapesConversationID(t *testing.T) {
 	// A realistic Teams conversation id carries ':' and '@', both valid in a path
 	// segment and preserved verbatim by url.PathEscape (it escapes spaces and '/').
 	const convID = "19:abc@thread.tacv2"
-	a.recordConversation(convID, srv.URL)
+	a.recordConversation(convID, srv.URL, channelAccount{}, channelAccount{})
 
 	err = a.Send(context.Background(), convID, "hi")
 	asserts.NoError(t, err, "Send should succeed")
@@ -554,7 +602,7 @@ func TestSend_Error(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 	a.tokenURL = tokenSrv.URL
-	a.recordConversation("conv-1", srv.URL)
+	a.recordConversation("conv-1", srv.URL, channelAccount{}, channelAccount{})
 
 	err = a.Send(context.Background(), "conv-1", "hi")
 	asserts.Error(t, err, "non-2xx send should error")
@@ -564,7 +612,7 @@ func TestSend_RequestError(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 	a.token = cachedToken{value: "token", expiry: time.Now().Add(time.Hour)}
-	a.recordConversation("conv-1", ":")
+	a.recordConversation("conv-1", ":", channelAccount{}, channelAccount{})
 
 	err = a.Send(context.Background(), "conv-1", "hi")
 
@@ -578,7 +626,7 @@ func TestSend_TransportError(t *testing.T) {
 	a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("transport failed")
 	})}
-	a.recordConversation("conv-1", allowedServiceURL)
+	a.recordConversation("conv-1", allowedServiceURL, channelAccount{}, channelAccount{})
 
 	err = a.Send(context.Background(), "conv-1", "hi")
 
@@ -610,7 +658,7 @@ func TestRecordConversation_BoundedEviction(t *testing.T) {
 	asserts.NoError(t, err, "newAdapter")
 	// Insert one over the cap; the oldest must be evicted.
 	for i := 0; i <= maxConversations; i++ {
-		a.recordConversation("c"+strconv.Itoa(i), allowedServiceURL)
+		a.recordConversation("c"+strconv.Itoa(i), allowedServiceURL, channelAccount{}, channelAccount{})
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -623,8 +671,8 @@ func TestRecordConversation_IgnoresIncompleteMapping(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 
-	a.recordConversation("", allowedServiceURL)
-	a.recordConversation("conv-1", "")
+	a.recordConversation("", allowedServiceURL, channelAccount{}, channelAccount{})
+	a.recordConversation("conv-1", "", channelAccount{}, channelAccount{})
 
 	asserts.Equal(t, len(a.convs), 0, "incomplete mappings should not be recorded")
 }
@@ -682,7 +730,7 @@ func TestAccessToken_Network(t *testing.T) {
 	if appID == "" || pw == "" {
 		t.Skip("set TEAMS_APP_ID and TEAMS_APP_PASSWORD for the live token test")
 	}
-	a, err := newAdapter(Config{AppID: appID, AppPassword: pw, TenantID: os.Getenv("TEAMS_TENANT_ID"), Addr: ":0"})
+	a, err := newAdapter(Config{AppID: appID, AppPassword: pw, TenantID: os.Getenv("TEAMS_APP_TENANT_ID"), Addr: ":0"})
 	asserts.NoError(t, err, "newAdapter")
 
 	tok, err := a.accessToken(context.Background())
@@ -813,7 +861,7 @@ func TestSend_TokenError(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
 	a.tokenURL = tokenSrv.URL
-	a.recordConversation("conv-1", allowedServiceURL)
+	a.recordConversation("conv-1", allowedServiceURL, channelAccount{}, channelAccount{})
 	err = a.Send(context.Background(), "conv-1", "hi")
 	asserts.Error(t, err, "token failure should fail Send")
 }

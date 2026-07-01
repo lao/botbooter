@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -65,7 +66,12 @@ const (
 	// returned error, bounding memory and log size.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
 	// maxMetaBytes caps JWKS/OpenID/token JSON responses decoded from Microsoft.
-	maxMetaBytes = 256 << 10 // 256 KiB
+	// The Bot Connector JWKS at login.botframework.com is large — ~1 MB with a few
+	// hundred keys — so this must comfortably exceed it; a tighter cap truncates
+	// the body and the JSON decode fails with "unexpected EOF". These are trusted
+	// HTTPS Microsoft endpoints fetched rarely (cached + rate-limited), so the
+	// generous ceiling is purely a memory-exhaustion backstop.
+	maxMetaBytes = 4 << 20 // 4 MiB
 
 	// maxConversations bounds the conversation->serviceUrl map so a public
 	// endpoint with many unique conversations cannot grow it without limit.
@@ -131,6 +137,15 @@ type cachedToken struct {
 	expiry time.Time
 }
 
+// conversation holds what a reply needs: the serviceUrl to POST to, plus the
+// bot's own account (the inbound Activity's recipient) and the user's account
+// (the inbound Activity's from) used to populate the reply's from/recipient.
+type conversation struct {
+	serviceURL string
+	bot        channelAccount
+	user       channelAccount
+}
+
 type adapter struct {
 	cfg  Config
 	http *http.Client
@@ -143,8 +158,8 @@ type adapter struct {
 	mu        sync.Mutex
 	srv       *http.Server
 	inflight  atomic.Int64
-	convs     map[string]string // conversationID -> serviceUrl
-	convOrder []string          // FIFO insertion order for bounded eviction
+	convs     map[string]conversation // conversationID -> reply routing info
+	convOrder []string                // FIFO insertion order for bounded eviction
 	token     cachedToken
 	keys      map[string]*rsa.PublicKey // kid -> signing key
 	keysAt    time.Time
@@ -261,6 +276,7 @@ func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *
 	// Authenticate before trusting anything in the body: validate the Bot
 	// Connector JWT and confirm its serviceurl claim matches the Activity's.
 	if err := a.validateInbound(ctx, r.Header.Get("Authorization"), act.ServiceURL); err != nil {
+		log.Printf("teams: inbound request rejected with 401: %v", err)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -281,7 +297,7 @@ func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *
 		return
 	}
 
-	a.recordConversation(act.Conversation.ID, act.ServiceURL)
+	a.recordConversation(act.Conversation.ID, act.ServiceURL, act.Recipient, act.From)
 
 	msg := toMessage(&act, body)
 	a.inflight.Add(1)
@@ -328,13 +344,14 @@ func (a *adapter) drainDispatch(ctx context.Context) {
 }
 
 // Send posts a text reply to the conversation identified by channelID. The
-// per-conversation serviceUrl is resolved from the map populated on inbound
-// Activities, so Send fails if no Activity has been seen for channelID yet.
+// serviceUrl and the bot/user accounts are resolved from the map populated on
+// inbound Activities, so Send fails if no Activity has been seen for channelID
+// yet.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	a.mu.Lock()
-	serviceURL := a.convs[channelID]
+	conv, ok := a.convs[channelID]
 	a.mu.Unlock()
-	if serviceURL == "" {
+	if !ok || conv.serviceURL == "" {
 		return fmt.Errorf("teams: no serviceUrl known for conversation %q (no inbound activity seen)", channelID)
 	}
 
@@ -343,11 +360,19 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 		return err
 	}
 
-	payload := map[string]string{"type": "message", "text": text}
-	// A string-only map has no values that encoding/json can reject.
+	// Bot Connector requires the reply's from field (the bot's account); the
+	// recipient is the user. Both come from the inbound Activity (from/recipient
+	// swapped) captured when the conversation was recorded.
+	payload := outboundActivity{
+		Type:      "message",
+		Text:      text,
+		From:      conv.bot,
+		Recipient: conv.user,
+	}
+	// channelAccount holds only strings, which encoding/json cannot reject.
 	body, _ := json.Marshal(payload)
 
-	endpoint := strings.TrimRight(serviceURL, "/") + "/v3/conversations/" + url.PathEscape(channelID) + "/activities"
+	endpoint := strings.TrimRight(conv.serviceURL, "/") + "/v3/conversations/" + url.PathEscape(channelID) + "/activities"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -396,21 +421,22 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	return out, nil
 }
 
-// recordConversation maps a conversation to its serviceUrl, bounding the map
-// with FIFO eviction so a public endpoint cannot grow it without limit. Eviction
+// recordConversation maps a conversation to its serviceUrl and the accounts a
+// reply needs (the bot's own account and the user's), bounding the map with FIFO
+// eviction so a public endpoint cannot grow it without limit. Eviction
 // is by first-seen, not last-active: replies happen inside the same dispatch as
 // the recording, so request/response bots always resolve. A bot that stores a
 // conversation to message it proactively much later (out of scope here) could
 // find an oldest conversation evicted once maxConversations distinct
 // conversations have been seen; Send then returns a clear error.
-func (a *adapter) recordConversation(id, serviceURL string) {
+func (a *adapter) recordConversation(id, serviceURL string, bot, user channelAccount) {
 	if id == "" || serviceURL == "" {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.convs == nil {
-		a.convs = make(map[string]string)
+		a.convs = make(map[string]conversation)
 	}
 	if _, exists := a.convs[id]; !exists {
 		if len(a.convOrder) >= maxConversations {
@@ -420,7 +446,7 @@ func (a *adapter) recordConversation(id, serviceURL string) {
 		}
 		a.convOrder = append(a.convOrder, id)
 	}
-	a.convs[id] = serviceURL
+	a.convs[id] = conversation{serviceURL: serviceURL, bot: bot, user: user}
 }
 
 // accessToken returns a cached Bot Connector token, minting a fresh one via the
@@ -488,7 +514,7 @@ func (a *adapter) accessToken(ctx context.Context) (string, error) {
 func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServiceURL string) error {
 	raw, ok := strings.CutPrefix(authHeader, "Bearer ")
 	if !ok || raw == "" {
-		return errUnauthorized
+		return fmt.Errorf("%w: missing or malformed Authorization header", errUnauthorized)
 	}
 
 	claims := jwt.MapClaims{}
@@ -505,14 +531,32 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 		// tolerance; the reference SDKs apply the same leeway.
 		jwt.WithLeeway(5*time.Minute),
 	)
-	if err != nil || !tok.Valid {
-		return errUnauthorized
+	if err != nil {
+		// golang-jwt/v5 returns specific sentinels (ErrTokenInvalidAudience,
+		// ErrTokenInvalidIssuer, ErrTokenExpired, ErrTokenSignatureInvalid, ...),
+		// so wrapping err names the exact failing check. iss/aud are echoed from
+		// the (now-rejected) token to compare against the configured AppID.
+		gotIss, _ := claims["iss"].(string)
+		gotAud := claims["aud"]
+		// %q (not %v) on gotAud: the rejected token's claims are attacker-controlled
+		// and this error is logged, so an unescaped aud could inject newlines/escapes
+		// into the log. %q escapes control bytes whether aud decodes to a string or
+		// an array.
+		return fmt.Errorf("%w: token validation failed (want aud=%q iss=%q; got aud=%q iss=%q): %w",
+			errUnauthorized, a.cfg.AppID, botConnectorIssuer, gotAud, gotIss, err)
+	}
+	if !tok.Valid {
+		return fmt.Errorf("%w: token reported invalid", errUnauthorized)
 	}
 
 	// The claim name is lowercase "serviceurl"; MapClaims lookup is case-sensitive.
 	svc, _ := claims["serviceurl"].(string)
-	if svc == "" || !sameServiceURL(svc, activityServiceURL) {
-		return errUnauthorized
+	if svc == "" {
+		return fmt.Errorf("%w: token missing serviceurl claim", errUnauthorized)
+	}
+	if !sameServiceURL(svc, activityServiceURL) {
+		return fmt.Errorf("%w: serviceurl claim %q does not match activity serviceUrl %q",
+			errUnauthorized, svc, activityServiceURL)
 	}
 	return nil
 }
@@ -581,11 +625,16 @@ func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*rsa.PublicKey, err
 	if meta.JWKSURI == "" {
 		return nil, errors.New("teams: openid metadata missing jwks_uri")
 	}
-	// Pin jwks_uri to the same host as the (hardcoded, TLS) OpenID metadata
-	// endpoint so a tampered/redirected document cannot point key fetching at an
-	// arbitrary host. Microsoft serves both under the same host.
-	if ou, err := url.Parse(a.openIDURL); err != nil || !sameHost(ou, meta.JWKSURI) {
-		return nil, errors.New("teams: jwks_uri host does not match the OpenID metadata host")
+	// Pin jwks_uri to the same scheme AND host as the (hardcoded, TLS) OpenID
+	// metadata endpoint so a tampered/redirected document cannot point key fetching
+	// at an arbitrary host or downgrade it to cleartext. Matching the metadata
+	// scheme (https in production) rather than hardcoding "https" keeps the
+	// httptest-based tests, which serve both over http, exercising this path.
+	ou, ouErr := url.Parse(a.openIDURL)
+	ju, juErr := url.Parse(meta.JWKSURI)
+	if ouErr != nil || juErr != nil ||
+		!strings.EqualFold(ou.Scheme, ju.Scheme) || !strings.EqualFold(ou.Host, ju.Host) {
+		return nil, errors.New("teams: jwks_uri scheme/host does not match the OpenID metadata endpoint")
 	}
 
 	var set struct {
@@ -680,13 +729,6 @@ func sameServiceURL(a, b string) bool {
 	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
 }
 
-// sameHost reports whether rawURL parses and shares host (case-insensitively)
-// with u.
-func sameHost(u *url.URL, rawURL string) bool {
-	v, err := url.Parse(rawURL)
-	return err == nil && strings.EqualFold(u.Host, v.Host)
-}
-
 type channelAccount struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -696,6 +738,15 @@ type activityAttachment struct {
 	ContentType string `json:"contentType"`
 	ContentURL  string `json:"contentUrl"`
 	Name        string `json:"name"`
+}
+
+// outboundActivity is the reply posted to the Bot Connector. from is required by
+// the service; recipient is included for completeness.
+type outboundActivity struct {
+	Type      string         `json:"type"`
+	Text      string         `json:"text"`
+	From      channelAccount `json:"from"`
+	Recipient channelAccount `json:"recipient"`
 }
 
 type inboundActivity struct {
