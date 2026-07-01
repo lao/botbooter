@@ -1,14 +1,18 @@
 package whatsapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +204,35 @@ func TestHandleWebhook_DispatchesText(t *testing.T) {
 	wm, ok := RawMessage(got[0])
 	asserts.True(t, ok, "Raw should carry the parsed WhatsAppMessage")
 	asserts.Equal(t, wm.Type, "text", "message type should be text")
+}
+
+// TestHandleWebhook_DispatchesOnDetachedCtx guards the drain: the handler must
+// dispatch on exactly the detached context passed in (derived in Connect from the
+// run context via WithoutCancel), not the run context — otherwise a handler's reply
+// would fail with "context canceled" mid-drain.
+func TestHandleWebhook_DispatchesOnDetachedCtx(t *testing.T) {
+	a := testAdapter()
+	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
+	defer cancelDispatch()
+
+	gotCtx := make(chan context.Context, 1)
+	deps := core.AdapterDeps{
+		Dispatch: func(c context.Context, _ *core.Message) { gotCtx <- c },
+	}
+
+	body := []byte(textWebhook)
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	a.handleWebhook(dispatchCtx, httptest.NewRecorder(), r, deps)
+
+	select {
+	case c := <-gotCtx:
+		asserts.NoError(t, c.Err(), "dispatch ctx live before cancel")
+		cancelDispatch()
+		asserts.ErrorIs(t, c.Err(), context.Canceled, "dispatch rides the passed detached ctx")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch")
+	}
 }
 
 func TestHandleWebhook_BadSignature(t *testing.T) {
@@ -469,6 +502,85 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
 }
 
+// TestDisconnect_CancelsDispatchContext guards the leak fix: Disconnect must cancel
+// the connection's detached dispatch context after the drain, so a handler blocked
+// on ctx.Done() cannot leak past shutdown. The connection's cancel is wired by hand
+// so the test controls the exact context the handler dispatches on.
+func TestDisconnect_CancelsDispatchContext(t *testing.T) {
+	a := testAdapter()
+	dispatchCtx, cancelDispatch := context.WithCancel(context.WithoutCancel(context.Background()))
+	// srv must be non-nil so Disconnect runs its teardown rather than early-returning;
+	// an unstarted server's Shutdown returns immediately.
+	a.mu.Lock()
+	a.srv = &http.Server{}
+	a.detachedCancel = cancelDispatch
+	a.mu.Unlock()
+
+	gotCtx := make(chan context.Context, 1)
+	deps := core.AdapterDeps{Dispatch: func(c context.Context, _ *core.Message) { gotCtx <- c }}
+	body := []byte(textWebhook)
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	a.handleWebhook(dispatchCtx, httptest.NewRecorder(), r, deps)
+
+	var c context.Context
+	select {
+	case c = <-gotCtx:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch")
+	}
+	asserts.NoError(t, c.Err(), "dispatch ctx live before Disconnect")
+	asserts.NoError(t, a.Disconnect(), "Disconnect")
+	asserts.ErrorIs(t, c.Err(), context.Canceled, "dispatch ctx canceled after drain")
+}
+
+// TestDisconnect_DrainTimeoutReturnsError guards that a drain which cannot finish
+// within its deadline surfaces an error rather than masquerading as a clean
+// shutdown: Disconnect force-cancels the straggler and must report it. The drain
+// budget is a hardcoded 5s, so this takes ~5s of real time and is env-gated to
+// keep the default suite fast (mirrors the slow-shutdown drain timing test).
+func TestDisconnect_DrainTimeoutReturnsError(t *testing.T) {
+	if os.Getenv("BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST") == "" {
+		t.Skip("set BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST to run the ~5s drain-timeout test")
+	}
+	a := testAdapter()
+	// Unstarted server: Shutdown returns immediately, so only the drain can time out.
+	a.mu.Lock()
+	a.srv = &http.Server{}
+	a.detachedCancel = func() {}
+	a.mu.Unlock()
+
+	release := make(chan struct{})
+	defer close(release)
+	dispatched := make(chan struct{}, 1)
+	deps := core.AdapterDeps{Dispatch: func(context.Context, *core.Message) {
+		dispatched <- struct{}{}
+		<-release // block past the 5s drain deadline
+	}}
+
+	body := []byte(textWebhook)
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	a.handleWebhook(context.Background(), httptest.NewRecorder(), r, deps)
+
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch to start")
+	}
+
+	asserts.Error(t, a.Disconnect(), "drain timeout should surface an error, not a clean nil")
+}
+
+func TestDrainDispatch_ContextCancel(t *testing.T) {
+	a := testAdapter()
+	a.inflight.Add(1) // never decremented
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.drainDispatch(ctx) // must return promptly on a canceled ctx
+	asserts.Equal(t, a.inflight.Load(), int64(1), "drain returns on ctx cancel without waiting")
+}
+
 func TestDrainDispatch_WaitsForInflight(t *testing.T) {
 	a := testAdapter()
 	a.inflight.Add(1)
@@ -525,4 +637,96 @@ func TestConnect_BindError(t *testing.T) {
 func TestDisconnect_NeverConnected(t *testing.T) {
 	a := testAdapter()
 	asserts.NoError(t, a.Disconnect(), "Disconnect before Connect should be safe")
+}
+
+// TestDisconnect_SlowShutdownDoesNotStarveDrain is the end-to-end regression
+// for the two-budget Disconnect: a slow client keeps a connection active so
+// srv.Shutdown burns its full deadline, and the drain must still get its own
+// deadline to let an already-acked in-flight dispatch finish. With one shared
+// context (the bug) drain would inherit ~0s and abandon the goroutine. It takes
+// ~6s of real time, so it is gated behind an env var to keep the default suite
+// hermetic and fast.
+func TestDisconnect_SlowShutdownDoesNotStarveDrain(t *testing.T) {
+	if os.Getenv("BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST") == "" {
+		t.Skip("set BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST to run the ~6s slow-shutdown drain timing test")
+	}
+
+	// Bind a concrete free port so raw client connections can target it; Connect
+	// does not expose its listener address.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	asserts.NoError(t, err, "probe listen")
+	addr := probe.Addr().String()
+	asserts.NoError(t, probe.Close(), "probe close")
+
+	a := testAdapter()
+	a.cfg.Addr = addr
+
+	// The acked dispatch outlives Shutdown's 5s deadline: if drain shared that
+	// deadline it would get ~0s and never wait for this goroutine.
+	dispatchDone := make(chan struct{})
+	deps := core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+		Dispatch: func(context.Context, *core.Message) {
+			time.Sleep(6 * time.Second)
+			close(dispatchDone)
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+
+	// 1) A valid webhook: the handler acks 200 and spawns the in-flight dispatch.
+	body := []byte(textWebhook)
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+defaultPath, bytes.NewReader(body))
+	asserts.NoError(t, err, "build webhook request")
+	req.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	resp, err := http.DefaultClient.Do(req)
+	asserts.NoError(t, err, "post webhook")
+	_ = resp.Body.Close()
+	asserts.Equal(t, resp.StatusCode, http.StatusOK, "webhook acked")
+
+	// Wait until the dispatch goroutine has registered as in-flight.
+	deadline := time.Now().Add(time.Second)
+	for a.inflight.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	asserts.Equal(t, a.inflight.Load(), int64(1), "dispatch is in-flight")
+
+	// 2) A slow client promises a body it never sends, so the handler blocks
+	//    reading it and the connection stays active through Shutdown.
+	slow, err := net.Dial("tcp", addr)
+	asserts.NoError(t, err, "slow dial")
+	defer func() { _ = slow.Close() }()
+	_, err = slow.Write([]byte("POST " + defaultPath + " HTTP/1.1\r\nHost: x\r\n" +
+		signatureHeader + ": bad\r\nContent-Length: 1000000\r\n\r\n"))
+	asserts.NoError(t, err, "slow write")
+	time.Sleep(100 * time.Millisecond) // let the server mark the connection active
+
+	// 3) Disconnect: Shutdown burns ~5s on the slow client; drain must still get
+	//    its own budget so the acked dispatch (6s) finishes.
+	start := time.Now()
+	err = a.Disconnect()
+	elapsed := time.Since(start)
+	// Shutdown times out waiting on the slow client, so a deadline error here is
+	// expected; the point of the test is that drain still saved the dispatch.
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unexpected Disconnect error: %v", err)
+	}
+
+	asserts.Equal(t, a.inflight.Load(), int64(0),
+		"an acked in-flight dispatch must survive a slow shutdown (separate drain budget)")
+
+	// Guard the harness itself: if Shutdown returned fast the slow-client hold
+	// failed and the scenario never exercised the shared-budget path.
+	if elapsed < 4*time.Second {
+		t.Fatalf("expected Shutdown to burn ~5s on the slow client, elapsed=%s", elapsed)
+	}
+
+	select {
+	case <-dispatchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch goroutine never completed")
+	}
 }

@@ -1,14 +1,14 @@
 // Package botbooter holds the platform-agnostic shared types for building chat
-// bots that behave the same way across Slack, Discord, Telegram, WhatsApp and a
-// local CLI.
+// bots that behave the same way across Slack, Discord, Telegram, WhatsApp,
+// Microsoft Teams and a local CLI.
 //
 // This package is SDK-free: it imports no platform SDK and only re-exports the
 // shared types from internal/core. Construct a bot from one of the per-platform
 // packages — botbooter/slack, botbooter/discord, botbooter/telegram,
-// botbooter/whatsapp or botbooter/cli — each of which pulls in only its own
-// platform SDK (WhatsApp speaks the Cloud API over plain HTTP and needs none),
-// then drive it through the shared types re-exported here. A bot that uses one
-// platform never compiles the other platforms' SDKs into its binary.
+// botbooter/whatsapp, botbooter/teams or botbooter/cli — each of which pulls in
+// only its own platform SDK (WhatsApp and Teams speak REST APIs over plain HTTP
+// and need none), then drive it through the shared types re-exported here. A bot
+// that uses one platform never compiles the other platforms' SDKs into its binary.
 package botbooter
 
 import "github.com/lao/botbooter/internal/core"
@@ -29,6 +29,7 @@ const (
 	CLIBotType      = core.CLIBotType
 	TelegramBotType = core.TelegramBotType
 	WhatsAppBotType = core.WhatsAppBotType
+	TeamsBotType    = core.TeamsBotType
 )
 
 type (

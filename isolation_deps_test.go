@@ -38,18 +38,24 @@ func TestIsolationDeps(t *testing.T) {
 		discordgo  = "github.com/bwmarrin/discordgo"
 		slackgo    = "github.com/slack-go/slack"
 		gotelegram = "github.com/go-telegram/bot"
+		// jwtv5 is the Teams adapter's only third-party dependency. It must stay
+		// confined to the teams closure and never leak into another package. The
+		// full versioned module path matches the other constants and how
+		// `go list -deps` emits it.
+		jwtv5 = "github.com/golang-jwt/jwt/v5"
 	)
 	cases := []struct {
 		pkg     string
 		absent  []string
 		present []string
 	}{
-		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram}, nil},
-		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram}, nil},
-		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram}, []string{slackgo}},
-		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram}, []string{discordgo}},
-		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo}, []string{gotelegram}},
-		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram}, nil},
+		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5}, nil},
+		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5}, nil},
+		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5}, []string{slackgo}},
+		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5}, []string{discordgo}},
+		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5}, []string{gotelegram}},
+		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram, jwtv5}, nil},
+		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram}, []string{jwtv5}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.pkg, func(t *testing.T) {
