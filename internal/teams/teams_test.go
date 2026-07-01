@@ -943,6 +943,39 @@ func TestAttachments(t *testing.T) {
 	asserts.Equal(t, atts[0].URL, "https://x/i.png", "attachment URL")
 }
 
+func TestAttachments_FileDownloadInfo(t *testing.T) {
+	// An uploaded PNG: contentUrl is a SharePoint page, content.downloadUrl is the
+	// directly fetchable link, and the image flag must come from content.fileType
+	// (the wrapper contentType is the generic file-download-info type).
+	body := `{"type":"message","attachments":[{` +
+		`"contentType":"application/vnd.microsoft.teams.file.download.info",` +
+		`"contentUrl":"https://contoso.sharepoint.com/personal/x/pic.png",` +
+		`"name":"pic.png",` +
+		`"content":{"downloadUrl":"https://download.example/pic.png?tempauth=abc","fileType":"PNG"}}]}`
+	var act inboundActivity
+	asserts.NoError(t, json.Unmarshal([]byte(body), &act), "unmarshal activity")
+	atts, err := (&adapter{}).Attachments(toMessage(&act, json.RawMessage(body)))
+	asserts.NoError(t, err, "Attachments")
+	asserts.Equal(t, len(atts), 1, "one attachment")
+	asserts.Equal(t, atts[0].URL, "https://download.example/pic.png?tempauth=abc", "downloadUrl used, not SharePoint contentUrl")
+	asserts.True(t, atts[0].IsImage, "image flagged from content.fileType")
+}
+
+func TestAttachments_FileDownloadInfoMissingContent(t *testing.T) {
+	// Teams sometimes omits the content object on channel uploads; fall back to the
+	// contentUrl rather than erroring or emitting an empty URL.
+	body := `{"type":"message","attachments":[{` +
+		`"contentType":"application/vnd.microsoft.teams.file.download.info",` +
+		`"contentUrl":"https://contoso.sharepoint.com/personal/x/report.pdf","name":"report.pdf"}]}`
+	var act inboundActivity
+	asserts.NoError(t, json.Unmarshal([]byte(body), &act), "unmarshal activity")
+	atts, err := (&adapter{}).Attachments(toMessage(&act, json.RawMessage(body)))
+	asserts.NoError(t, err, "Attachments")
+	asserts.Equal(t, len(atts), 1, "one attachment")
+	asserts.Equal(t, atts[0].URL, "https://contoso.sharepoint.com/personal/x/report.pdf", "falls back to contentUrl when content absent")
+	asserts.False(t, atts[0].IsImage, "non-image upload not flagged")
+}
+
 func TestConnectDisconnect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

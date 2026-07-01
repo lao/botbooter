@@ -361,6 +361,10 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 //     environment variable.
 //   - WhatsApp: NOT directly fetchable — GET it with an Authorization: Bearer
 //     <token> header (the Cloud API token used to send). Short-lived; consume promptly.
+//   - Teams: an uploaded file's URL is a pre-authorized link (plain GET, but it
+//     carries a short-lived token — consume promptly, never log or cache). An inline
+//     image's URL may need an Authorization: Bearer <bot token> header, which this
+//     adapter does not yet supply. Returned as-is via the passthrough.
 //   - CLI: a local filesystem path (open with os.Open), not an HTTP URL.
 func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error) {
 	if b.adapter == nil {
