@@ -69,8 +69,10 @@ func signingKey(t *testing.T) *rsa.PrivateKey {
 }
 
 // jwksServer serves the Bot Connector OpenID metadata + JWKS for the shared key.
-// Point an adapter's openIDURL at <server>/openid.
-func jwksServer(t *testing.T) *httptest.Server {
+// Point an adapter's openIDURL at <server>/openid. Any endorsements passed are
+// attached to the served key; with none the key is unendorsed (the Emulator/Skill
+// shape, which the channel check exempts).
+func jwksServer(t *testing.T, endorsements ...string) *httptest.Server {
 	t.Helper()
 	pub := signingKey(t).Public().(*rsa.PublicKey)
 	var base string
@@ -79,14 +81,16 @@ func jwksServer(t *testing.T) *httptest.Server {
 		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": base + "/keys"})
 	})
 	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"keys": []map[string]string{{
-				"kid": testKID,
-				"kty": "RSA",
-				"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
-				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
-			}},
-		})
+		key := map[string]any{
+			"kid": testKID,
+			"kty": "RSA",
+			"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+		}
+		if len(endorsements) > 0 {
+			key["endorsements"] = endorsements
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{key}})
 	})
 	srv := httptest.NewServer(mux)
 	base = srv.URL
@@ -120,12 +124,32 @@ func validConfig() Config {
 }
 
 // testAdapter builds an adapter directly (bypassing New) with Path defaulted and
-// its OpenID endpoint pointed at a local JWKS server.
-func testAdapter(t *testing.T) *adapter {
+// its OpenID endpoint pointed at a local JWKS server. Any endorsements are attached
+// to that server's signing key; with none the key is unendorsed (channel-check
+// exempt), which is what the auth tests that don't set a channelId rely on.
+func testAdapter(t *testing.T, endorsements ...string) *adapter {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
-	a.openIDURL = jwksServer(t).URL + "/openid"
+	a.openIDURL = jwksServer(t, endorsements...).URL + "/openid"
 	return a
+}
+
+// channelActivityJSON builds an inbound message Activity carrying the given
+// channelId (the field the endorsement check reads), for the endorsement tests.
+func channelActivityJSON(channelID string) string {
+	act := map[string]any{
+		"type":         "message",
+		"id":           "act-1",
+		"text":         "hi",
+		"serviceUrl":   allowedServiceURL,
+		"channelId":    channelID,
+		"timestamp":    "2026-06-30T12:00:00Z",
+		"from":         map[string]string{"id": "user-1", "name": "Ada"},
+		"recipient":    map[string]string{"id": "bot-1"},
+		"conversation": map[string]string{"id": "conv-1"},
+	}
+	b, _ := json.Marshal(act)
+	return string(b)
 }
 
 func captureDeps(got *[]*core.Message, done chan<- struct{}) core.AdapterDeps {
@@ -552,6 +576,59 @@ func TestHandleMessages_IgnoresNonMessage(t *testing.T) {
 	asserts.Equal(t, len(got), 0, "non-message activity not dispatched")
 }
 
+func TestHandleMessages_AcceptsEndorsedChannel(t *testing.T) {
+	a := testAdapter(t, "msteams")
+	var got []*core.Message
+	done := make(chan struct{}, 1)
+	deps := captureDeps(&got, done)
+
+	body := channelActivityJSON("msteams")
+	w := post(a, deps, body, "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	asserts.Equal(t, w.Code, http.StatusOK, "activity on an endorsed channel is accepted")
+	awaitDispatch(t, done, 1)
+	asserts.Equal(t, len(got), 1, "dispatched")
+}
+
+func TestHandleMessages_RejectsUnendorsedChannel(t *testing.T) {
+	a := testAdapter(t, "msteams")
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	// Key endorsed for msteams only; an Activity claiming another channel must fail
+	// even though its signature/aud/iss/serviceurl are all valid.
+	body := channelActivityJSON("directline")
+	w := post(a, deps, body, "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "channel not in the key's endorsements is rejected")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_RejectsBlankChannelWhenEndorsed(t *testing.T) {
+	a := testAdapter(t, "msteams")
+	var got []*core.Message
+	deps := captureDeps(&got, nil)
+
+	// A blank channelId must not skip an endorsed key's channel check.
+	body := channelActivityJSON("")
+	w := post(a, deps, body, "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "blank channelId rejected for an endorsed key")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestHandleMessages_UnendorsedKeyExemptFromChannelCheck(t *testing.T) {
+	// A key with no endorsements (Emulator/Skill) authenticates regardless of
+	// channelId — the exemption the auth tests without a channelId rely on.
+	a := testAdapter(t)
+	var got []*core.Message
+	done := make(chan struct{}, 1)
+	deps := captureDeps(&got, done)
+
+	body := channelActivityJSON("")
+	w := post(a, deps, body, "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	asserts.Equal(t, w.Code, http.StatusOK, "unendorsed key is exempt from the channel check")
+	awaitDispatch(t, done, 1)
+	asserts.Equal(t, len(got), 1, "dispatched")
+}
+
 func TestPublicKey_RefreshesOnKidMiss(t *testing.T) {
 	a := testAdapter(t)
 	ctx := context.Background()
@@ -624,7 +701,7 @@ func TestPublicKey_ConcurrentRefreshRechecksCache(t *testing.T) {
 	a := testAdapter(t)
 
 	type result struct {
-		key *rsa.PublicKey
+		key *jwksKey
 		err error
 	}
 	known := make(chan result, 1)
@@ -1203,7 +1280,7 @@ func TestValidateInbound_RejectsUnexpectedSigningMethod(t *testing.T) {
 	raw, err := tok.SignedString([]byte("secret"))
 	asserts.NoError(t, err, "sign token")
 
-	err = a.validateInbound(context.Background(), "Bearer "+raw, allowedServiceURL)
+	err = a.validateInbound(context.Background(), "Bearer "+raw, allowedServiceURL, "msteams")
 
 	asserts.ErrorIs(t, err, errUnauthorized, "non-RS256 token should be unauthorized")
 }

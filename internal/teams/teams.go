@@ -11,10 +11,13 @@
 // resource.
 //
 // Security: every inbound request is authenticated by validating the Bot
-// Connector JWT (JWKS signature, audience == AppID, issuer, and a serviceurl
-// claim that must match the Activity's serviceUrl), and outbound replies are
-// only sent to allowlisted Bot Framework hosts. golang-jwt/jwt/v5 performs the
-// signature/claims verification; the JWKS-to-key step is plain stdlib.
+// Connector JWT (JWKS signature, audience == AppID, issuer, a serviceurl claim that
+// must match the Activity's serviceUrl, and that the signing key is endorsed for the
+// Activity's channelId), and outbound replies are only sent to allowlisted Bot
+// Framework hosts. golang-jwt/jwt/v5 performs the signature/claims verification; the
+// JWKS-to-key step is plain stdlib. The endorsement check authenticates the channel,
+// not the from account, so operators must not enable untrusted channels on the same
+// bot resource.
 //
 // Operator responsibilities: the JWT authenticates the Bot Connector and binds
 // the serviceUrl, but the Activity body itself is channel-trusted (not
@@ -37,6 +40,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -149,6 +153,15 @@ type cachedToken struct {
 	expiry time.Time
 }
 
+// jwksKey is one Bot Connector signing key: its RSA public key plus the channel
+// endorsements the JWKS lists for it. A token signed by this key may only
+// authenticate an Activity whose channelId appears in endorsements; an empty
+// endorsements list is the Emulator/Skill exemption. See validateInbound.
+type jwksKey struct {
+	pub          *rsa.PublicKey
+	endorsements []string
+}
+
 // conversation holds what a reply needs: the serviceUrl to POST to and the bot's
 // own account (the inbound Activity's recipient), used as the reply's required
 // from field. The reply's recipient is deliberately not stored: it is a
@@ -185,7 +198,7 @@ type adapter struct {
 	convs          map[string]conversation // conversationID -> reply routing info
 	convOrder      []string                // FIFO insertion order for bounded eviction
 	token          cachedToken
-	keys           map[string]*rsa.PublicKey // kid -> signing key
+	keys           map[string]*jwksKey // kid -> signing key + channel endorsements
 	// keysAt is the time of the last JWKS fetch *attempt* (success or failure); it
 	// rate-limits refreshes to at most one per jwksMinRefreshInterval, bounding the
 	// fetch rate even during an upstream outage. keysFreshAt is the time of the
@@ -315,7 +328,7 @@ func (a *adapter) handleMessages(ctx, dispatchCtx context.Context, w http.Respon
 
 	// Authenticate before trusting anything in the body: validate the Bot
 	// Connector JWT and confirm its serviceurl claim matches the Activity's.
-	if err := a.validateInbound(ctx, r.Header.Get("Authorization"), act.ServiceURL); err != nil {
+	if err := a.validateInbound(ctx, r.Header.Get("Authorization"), act.ServiceURL, act.ChannelID); err != nil {
 		log.Printf("teams: inbound request rejected with 401: %v", err)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -600,18 +613,34 @@ func (a *adapter) accessToken(ctx context.Context) (string, error) {
 }
 
 // validateInbound verifies the Bearer JWT on an inbound request: RS256 signature
-// against the Bot Connector JWKS, audience == AppID, the expected issuer, exp,
-// and a serviceurl claim equal to the Activity's serviceUrl.
-func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServiceURL string) error {
+// against the Bot Connector JWKS, audience == AppID, the expected issuer, exp, a
+// serviceurl claim equal to the Activity's serviceUrl, and that the signing key is
+// endorsed for the Activity's channelId. The JWKS is shared across every channel of
+// a bot resource (Teams, Direct Line, Web Chat, ...) and aud/iss/signature alone do
+// not distinguish them; each key's endorsements are the only thing binding it to a
+// channel, so without this check a token minted for another enabled channel could
+// authenticate an Activity claiming to be from Teams. This authenticates the
+// channelId, not the from account — operators must still not enable untrusted
+// channels on the same bot resource.
+func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServiceURL, activityChannelID string) error {
 	raw, ok := bearerToken(authHeader)
 	if !ok {
 		return fmt.Errorf("%w: missing or malformed Authorization header", errUnauthorized)
 	}
 
 	claims := jwt.MapClaims{}
+	// Capture the signing key's endorsements as the token is verified, so the channel
+	// check below uses the key that actually signed it without a second (racy) map
+	// lookup.
+	var keyEndorsements []string
 	keyFunc := func(t *jwt.Token) (any, error) {
 		kid, _ := t.Header["kid"].(string)
-		return a.publicKey(ctx, kid)
+		jk, err := a.publicKey(ctx, kid)
+		if err != nil {
+			return nil, err
+		}
+		keyEndorsements = jk.endorsements
+		return jk.pub, nil
 	}
 	tok, err := jwt.ParseWithClaims(raw, claims, keyFunc,
 		jwt.WithValidMethods([]string{"RS256"}),
@@ -649,6 +678,20 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 		return fmt.Errorf("%w: serviceurl claim %q does not match activity serviceUrl %q",
 			errUnauthorized, svc, activityServiceURL)
 	}
+
+	// The signing key's endorsements bind it to a set of channels. A token may only
+	// speak for a channel the key is endorsed for. An empty endorsements list is the
+	// Emulator/Skill exemption (those keys carry none), left to pass. Teams always
+	// sets channelId to "msteams", so a blank channelId on an endorsed key is
+	// rejected rather than silently skipping the check.
+	if len(keyEndorsements) > 0 {
+		if activityChannelID == "" {
+			return fmt.Errorf("%w: activity missing channelId for an endorsed signing key", errUnauthorized)
+		}
+		if !slices.Contains(keyEndorsements, activityChannelID) {
+			return fmt.Errorf("%w: signing key not endorsed for channel %q", errUnauthorized, activityChannelID)
+		}
+	}
 	return nil
 }
 
@@ -659,7 +702,7 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 // also triggers a refresh (to pick up key rotation). Refreshes happen at most
 // once per jwksMinRefreshInterval, and a refresh that fails falls back to the
 // cached key so a transient JWKS outage does not reject otherwise-valid tokens.
-func (a *adapter) publicKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {
+func (a *adapter) publicKey(ctx context.Context, kid string) (*jwksKey, error) {
 	a.mu.Lock()
 	k := a.keys[kid]
 	fresh := time.Since(a.keysFreshAt) < jwksMaxAge
@@ -727,8 +770,9 @@ func (a *adapter) publicKey(ctx context.Context, kid string) (*rsa.PublicKey, er
 }
 
 // fetchJWKS resolves the Bot Connector OpenID metadata to its jwks_uri and
-// decodes the RSA signing keys into a kid-indexed map.
-func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*rsa.PublicKey, error) {
+// decodes the RSA signing keys (with their channel endorsements) into a kid-indexed
+// map.
+func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*jwksKey, error) {
 	var meta struct {
 		JWKSURI string `json:"jwks_uri"`
 	}
@@ -752,17 +796,18 @@ func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*rsa.PublicKey, err
 
 	var set struct {
 		Keys []struct {
-			Kid string `json:"kid"`
-			Kty string `json:"kty"`
-			N   string `json:"n"`
-			E   string `json:"e"`
+			Kid          string   `json:"kid"`
+			Kty          string   `json:"kty"`
+			N            string   `json:"n"`
+			E            string   `json:"e"`
+			Endorsements []string `json:"endorsements"`
 		} `json:"keys"`
 	}
 	if err := a.getJSON(ctx, meta.JWKSURI, &set); err != nil {
 		return nil, err
 	}
 
-	keys := make(map[string]*rsa.PublicKey, len(set.Keys))
+	keys := make(map[string]*jwksKey, len(set.Keys))
 	for _, k := range set.Keys {
 		if k.Kty != "RSA" || k.Kid == "" {
 			continue
@@ -783,7 +828,7 @@ func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*rsa.PublicKey, err
 		if n.BitLen() < 1024 || e < 2 {
 			continue
 		}
-		keys[k.Kid] = &rsa.PublicKey{N: n, E: e}
+		keys[k.Kid] = &jwksKey{pub: &rsa.PublicKey{N: n, E: e}, endorsements: k.Endorsements}
 	}
 	if len(keys) == 0 {
 		return nil, errors.New("teams: no usable RSA keys in JWKS")
@@ -962,6 +1007,7 @@ type inboundActivity struct {
 	ID           string         `json:"id"`
 	Text         string         `json:"text"`
 	ServiceURL   string         `json:"serviceUrl"`
+	ChannelID    string         `json:"channelId"`
 	Timestamp    string         `json:"timestamp"`
 	ReplyToID    string         `json:"replyToId"`
 	From         channelAccount `json:"from"`
