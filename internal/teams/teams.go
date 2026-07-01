@@ -895,6 +895,15 @@ type activityAttachment struct {
 	Name        string `json:"name"`
 }
 
+// mentionEntity is a Bot Framework "mention" entity from an Activity's entities
+// array. Text is the literal markup span in the message text (e.g.
+// "<at>Bot Name</at>") and Mentioned identifies who was mentioned.
+type mentionEntity struct {
+	Type      string         `json:"type"`
+	Text      string         `json:"text"`
+	Mentioned channelAccount `json:"mentioned"`
+}
+
 // outboundActivity is the reply posted to the Bot Connector. from is required by
 // the service. recipient is deliberately omitted: it is per-activity while replies
 // are delivered by conversation id, so a cached recipient would misattribute a
@@ -918,6 +927,7 @@ type inboundActivity struct {
 		ID string `json:"id"`
 	} `json:"conversation"`
 	Attachments []activityAttachment `json:"attachments"`
+	Entities    []mentionEntity      `json:"entities"`
 }
 
 func toMessage(act *inboundActivity, raw json.RawMessage) *core.Message {
@@ -938,11 +948,39 @@ func toMessage(act *inboundActivity, raw json.RawMessage) *core.Message {
 		UserID:     act.From.ID,
 		AuthorName: act.From.Name,
 		ChannelID:  act.Conversation.ID,
-		Content:    act.Text,
+		Content:    stripRecipientMention(act),
 		Timestamp:  ts,
 		ReplyToID:  act.ReplyToID,
 		Raw:        tm,
 	}
+}
+
+// stripRecipientMention removes the bot's own @mention markup from the Activity
+// text. In Teams group and channel chats the inbound text is prefixed with markup
+// like "<at>Bot Name</at> echo hi", which would stop an anchored command pattern
+// (e.g. ^echo) from ever matching. Only the mention entity targeting Recipient.ID
+// (the bot) is removed — by deleting its literal Text span, mirroring the Bot
+// Framework SDK's removeRecipientMention — so mentions of other users survive for
+// handlers that want them. The internal Message.Text keeps the raw wire text.
+//
+// The result is trimmed only when a mention was actually removed, so a plain 1:1
+// message (no entities) is passed through byte-for-byte.
+func stripRecipientMention(act *inboundActivity) string {
+	if act.Recipient.ID == "" {
+		return act.Text
+	}
+	text := act.Text
+	stripped := false
+	for _, e := range act.Entities {
+		if strings.EqualFold(e.Type, "mention") && e.Text != "" && e.Mentioned.ID == act.Recipient.ID {
+			text = strings.Replace(text, e.Text, "", 1)
+			stripped = true
+		}
+	}
+	if !stripped {
+		return act.Text
+	}
+	return strings.TrimSpace(text)
 }
 
 func parseTimestamp(s string) time.Time {
