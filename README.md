@@ -4,6 +4,8 @@
 [![CI](https://github.com/lao/botbooter/actions/workflows/ci.yml/badge.svg)](https://github.com/lao/botbooter/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/lao/botbooter)](https://goreportcard.com/report/github.com/lao/botbooter)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/lao/botbooter)](go.mod)
+[![Test Coverage](https://codecov.io/gh/lao/botbooter/branch/main/graph/badge.svg)](https://codecov.io/gh/lao/botbooter)
+[![Releases](https://img.shields.io/github/v/release/lao/botbooter.svg?include_prereleases&color=blue)](https://github.com/lao/botbooter/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
@@ -64,11 +66,11 @@ func main() {
 Or run the bundled example directly:
 
 ```bash
-go run ./examples/v1            # CLI mode (default, no credentials)
-go run ./examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
-go run ./examples/v1 discord    # uses DISCORD_BOT_TOKEN
-go run ./examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
-go run ./examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
+go run ./_examples/v1            # CLI mode (default, no credentials)
+go run ./_examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
+go run ./_examples/v1 discord    # uses DISCORD_BOT_TOKEN
+go run ./_examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
+go run ./_examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
 ```
 
 ## Concepts
@@ -168,7 +170,7 @@ for _, a := range attachments {
 }
 ```
 
-`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [docs/platforms.md](docs/platforms.md#telegram).
+`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram).
 
 A terminal has no real upload channel, so the **CLI adapter treats any local file path in the message as an attachment** — "uploading" means referencing the path. Image files are detected by content sniffing:
 
@@ -206,6 +208,7 @@ if ev, ok := slack.RawEvent(m); ok {
 // Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, whatsapp.RawMessage, cli.RawData.
 // Underlying client per platform (WhatsApp has none — it speaks the Cloud API over plain HTTP):
 client := slack.Client(bot)        // *slack.Client (nil if not a Slack bot)
+sock := slack.SocketClient(bot)    // *socketmode.Client (nil if not a Slack bot)
 session := discord.Session(bot)    // *discordgo.Session
 tg := telegram.Client(bot)         // *bot.Bot
 ```
@@ -228,16 +231,16 @@ if err := bot.Run(ctx); err != nil { // connect, serve, and shut down on cancel
 ## Platform setup
 
 Each platform takes different credentials. Full step-by-step setup,
-[troubleshooting](docs/platforms.md#no-response), and the official
-documentation for each live in **[docs/platforms.md](docs/platforms.md)**.
+[troubleshooting](_docs/platforms.md#no-response), and the official
+documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 
 | Platform | What you need | Setup |
 |---|---|---|
-| Slack | `xapp-…` app-level token + `xoxb-…` bot token | [docs/platforms.md](docs/platforms.md#slack) |
-| Discord | bot token + Message Content Intent | [docs/platforms.md](docs/platforms.md#discord) |
-| Telegram | BotFather bot token | [docs/platforms.md](docs/platforms.md#telegram) |
-| WhatsApp | Cloud API token + phone-number id + app secret + verify token + bind addr | [docs/platforms.md](docs/platforms.md#whatsapp) |
-| CLI | nothing (local stdin/stdout) | [docs/platforms.md](docs/platforms.md#cli) |
+| Slack | `xapp-…` app-level token + `xoxb-…` bot token | [_docs/platforms.md](_docs/platforms.md#slack) |
+| Discord | bot token + Message Content Intent | [_docs/platforms.md](_docs/platforms.md#discord) |
+| Telegram | BotFather bot token | [_docs/platforms.md](_docs/platforms.md#telegram) |
+| WhatsApp | Cloud API token + phone-number id + app secret + verify token + bind addr | [_docs/platforms.md](_docs/platforms.md#whatsapp) |
+| CLI | nothing (local stdin/stdout) | [_docs/platforms.md](_docs/platforms.md#cli) |
 
 ## Development
 
@@ -274,9 +277,9 @@ Alternatives:
 
 - [x] Slack, Discord, Telegram, WhatsApp and CLI adapters
 - [x] Middleware and attachment abstraction
-- [ ] Microsoft Teams adapter
+- [x] Unify attachment URL retrieval for all implementations
+- [ ] Microsoft Teams, WeChat, Mastodon adapters
 - [ ] Richer message types (blocks, embeds)
-- [ ] Unify attachment url retriavel for all implementations
 - [x] Conversational flows — multi-step forms via `HandleFlow` (linear, in-memory, single-instance)
 - [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend
 

@@ -3,13 +3,16 @@
 .env.*
 
 # Test & coverage artifacts
-coverage.out
+coverage.txt
 *.out
 *.test
 
 # Build artifacts
 /bin/
 /dist/
+# Compiled example binary (go build ./_examples/v1); anchored so it does not
+# match the _examples/v1 source directory.
+/v1
 
 # Editor / OS noise
 .DS_Store
@@ -18,5 +21,4 @@ coverage.out
 .claude/
 .plans/
 todo.md
-docs/superpowers/
-v1
+_docs/superpowers/
