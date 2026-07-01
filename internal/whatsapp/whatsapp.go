@@ -253,10 +253,16 @@ func (a *adapter) Disconnect() error {
 	if srv == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := srv.Shutdown(ctx)
-	a.drainDispatch(ctx)
+	// Shutdown and drain each get their own budget: dispatch goroutines run
+	// outside the HTTP handler lifecycle, so a slow Shutdown must not consume the
+	// drain deadline and silently drop an already-acked in-flight message.
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutCancel()
+	err := srv.Shutdown(shutCtx)
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	a.drainDispatch(drainCtx)
 	return err
 }
 
