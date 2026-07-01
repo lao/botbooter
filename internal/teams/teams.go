@@ -861,6 +861,7 @@ type inboundActivity struct {
 	Text         string         `json:"text"`
 	ServiceURL   string         `json:"serviceUrl"`
 	Timestamp    string         `json:"timestamp"`
+	ReplyToID    string         `json:"replyToId"`
 	From         channelAccount `json:"from"`
 	Recipient    channelAccount `json:"recipient"`
 	Conversation struct {
@@ -889,6 +890,7 @@ func toMessage(act *inboundActivity, raw json.RawMessage) *core.Message {
 		ChannelID:  act.Conversation.ID,
 		Content:    act.Text,
 		Timestamp:  ts,
+		ReplyToID:  act.ReplyToID,
 		Raw:        tm,
 	}
 }
