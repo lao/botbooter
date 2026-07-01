@@ -226,11 +226,21 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 		return
 	}
 
+	// Decouple dispatch from the run context's cancellation. On shutdown core
+	// cancels runCtx *before* calling Disconnect, whose drainDispatch then waits
+	// for this in-flight handler; if the handler threaded ctx into its reply the
+	// send would fail with "context canceled" mid-drain, defeating the drain.
+	// WithoutCancel keeps the ctx's values but drops its deadline and
+	// cancellation, so an already acked message can finish its reply within the
+	// drain window. A stuck reply is then bounded only by the outbound HTTP
+	// client's timeout — 30s for the default client; set one on a custom
+	// cfg.HTTPClient — since ctx no longer aborts it.
+	dispatchCtx := context.WithoutCancel(ctx)
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
 		for _, m := range messages {
-			deps.Dispatch(ctx, toMessage(m))
+			deps.Dispatch(dispatchCtx, toMessage(m))
 		}
 	}()
 }

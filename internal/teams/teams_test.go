@@ -316,6 +316,34 @@ func TestHandleMessages_DispatchesText(t *testing.T) {
 	asserts.Equal(t, a.convs["conv-1"].user.ID, "user-1", "user account recorded for replies")
 }
 
+// TestHandleMessages_DispatchCtxSurvivesRunCtxCancel guards the drain: core
+// cancels the run context before Disconnect drains in-flight dispatch, so the
+// context handed to Dispatch must not be canceled with it — otherwise a
+// handler's reply would fail with "context canceled" mid-drain.
+func TestHandleMessages_DispatchCtxSurvivesRunCtxCancel(t *testing.T) {
+	a := testAdapter(t)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	gotCtx := make(chan context.Context, 1)
+	deps := core.AdapterDeps{
+		Dispatch: func(c context.Context, _ *core.Message) { gotCtx <- c },
+	}
+
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	a.handleMessages(runCtx, httptest.NewRecorder(), r, deps)
+
+	select {
+	case dispatchCtx := <-gotCtx:
+		cancel() // core cancels runCtx at shutdown, before draining.
+		asserts.NoError(t, dispatchCtx.Err(), "dispatch ctx must not cancel with the run ctx")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch")
+	}
+}
+
 func TestHandleMessages_RejectsMissingToken(t *testing.T) {
 	a := testAdapter(t)
 	var got []*core.Message
@@ -679,7 +707,11 @@ func TestRecordConversation_IgnoresIncompleteMapping(t *testing.T) {
 
 func TestAttachments(t *testing.T) {
 	body := `{"type":"message","attachments":[{"contentType":"image/png","contentUrl":"https://x/i.png","name":"i.png"}]}`
-	m := &core.Message{Raw: &Message{Raw: json.RawMessage(body)}}
+	var act inboundActivity
+	asserts.NoError(t, json.Unmarshal([]byte(body), &act), "unmarshal activity")
+	// Attachments reads the parse-time attachments carried on the Message, so go
+	// through toMessage rather than hand-building a Message with only Raw.
+	m := toMessage(&act, json.RawMessage(body))
 	atts, err := (&adapter{}).Attachments(m)
 	asserts.NoError(t, err, "Attachments")
 	asserts.Equal(t, len(atts), 1, "one attachment")
@@ -762,16 +794,12 @@ func TestAttachments_NonTeams(t *testing.T) {
 }
 
 func TestAttachments_None(t *testing.T) {
-	m := &core.Message{Raw: &Message{Raw: json.RawMessage(`{"type":"message"}`)}}
+	var act inboundActivity
+	asserts.NoError(t, json.Unmarshal([]byte(`{"type":"message"}`), &act), "unmarshal activity")
+	m := toMessage(&act, json.RawMessage(`{"type":"message"}`))
 	atts, err := (&adapter{}).Attachments(m)
 	asserts.NoError(t, err, "Attachments")
 	asserts.Equal(t, len(atts), 0, "no attachments")
-}
-
-func TestAttachments_BadRawJSON(t *testing.T) {
-	m := &core.Message{Raw: &Message{Raw: json.RawMessage(`{bad`)}}
-	_, err := (&adapter{}).Attachments(m)
-	asserts.Error(t, err, "unparseable raw should error")
 }
 
 func TestAccessToken_HTTPError(t *testing.T) {

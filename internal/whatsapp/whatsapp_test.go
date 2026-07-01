@@ -202,6 +202,34 @@ func TestHandleWebhook_DispatchesText(t *testing.T) {
 	asserts.Equal(t, wm.Type, "text", "message type should be text")
 }
 
+// TestHandleWebhook_DispatchCtxSurvivesRunCtxCancel guards the drain: core
+// cancels the run context before Disconnect drains in-flight dispatch, so the
+// context handed to Dispatch must not cancel with it — otherwise a handler's
+// reply would fail with "context canceled" mid-drain.
+func TestHandleWebhook_DispatchCtxSurvivesRunCtxCancel(t *testing.T) {
+	a := testAdapter()
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	gotCtx := make(chan context.Context, 1)
+	deps := core.AdapterDeps{
+		Dispatch: func(c context.Context, _ *core.Message) { gotCtx <- c },
+	}
+
+	body := []byte(textWebhook)
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	a.handleWebhook(runCtx, httptest.NewRecorder(), r, deps)
+
+	select {
+	case dispatchCtx := <-gotCtx:
+		cancel() // core cancels runCtx at shutdown, before draining.
+		asserts.NoError(t, dispatchCtx.Err(), "dispatch ctx must not cancel with the run ctx")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch")
+	}
+}
+
 func TestHandleWebhook_BadSignature(t *testing.T) {
 	a := testAdapter()
 	var got []*core.Message
