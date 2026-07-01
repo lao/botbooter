@@ -42,7 +42,7 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		return teams.New(teams.Config{
 			AppID:       os.Getenv("TEAMS_APP_ID"),
 			AppPassword: os.Getenv("TEAMS_APP_PASSWORD"),
-			TenantID:    os.Getenv("TEAMS_TENANT_ID"), // optional; single-tenant
+			TenantID:    os.Getenv("TEAMS_APP_TENANT_ID"), // optional; single-tenant
 			Addr:        os.Getenv("TEAMS_ADDR"),
 			Path:        os.Getenv("TEAMS_PATH"), // optional; defaults to /api/messages
 		})

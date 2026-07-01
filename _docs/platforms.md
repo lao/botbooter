@@ -2,7 +2,8 @@
 
 How to provision credentials for each platform botbooter supports. Slack,
 Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
-needs Cloud API credentials plus a public HTTPS webhook; the CLI needs nothing.
+and Microsoft Teams need cloud credentials plus a public HTTPS webhook; the CLI
+needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/_docs/platforms.md) — pkg.go.dev renders the README but not this file.
 
@@ -12,6 +13,7 @@ needs Cloud API credentials plus a public HTTPS webhook; the CLI needs nothing.
 - Discord — [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway)
 - Telegram — [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api)
 - WhatsApp — [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks getting started](https://developers.facebook.com/docs/graph-api/webhooks/getting-started)
+- Microsoft Teams — [Azure Bot resource](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication)
 - CLI — [`_examples/v1`](../_examples/v1) and the [README Quickstart](../README.md#quickstart)
 
 ---
@@ -218,6 +220,83 @@ window; outside it, Meta requires a pre-approved template (not yet supported).
   (a template message is required there).
 
 **Official docs:** [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks](https://developers.facebook.com/docs/graph-api/webhooks/getting-started) · [Webhook components](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components)
+
+---
+
+## Microsoft Teams
+
+botbooter speaks the **Azure Bot Framework** (Bot Connector REST API). Like
+WhatsApp, the channel delivers inbound messages as **HTTP webhook callbacks**, so
+the adapter runs its own server: it binds a local `Addr`, and you put a
+**TLS-terminating reverse proxy** in front and register the public HTTPS URL as
+the Azure Bot's messaging endpoint. Replies go back over the Bot Connector API.
+
+1. **Create an Azure Bot resource** in the
+   [Azure portal](https://learn.microsoft.com/azure/bot-service/abs-quickstart)
+   (*Create a resource → Azure Bot*). Choose **multi-tenant** or **single-tenant**;
+   the type determines whether you set `TEAMS_APP_TENANT_ID` below.
+2. **Collect the credentials** (*Azure Bot → Configuration / Microsoft App ID*):
+   - **Microsoft App ID** (`TEAMS_APP_ID`) — the bot's app (client) id. It is the
+     expected audience of inbound tokens and the client id used to mint outbound
+     tokens.
+   - **Client secret** (`TEAMS_APP_PASSWORD`) — create one under the app's
+     *Certificates & secrets*; it pairs with the App ID.
+   - **Tenant ID** (`TEAMS_APP_TENANT_ID`) — **only for single-tenant** bots.
+     Leave it unset for multi-tenant bots (the multi-tenant token endpoint is
+     used).
+3. **Expose the webhook** — run the bot bound to `TEAMS_ADDR` (e.g. `:8080`), put
+   HTTPS in front (a reverse proxy, or a tunnel like ngrok for local testing),
+   then set the Azure Bot's **messaging endpoint** to your public
+   `https://…/api/messages`.
+4. **Add the Teams channel** (*Azure Bot → Channels → Microsoft Teams*) and
+   install/side-load the bot to talk to it.
+
+```go
+import "github.com/lao/botbooter/teams"
+
+bot, err := teams.New(teams.Config{
+	AppID:       os.Getenv("TEAMS_APP_ID"),
+	AppPassword: os.Getenv("TEAMS_APP_PASSWORD"),
+	TenantID:    os.Getenv("TEAMS_APP_TENANT_ID"), // optional; single-tenant only
+	Addr:        os.Getenv("TEAMS_ADDR"),          // e.g. ":8080"; a bare "8080" is accepted
+})
+```
+
+Optional `teams.Config` fields: `Path` (webhook route, default `/api/messages`)
+and `HTTPClient` (the outbound HTTP client; defaults to a 30-second timeout).
+
+Every inbound request is authenticated by validating the **Bot Connector JWT**
+(JWKS signature, audience == App ID, issuer, and a `serviceurl` claim that must
+match the Activity), and outbound replies only go to allowlisted Bot Framework
+hosts. The JWT authenticates the connector but the Activity body is
+channel-trusted (not individually signed) and there is no replay tracking — so
+**terminate TLS at a trusted proxy and never expose `Addr` in cleartext**; do
+rate limiting there too. The **Bot Framework Emulator** uses an AAD issuer and is
+not supported.
+
+**Environment variables** (read by the bundled example):
+
+| Variable | Value |
+|---|---|
+| `TEAMS_APP_ID` | Microsoft App ID from step 2 |
+| `TEAMS_APP_PASSWORD` | client secret from step 2 |
+| `TEAMS_APP_TENANT_ID` | optional; tenant id for a **single-tenant** bot |
+| `TEAMS_ADDR` | local bind address, e.g. `:8080` (a bare port is accepted) |
+| `TEAMS_PATH` | optional webhook route; defaults to `/api/messages` |
+
+#### No messages?
+
+- **401 on every callback** — JWT validation failed: a wrong `TEAMS_APP_ID`
+  (audience mismatch), a clock skew beyond 5 minutes, or the request came from the
+  unsupported Emulator. The rejection reason is logged.
+- **Replies fail / `Send` errors** — a wrong `TEAMS_APP_PASSWORD` (token mint
+  fails), a `TEAMS_APP_TENANT_ID` set for a multi-tenant bot (or missing for a
+  single-tenant one), or no inbound Activity has been seen yet for that
+  conversation (the serviceUrl is learned from inbound messages).
+- **Endpoint never hit** — the Azure Bot messaging endpoint must be your public
+  `https://…/api/messages` and reach `Addr` through the proxy.
+
+**Official docs:** [Azure Bot quickstart](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Connector authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication) · [Send & receive messages](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-create-messages)
 
 ---
 

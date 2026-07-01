@@ -8,7 +8,7 @@
 [![Releases](https://img.shields.io/github/v/release/lao/botbooter.svg?include_prereleases&color=blue)](https://github.com/lao/botbooter/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
 Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, or stdin.
 
@@ -71,6 +71,7 @@ go run ./_examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 go run ./_examples/v1 discord    # uses DISCORD_BOT_TOKEN
 go run ./_examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
 go run ./_examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
+go run ./_examples/v1 teams      # uses TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (+ optional TEAMS_APP_TENANT_ID / TEAMS_PATH)
 ```
 
 ## Concepts
@@ -194,6 +195,7 @@ documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 | Discord | bot token + Message Content Intent | [_docs/platforms.md](_docs/platforms.md#discord) |
 | Telegram | BotFather bot token | [_docs/platforms.md](_docs/platforms.md#telegram) |
 | WhatsApp | Cloud API token + phone-number id + app secret + verify token + bind addr | [_docs/platforms.md](_docs/platforms.md#whatsapp) |
+| Microsoft Teams | Azure Bot app id + password (+ optional tenant id) + bind addr | [_docs/platforms.md](_docs/platforms.md#microsoft-teams) |
 | CLI | nothing (local stdin/stdout) | [_docs/platforms.md](_docs/platforms.md#cli) |
 
 ## Development
@@ -229,10 +231,10 @@ Alternatives:
 
 ## Roadmap
 
-- [x] Slack, Discord, Telegram, WhatsApp and CLI adapters
+- [x] Slack, Discord, Telegram, WhatsApp, Microsoft Teams and CLI adapters
 - [x] Middleware and attachment abstraction
 - [x] Unify attachment URL retrieval for all implementations
-- [ ] Microsoft Teams, WeChat, Mastodon adapters
+- [ ] WeChat, Mastodon adapters
 - [ ] Richer message types (blocks, embeds)
 - [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend
 - [ ] **Conversational flows** (multi-step, context-aware dialogs) — a handler can pause and own the *next* message from the same user instead of re-routing it, so a sign-up form (name → email → address → profession → age → password) asks one question, waits for the reply, validates, then advances to the next. Per-user state lives in the pluggable `Store` above; the goal is a declarative, minimal-boilerplate API for defining the steps.
