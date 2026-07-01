@@ -149,13 +149,17 @@ type cachedToken struct {
 	expiry time.Time
 }
 
-// conversation holds what a reply needs: the serviceUrl to POST to, plus the
-// bot's own account (the inbound Activity's recipient) and the user's account
-// (the inbound Activity's from) used to populate the reply's from/recipient.
+// conversation holds what a reply needs: the serviceUrl to POST to and the bot's
+// own account (the inbound Activity's recipient), used as the reply's required
+// from field. The reply's recipient is deliberately not stored: it is a
+// per-activity value, but replies are delivered by conversation id, so a
+// per-conversation recipient is a last-writer-wins race between concurrent senders
+// in a shared group/channel — and the Bot Connector treats recipient as optional
+// on a reply. The bot account is conversation-stable (always this bot), so it is
+// safe to cache.
 type conversation struct {
 	serviceURL string
 	bot        channelAccount
-	user       channelAccount
 }
 
 type adapter struct {
@@ -318,7 +322,7 @@ func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *
 		return
 	}
 
-	a.recordConversation(act.Conversation.ID, act.ServiceURL, act.Recipient, act.From)
+	a.recordConversation(act.Conversation.ID, act.ServiceURL, act.Recipient)
 
 	msg := toMessage(&act, body)
 	// Decouple dispatch from the run context's cancellation. On shutdown core
@@ -391,14 +395,15 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 		return err
 	}
 
-	// Bot Connector requires the reply's from field (the bot's account); the
-	// recipient is the user. Both come from the inbound Activity (from/recipient
-	// swapped) captured when the conversation was recorded.
+	// Bot Connector requires the reply's from field (the bot's account), captured
+	// from the inbound Activity's recipient when the conversation was recorded. The
+	// reply's recipient is left unset: delivery is keyed by the conversation id in
+	// the URL, and recipient is per-activity, so caching one would misattribute a
+	// concurrent sender's reply.
 	payload := outboundActivity{
-		Type:      "message",
-		Text:      text,
-		From:      conv.bot,
-		Recipient: conv.user,
+		Type: "message",
+		Text: text,
+		From: conv.bot,
 	}
 	// channelAccount holds only strings, which encoding/json cannot reject.
 	body, _ := json.Marshal(payload)
@@ -449,15 +454,15 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	return out, nil
 }
 
-// recordConversation maps a conversation to its serviceUrl and the accounts a
-// reply needs (the bot's own account and the user's), bounding the map with FIFO
-// eviction so a public endpoint cannot grow it without limit. Eviction
-// is by first-seen, not last-active: replies happen inside the same dispatch as
-// the recording, so request/response bots always resolve. A bot that stores a
-// conversation to message it proactively much later (out of scope here) could
-// find an oldest conversation evicted once maxConversations distinct
-// conversations have been seen; Send then returns a clear error.
-func (a *adapter) recordConversation(id, serviceURL string, bot, user channelAccount) {
+// recordConversation maps a conversation to its serviceUrl and the bot's own
+// account (the reply's required from field), bounding the map with FIFO eviction
+// so a public endpoint cannot grow it without limit. Eviction is by first-seen,
+// not last-active: replies happen inside the same dispatch as the recording, so
+// request/response bots always resolve. A bot that stores a conversation to
+// message it proactively much later (out of scope here) could find an oldest
+// conversation evicted once maxConversations distinct conversations have been
+// seen; Send then returns a clear error.
+func (a *adapter) recordConversation(id, serviceURL string, bot channelAccount) {
 	if id == "" || serviceURL == "" {
 		return
 	}
@@ -474,7 +479,7 @@ func (a *adapter) recordConversation(id, serviceURL string, bot, user channelAcc
 		}
 		a.convOrder = append(a.convOrder, id)
 	}
-	a.convs[id] = conversation{serviceURL: serviceURL, bot: bot, user: user}
+	a.convs[id] = conversation{serviceURL: serviceURL, bot: bot}
 }
 
 // accessToken returns a cached Bot Connector token, minting a fresh one via the
@@ -847,12 +852,13 @@ type activityAttachment struct {
 }
 
 // outboundActivity is the reply posted to the Bot Connector. from is required by
-// the service; recipient is included for completeness.
+// the service. recipient is deliberately omitted: it is per-activity while replies
+// are delivered by conversation id, so a cached recipient would misattribute a
+// concurrent sender's reply, and the service treats it as optional on a reply.
 type outboundActivity struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text"`
-	From      channelAccount `json:"from"`
-	Recipient channelAccount `json:"recipient"`
+	Type string         `json:"type"`
+	Text string         `json:"text"`
+	From channelAccount `json:"from"`
 }
 
 type inboundActivity struct {
