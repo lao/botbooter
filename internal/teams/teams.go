@@ -173,20 +173,19 @@ type adapter struct {
 
 	mu  sync.Mutex
 	srv *http.Server
-	// detachedCtx parents every dispatch goroutine and detachedCancel aborts them.
-	// detachedCtx drops the run ctx's deadline and cancellation (via WithoutCancel)
-	// so an acked reply can finish during the shutdown drain, but stays cancelable
-	// (via WithCancel) so Disconnect can abort stragglers once the drain window
-	// closes — a handler blocked on ctx.Done() or a reply on a no-timeout client
-	// then cannot leak across reconnects. Both are installed per Connect and cleared
-	// per Disconnect, so a reconnect never overwrites a still-live cancel.
-	detachedCtx    context.Context
+	// detachedCancel aborts the current connection's dispatch goroutines. Each
+	// Connect derives one detached, cancelable context — context.WithCancel over
+	// context.WithoutCancel(runCtx) — and threads the context itself through the
+	// handler closure (like runCtx), so there is no shared context field to race on;
+	// only the cancel is stored here. Disconnect calls it after the drain window so a
+	// handler blocked on ctx.Done() or a reply on a no-timeout client cannot leak, and
+	// clears it only when a reconnect has not already installed a newer connection.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
 	convs          map[string]conversation // conversationID -> reply routing info
-	convOrder []string                // FIFO insertion order for bounded eviction
-	token     cachedToken
-	keys      map[string]*rsa.PublicKey // kid -> signing key
+	convOrder      []string                // FIFO insertion order for bounded eviction
+	token          cachedToken
+	keys           map[string]*rsa.PublicKey // kid -> signing key
 	// keysAt is the time of the last JWKS fetch *attempt* (success or failure); it
 	// rate-limits refreshes to at most one per jwksMinRefreshInterval, bounding the
 	// fetch rate even during an upstream outage. keysFreshAt is the time of the
@@ -244,17 +243,25 @@ func newAdapter(cfg Config) (*adapter, error) {
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
+	// One detached, cancelable context per connection parents all dispatch:
+	// WithoutCancel drops runCtx's deadline/cancellation so an acked reply can finish
+	// during the shutdown drain, WithCancel lets Disconnect abort stragglers after it.
+	// The handler closure captures the context directly (like runCtx), so there is no
+	// shared context field for a request and Disconnect to race on.
+	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(a.cfg.Path, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		a.handleMessages(ctx, w, r, deps)
+		a.handleMessages(ctx, detachedCtx, w, r, deps)
 	})
 
 	ln, err := net.Listen("tcp", a.cfg.Addr)
 	if err != nil {
+		detachedCancel() // nothing will consume the context; release it.
 		return err
 	}
 
@@ -265,12 +272,9 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		WriteTimeout:      20 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	// One detached, cancelable context per connection parents all dispatch.
-	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	a.mu.Lock()
 	a.srv = srv
-	a.detachedCtx = detachedCtx
 	a.detachedCancel = detachedCancel
 	a.mu.Unlock()
 
@@ -296,7 +300,7 @@ func serve(srv *http.Server, ln net.Listener, done func(error)) {
 	}
 }
 
-func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
+func (a *adapter) handleMessages(ctx, dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -339,21 +343,16 @@ func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *
 	a.recordConversation(act.Conversation.ID, act.ServiceURL, act.Recipient)
 
 	msg := toMessage(&act, body)
-	// Dispatch on the per-connection detached context (see the adapter struct):
-	// core cancels runCtx *before* calling Disconnect, whose drainDispatch waits for
-	// this in-flight handler, so the reply must not be threaded onto runCtx or it
-	// would fail with "context canceled" mid-drain. detachedCtx keeps runCtx's values
-	// but drops its deadline/cancellation so an acked message finishes within the
-	// drain window; Disconnect cancels it after the drain so a stuck reply is bounded
+	// Dispatch on the per-connection detached context (captured in Connect and passed
+	// in): core cancels runCtx *before* calling Disconnect, whose drainDispatch waits
+	// for this in-flight handler, so the reply must not be threaded onto runCtx or it
+	// would fail with "context canceled" mid-drain. dispatchCtx keeps runCtx's values
+	// but drops its deadline/cancellation so an acked message finishes within the drain
+	// window; Disconnect cancels it after the drain so a stuck reply is bounded
 	// (otherwise only by the outbound HTTP client's timeout — 30s for the default
-	// client; set one on a custom cfg.HTTPClient). Fall back to a bare detached ctx
-	// when handleMessages is driven without a live Connect (tests).
-	a.mu.Lock()
-	dispatchCtx := a.detachedCtx
-	a.mu.Unlock()
-	if dispatchCtx == nil {
-		dispatchCtx = context.WithoutCancel(ctx)
-	}
+	// client; set one on a custom cfg.HTTPClient). Add before starting the goroutine so
+	// the count is visible to drainDispatch: srv.Shutdown waits for this handler to
+	// return, so the increment lands before the drain observes the counter.
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
@@ -364,10 +363,7 @@ func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	srv := a.srv
-	a.srv = nil
 	cancelDispatch := a.detachedCancel
-	a.detachedCancel = nil
-	a.detachedCtx = nil
 	a.mu.Unlock()
 	if srv == nil {
 		return nil
@@ -383,9 +379,28 @@ func (a *adapter) Disconnect() error {
 	defer drainCancel()
 	a.drainDispatch(drainCtx)
 
-	// After the drain window closes, cancel any dispatch still running so a handler
-	// blocked on ctx.Done() (or a reply on a no-timeout client) is aborted rather
-	// than leaked past shutdown. CancelFunc is idempotent and goroutine-safe.
+	// If the drain timed out, dispatch goroutines are still running and the
+	// cancelDispatch below force-aborts them; surface that instead of aborting
+	// silently, since a forced abort of an already-acked message is operationally
+	// significant.
+	if n := a.inflight.Load(); n > 0 {
+		log.Printf("teams: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+	}
+
+	// Clear the shared fields only if a reconnect has not already installed a newer
+	// connection (identity-compare on srv): core clears its own cancel before this
+	// up-to-10s Disconnect returns, so a fresh Connect can legitimately run
+	// concurrently, and nil-ing unconditionally could clobber its live cancel. Either
+	// way, cancel THIS connection's own detached context after the drain so a handler
+	// blocked on ctx.Done() (or a reply on a no-timeout client) cannot leak past
+	// shutdown. CancelFunc is idempotent and goroutine-safe.
+	a.mu.Lock()
+	if a.srv == srv {
+		a.srv = nil
+		a.detachedCancel = nil
+	}
+	a.mu.Unlock()
+
 	if cancelDispatch != nil {
 		cancelDispatch()
 	}
@@ -408,7 +423,7 @@ func (a *adapter) drainDispatch(ctx context.Context) {
 }
 
 // Send posts a text reply to the conversation identified by channelID. The
-// serviceUrl and the bot/user accounts are resolved from the map populated on
+// serviceUrl and the bot's own account are resolved from the map populated on
 // inbound Activities, so Send fails if no Activity has been seen for channelID
 // yet.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
