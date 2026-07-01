@@ -192,7 +192,7 @@ func post(a *adapter, deps core.AdapterDeps, body, auth string) *httptest.Respon
 		r.Header.Set("Authorization", auth)
 	}
 	w := httptest.NewRecorder()
-	a.handleMessages(context.Background(), w, r, deps)
+	a.handleMessages(context.Background(), context.Background(), w, r, deps)
 	return w
 }
 
@@ -390,14 +390,16 @@ func TestHandleMessages_DispatchesText(t *testing.T) {
 	asserts.Equal(t, a.convs["conv-1"].bot.ID, "bot-1", "bot account recorded for replies")
 }
 
-// TestHandleMessages_DispatchCtxSurvivesRunCtxCancel guards the drain: core
-// cancels the run context before Disconnect drains in-flight dispatch, so the
-// context handed to Dispatch must not be canceled with it — otherwise a
-// handler's reply would fail with "context canceled" mid-drain.
-func TestHandleMessages_DispatchCtxSurvivesRunCtxCancel(t *testing.T) {
+// TestHandleMessages_DispatchesOnDetachedCtx guards the drain: core cancels the run
+// context before Disconnect drains in-flight dispatch, so dispatch must ride the
+// detached context passed in, not runCtx — otherwise a handler's reply would fail
+// with "context canceled" mid-drain.
+func TestHandleMessages_DispatchesOnDetachedCtx(t *testing.T) {
 	a := testAdapter(t)
-	runCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
+	defer cancelDispatch()
 
 	gotCtx := make(chan context.Context, 1)
 	deps := core.AdapterDeps{
@@ -407,12 +409,12 @@ func TestHandleMessages_DispatchCtxSurvivesRunCtxCancel(t *testing.T) {
 	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
 	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
-	a.handleMessages(runCtx, httptest.NewRecorder(), r, deps)
+	a.handleMessages(runCtx, dispatchCtx, httptest.NewRecorder(), r, deps)
 
 	select {
-	case dispatchCtx := <-gotCtx:
-		cancel() // core cancels runCtx at shutdown, before draining.
-		asserts.NoError(t, dispatchCtx.Err(), "dispatch ctx must not cancel with the run ctx")
+	case c := <-gotCtx:
+		cancelRun() // core cancels runCtx at shutdown, before draining.
+		asserts.NoError(t, c.Err(), "dispatch ctx must not cancel with the run ctx")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for dispatch")
 	}
@@ -913,27 +915,36 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
 }
 
-// TestDisconnect_CancelsDetachedDispatchCtx guards the leak fix: the detached
-// context that parents dispatch goroutines must be live while connected and
-// canceled once Disconnect has drained, so a handler blocked on ctx.Done() cannot
-// leak past shutdown.
-func TestDisconnect_CancelsDetachedDispatchCtx(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	a, err := newAdapter(validConfig())
-	asserts.NoError(t, err, "newAdapter")
-	deps := core.AdapterDeps{Done: func(error) {}, Disconnect: func() error { return nil }}
-
-	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+// TestDisconnect_CancelsDispatchContext guards the leak fix: Disconnect must cancel
+// the connection's detached dispatch context after the drain, so a handler blocked
+// on ctx.Done() cannot leak past shutdown. The connection's cancel is wired by hand
+// so the test controls the exact context the handler dispatches on.
+func TestDisconnect_CancelsDispatchContext(t *testing.T) {
+	a := testAdapter(t)
+	dispatchCtx, cancelDispatch := context.WithCancel(context.WithoutCancel(context.Background()))
+	// srv must be non-nil so Disconnect runs its teardown rather than early-returning;
+	// an unstarted server's Shutdown returns immediately.
 	a.mu.Lock()
-	dctx := a.detachedCtx
+	a.srv = &http.Server{}
+	a.detachedCancel = cancelDispatch
 	a.mu.Unlock()
-	asserts.NotNil(t, dctx, "detached dispatch ctx installed on Connect")
-	asserts.NoError(t, dctx.Err(), "detached ctx live while connected")
 
+	gotCtx := make(chan context.Context, 1)
+	deps := core.AdapterDeps{Dispatch: func(c context.Context, _ *core.Message) { gotCtx <- c }}
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	a.handleMessages(context.Background(), dispatchCtx, httptest.NewRecorder(), r, deps)
+
+	var c context.Context
+	select {
+	case c = <-gotCtx:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch")
+	}
+	asserts.NoError(t, c.Err(), "dispatch ctx live before Disconnect")
 	asserts.NoError(t, a.Disconnect(), "Disconnect")
-	asserts.ErrorIs(t, dctx.Err(), context.Canceled, "detached dispatch ctx canceled after drain")
+	asserts.ErrorIs(t, c.Err(), context.Canceled, "dispatch ctx canceled after drain")
 }
 
 func TestServe_ReportsUnexpectedError(t *testing.T) {
