@@ -475,11 +475,15 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 }
 
 // Attachments returns the files attached to m, mapped from the Activity's
-// attachments decoded at parse time. Teams contentUrls are generally fetchable
-// as-is, so this adapter implements no AttachmentResolver and rides the
-// passthrough in Bot.ResolveAttachmentURL. The error return is kept for the
-// core.Adapter contract but is always nil: the Activity is parsed once at
-// ingress, so there is nothing left here to fail.
+// attachments decoded at parse time. Teams delivers two shapes: an uploaded file
+// (contentType fileDownloadInfoType) whose content.downloadUrl is a pre-authorized,
+// directly-GETtable link — preferred here over the top-level contentUrl, which is a
+// SharePoint page needing Graph auth — and a direct attachment whose contentUrl is
+// used as-is. Inline-image contentUrls can require the bot's Bearer token to fetch;
+// that resolution is not yet implemented, so this adapter still implements no
+// AttachmentResolver and rides the passthrough in Bot.ResolveAttachmentURL. The
+// error return is kept for the core.Adapter contract but is always nil: the Activity
+// is parsed once at ingress, so there is nothing left here to fail.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	tm, ok := RawMessage(m)
 	if !ok || tm == nil {
@@ -490,12 +494,29 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	}
 	out := make([]core.Attachment, 0, len(tm.attachments))
 	for _, at := range tm.attachments {
-		out = append(out, core.Attachment{
-			IsImage: strings.HasPrefix(at.ContentType, "image/"),
-			URL:     at.ContentURL,
-		})
+		out = append(out, toAttachment(at))
 	}
 	return out, nil
+}
+
+// toAttachment maps one Bot Framework attachment to the platform-agnostic form. For
+// a Teams uploaded file (fileDownloadInfoType) with a content.downloadUrl, that
+// directly fetchable link is used and the image flag comes from content.fileType
+// (the wrapper contentType is the generic file-download-info type, not image/*).
+// Otherwise — a direct/inline attachment, or an upload whose content object was
+// omitted (a known Teams channel-upload quirk) — the contentUrl and its image/*
+// contentType are used as-is.
+func toAttachment(at activityAttachment) core.Attachment {
+	if at.ContentType == fileDownloadInfoType && at.Content.DownloadURL != "" {
+		return core.Attachment{
+			IsImage: imageFileExts[strings.ToLower(at.Content.FileType)],
+			URL:     at.Content.DownloadURL,
+		}
+	}
+	return core.Attachment{
+		IsImage: strings.HasPrefix(at.ContentType, "image/"),
+		URL:     at.ContentURL,
+	}
 }
 
 // recordConversation maps a conversation to its serviceUrl and the bot's own
@@ -889,10 +910,32 @@ type channelAccount struct {
 	Role string `json:"role"`
 }
 
+// fileDownloadInfoType is the contentType Teams uses for an uploaded file. Such an
+// attachment's content.downloadUrl is the directly fetchable link; its top-level
+// contentUrl is a SharePoint page that needs Graph auth.
+const fileDownloadInfoType = "application/vnd.microsoft.teams.file.download.info"
+
+// imageFileExts are the uploaded-file extensions classified as images, used when the
+// wrapper contentType is the generic file-download-info type rather than image/*.
+var imageFileExts = map[string]bool{
+	"png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true, "bmp": true,
+}
+
 type activityAttachment struct {
 	ContentType string `json:"contentType"`
 	ContentURL  string `json:"contentUrl"`
 	Name        string `json:"name"`
+	// Content is the FileDownloadInfo content object present on uploaded-file
+	// attachments; empty for direct/inline attachments.
+	Content attachmentContent `json:"content"`
+}
+
+// attachmentContent is the content object of a FileDownloadInfo attachment.
+// DownloadURL is the pre-authorized, directly-GETtable link for an uploaded file;
+// FileType is the file extension, used to classify images.
+type attachmentContent struct {
+	DownloadURL string `json:"downloadUrl"`
+	FileType    string `json:"fileType"`
 }
 
 // mentionEntity is a Bot Framework "mention" entity from an Activity's entities
