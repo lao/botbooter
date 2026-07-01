@@ -130,6 +130,12 @@ type Message struct {
 	Text           string
 	Timestamp      time.Time
 	Raw            json.RawMessage
+
+	// attachments is the Activity's attachments, decoded once at parse time so
+	// Attachments need not re-unmarshal the (up to maxRequestBytes) Raw body on
+	// every lookup. Unexported: callers reach attachment bytes via
+	// Bot.Attachments or the full Raw JSON, so this stays an internal detail.
+	attachments []activityAttachment
 }
 
 type cachedToken struct {
@@ -300,10 +306,20 @@ func (a *adapter) handleMessages(ctx context.Context, w http.ResponseWriter, r *
 	a.recordConversation(act.Conversation.ID, act.ServiceURL, act.Recipient, act.From)
 
 	msg := toMessage(&act, body)
+	// Decouple dispatch from the run context's cancellation. On shutdown core
+	// cancels runCtx *before* calling Disconnect, whose drainDispatch then waits
+	// for this in-flight handler; if the handler threaded ctx into its reply the
+	// send would fail with "context canceled" mid-drain, defeating the drain.
+	// WithoutCancel keeps the ctx's values but drops its deadline and
+	// cancellation, so an already acked message can finish its reply within the
+	// drain window. A stuck reply is then bounded only by the outbound HTTP
+	// client's timeout — 30s for the default client; set one on a custom
+	// cfg.HTTPClient — since ctx no longer aborts it.
+	dispatchCtx := context.WithoutCancel(ctx)
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
-		deps.Dispatch(ctx, msg)
+		deps.Dispatch(dispatchCtx, msg)
 	}()
 }
 
@@ -396,23 +412,21 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 }
 
 // Attachments returns the files attached to m, mapped from the Activity's
-// attachments. Teams contentUrls are generally fetchable as-is, so this adapter
-// implements no AttachmentResolver and rides the passthrough in
-// Bot.ResolveAttachmentURL.
+// attachments decoded at parse time. Teams contentUrls are generally fetchable
+// as-is, so this adapter implements no AttachmentResolver and rides the
+// passthrough in Bot.ResolveAttachmentURL. The error return is kept for the
+// core.Adapter contract but is always nil: the Activity is parsed once at
+// ingress, so there is nothing left here to fail.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	tm, ok := RawMessage(m)
 	if !ok || tm == nil {
 		return nil, nil
 	}
-	var act inboundActivity
-	if err := json.Unmarshal(tm.Raw, &act); err != nil {
-		return nil, err
-	}
-	if len(act.Attachments) == 0 {
+	if len(tm.attachments) == 0 {
 		return []core.Attachment{}, nil
 	}
-	out := make([]core.Attachment, 0, len(act.Attachments))
-	for _, at := range act.Attachments {
+	out := make([]core.Attachment, 0, len(tm.attachments))
+	for _, at := range tm.attachments {
 		out = append(out, core.Attachment{
 			IsImage: strings.HasPrefix(at.ContentType, "image/"),
 			URL:     at.ContentURL,
@@ -774,6 +788,7 @@ func toMessage(act *inboundActivity, raw json.RawMessage) *core.Message {
 		Text:           act.Text,
 		Timestamp:      ts,
 		Raw:            raw,
+		attachments:    act.Attachments,
 	}
 	return &core.Message{
 		ID:         act.ID,

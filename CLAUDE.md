@@ -35,6 +35,10 @@ The codebase is a **facade over internal packages**. Understanding the split is 
 
 **To add a platform:** add a `core.BotType` iota const + `String()` case in `internal/core`; create `internal/<platform>` implementing `core.Adapter`; add a public `<platform>/` package wrapping it with a typed `New` + accessors, **plus its `imports_test.go` SDK-ban guard and a present+absent entry in the root `isolation_deps_test.go`**; and re-export the new `BotType` const in `botbooter.go`. The lifecycle/dispatch in `core` need no changes.
 
+**Each adapter owns its own setup.** By design, `core` is deliberately thin — connect/run/disconnect and dispatch — and every adapter carries its *own* connection lifecycle rather than sharing a webhook/server helper. So the WhatsApp and Teams adapters repeat similar scaffolding (their own HTTP server, in-flight drain, server timeouts, `Addr`/`Path` normalization) on purpose: each adapter keeps full, independent control over its process and comms, and can diverge freely (auth, retry, framing) without a shared abstraction coupling them. **Prefer this duplication over hoisting a common `internal/webhook` layer** — the copies are cheap and the independence is the point. Only extract into `core` what is genuinely platform-agnostic and already shared (e.g. dispatch, attachment-URL resolution).
+
+The tradeoff of that duplication: **a bug or fix in one adapter's copied scaffolding probably applies to the siblings too — sweep them when you touch it.** (The shutdown-drain context handling in the webhook adapters is a case in point.) Duplication buys independence, not license to let the copies silently drift on shared correctness concerns.
+
 ### Dispatch (`core.Bot.dispatch`)
 
 Commands are regex patterns compiled once in `AddHandler` (invalid patterns return an error there). Matching is **first-match-wins**; no match falls through to the unknown-command handler if set. Middleware is composed inner-to-outer so registration order = execution order, each calling `next`. The whole dispatch is wrapped in a `recover` — a panicking handler is logged, not fatal.
