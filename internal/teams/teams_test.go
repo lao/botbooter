@@ -137,19 +137,7 @@ func testAdapter(t *testing.T, endorsements ...string) *adapter {
 // channelActivityJSON builds an inbound message Activity carrying the given
 // channelId (the field the endorsement check reads), for the endorsement tests.
 func channelActivityJSON(channelID string) string {
-	act := map[string]any{
-		"type":         "message",
-		"id":           "act-1",
-		"text":         "hi",
-		"serviceUrl":   allowedServiceURL,
-		"channelId":    channelID,
-		"timestamp":    "2026-06-30T12:00:00Z",
-		"from":         map[string]string{"id": "user-1", "name": "Ada"},
-		"recipient":    map[string]string{"id": "bot-1"},
-		"conversation": map[string]string{"id": "conv-1"},
-	}
-	b, _ := json.Marshal(act)
-	return string(b)
+	return activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1", channelID)
 }
 
 func captureDeps(got *[]*core.Message, done chan<- struct{}) core.AdapterDeps {
@@ -174,7 +162,9 @@ func awaitDispatch(t *testing.T, done <-chan struct{}, n int) {
 	}
 }
 
-func activityJSON(typ, text, serviceURL, fromID, recipientID, convID string) string {
+// activityJSON builds an inbound Activity JSON body. channelID is optional; pass one
+// to set the channelId field (used by the endorsement tests), omit it to leave it unset.
+func activityJSON(typ, text, serviceURL, fromID, recipientID, convID string, channelID ...string) string {
 	act := map[string]any{
 		"type":         typ,
 		"id":           "act-1",
@@ -184,6 +174,9 @@ func activityJSON(typ, text, serviceURL, fromID, recipientID, convID string) str
 		"from":         map[string]string{"id": fromID, "name": "Ada"},
 		"recipient":    map[string]string{"id": recipientID},
 		"conversation": map[string]string{"id": convID},
+	}
+	if len(channelID) > 0 {
+		act["channelId"] = channelID[0]
 	}
 	b, _ := json.Marshal(act)
 	return string(b)
@@ -411,6 +404,7 @@ func TestStripRecipientMention(t *testing.T) {
 			"tell <at>John</at> hi",
 		},
 		{"one removal per bot mention entity", "<at>Bot</at> hi <at>Bot</at>", []mentionEntity{mention(botID, "<at>Bot</at>")}, "hi <at>Bot</at>"},
+		{"id match but markup absent keeps spacing", "  hello  ", []mentionEntity{mention(botID, "<at>Bot</at>")}, "  hello  "},
 		{"non-mention entity ignored", "hi", []mentionEntity{{Type: "clientInfo", Text: "x", Mentioned: channelAccount{ID: botID}}}, "hi"},
 		{"empty entity text ignored", "hi", []mentionEntity{mention(botID, "")}, "hi"},
 	}
