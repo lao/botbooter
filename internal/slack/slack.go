@@ -3,9 +3,11 @@ package slack
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	slackapi "github.com/slack-go/slack"
@@ -15,9 +17,45 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
+// dispatchBuffer bounds the per-connection dispatch queue; a full queue applies
+// backpressure to the event pump rather than dropping events.
+const dispatchBuffer = 64
+
+// dispatchDrainTimeout bounds how long Disconnect waits for queued handlers to
+// finish before canceling stragglers. A var so tests can shrink it.
+var dispatchDrainTimeout = 5 * time.Second
+
 type adapter struct {
 	client *slackapi.Client
 	socket *socketmode.Client
+
+	// Per-connection dispatch state, guarded by mu. A dedicated dispatcher
+	// goroutine drains queue in order so a slow handler cannot freeze the event
+	// pump, and Disconnect waits on drained so in-flight work is not abandoned.
+	mu             sync.Mutex
+	queue          chan func()
+	drained        chan struct{}
+	detachedCancel context.CancelFunc
+}
+
+// startDispatcher launches the in-order dispatch goroutine for one connection
+// and records its handles for Disconnect to drain. cancel aborts the detached
+// dispatch context after the drain deadline.
+func (a *adapter) startDispatcher(cancel context.CancelFunc) chan<- func() {
+	queue := make(chan func(), dispatchBuffer)
+	drained := make(chan struct{})
+	a.mu.Lock()
+	a.queue = queue
+	a.drained = drained
+	a.detachedCancel = cancel
+	a.mu.Unlock()
+	go func() {
+		defer close(drained)
+		for fn := range queue {
+			fn()
+		}
+	}()
+	return queue
 }
 
 // New creates a Slack bot that connects via Socket Mode.
@@ -32,7 +70,16 @@ func New(appToken, botToken string) *core.Bot {
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
+	// A detached, cancelable context parents all dispatch: WithoutCancel drops
+	// runCtx's cancellation so a queued handler can finish during the shutdown
+	// drain, WithCancel lets Disconnect abort stragglers after the deadline.
+	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
+	queue := a.startDispatcher(detachedCancel)
+
+	// Event pump: Ack promptly and enqueue dispatch in order. Closing queue on
+	// exit lets the dispatcher drain the remainder and signal drained.
 	go func() {
+		defer close(queue)
 		for {
 			select {
 			case <-ctx.Done():
@@ -41,7 +88,15 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 				if !ok {
 					return
 				}
-				a.handleSocketEvent(ctx, evt, deps)
+				fn := a.prepareDispatch(detachedCtx, evt, deps)
+				if fn == nil {
+					continue
+				}
+				select {
+				case queue <- fn:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -53,10 +108,39 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// Disconnect is a no-op: the loop is driven by the run context, so canceling it
-// is what stops the connection.
+// Disconnect drains queued dispatch before returning so an acked event is not
+// abandoned at shutdown. core has already canceled runCtx, so the pump is
+// exiting and will close the queue; the dispatcher then finishes the remaining
+// handlers on the detached context and closes drained.
 func (a *adapter) Disconnect() error {
-	return nil
+	a.mu.Lock()
+	drained := a.drained
+	cancel := a.detachedCancel
+	a.mu.Unlock()
+	if drained == nil {
+		return nil
+	}
+
+	var err error
+	select {
+	case <-drained:
+	case <-time.After(dispatchDrainTimeout):
+		err = fmt.Errorf("slack: dispatch drain timed out")
+	}
+	if cancel != nil {
+		cancel()
+	}
+
+	// Clear the fields only if a reconnect has not installed a newer dispatcher
+	// (identity-compare on drained), mirroring the webhook siblings.
+	a.mu.Lock()
+	if a.drained == drained {
+		a.queue = nil
+		a.drained = nil
+		a.detachedCancel = nil
+	}
+	a.mu.Unlock()
+	return err
 }
 
 // Send posts text to channelID via the Web API.
@@ -163,22 +247,25 @@ func parseSlackTimestamp(ts string) time.Time {
 	return time.Unix(s, nsec).UTC()
 }
 
-func (a *adapter) handleSocketEvent(ctx context.Context, evt socketmode.Event, deps core.AdapterDeps) {
-	switch evt.Type {
-	case socketmode.EventTypeEventsAPI:
-		payload, ok := evt.Data.(slackevents.EventsAPIEvent)
-		if !ok {
-			return
-		}
-		if evt.Request != nil {
-			a.socket.Ack(*evt.Request)
-		}
-		a.handleEventsAPI(ctx, payload, deps)
+// prepareDispatch acknowledges evt on the event-pump goroutine and returns a
+// closure that dispatches it, or nil when evt carries nothing to dispatch. Ack
+// stays on the pump so it is never delayed behind queued handler work.
+func (a *adapter) prepareDispatch(ctx context.Context, evt socketmode.Event, deps core.AdapterDeps) func() {
+	if evt.Type != socketmode.EventTypeEventsAPI {
+		return nil
 	}
+	payload, ok := evt.Data.(slackevents.EventsAPIEvent)
+	if !ok {
+		return nil
+	}
+	if evt.Request != nil {
+		a.socket.Ack(*evt.Request)
+	}
+	return func() { a.handleEventsAPI(ctx, payload, deps) }
 }
 
 func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent, deps core.AdapterDeps) {
-	if isBotMessage(e) {
+	if shouldSkipEvent(e) {
 		return
 	}
 
@@ -187,7 +274,10 @@ func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEv
 	}
 }
 
-func isBotMessage(event slackevents.EventsAPIEvent) bool {
+// shouldSkipEvent reports whether an inbound event must not be dispatched: it
+// drops messages from bots (loop prevention) and messages with no text and no
+// files (nothing actionable — e.g. edits, joins).
+func shouldSkipEvent(event slackevents.EventsAPIEvent) bool {
 	switch ev := event.InnerEvent.Data.(type) {
 	case *slackevents.MessageEvent:
 		return ev.BotID != "" || ev.SubType == "bot_message" || (ev.Text == "" && len(ev.Files) == 0)

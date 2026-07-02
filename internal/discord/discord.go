@@ -3,6 +3,7 @@ package discord
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
@@ -145,10 +146,20 @@ func attachmentsFromMessage(m *discordgo.Message) []core.Attachment {
 	attachments := make([]core.Attachment, 0, len(m.Attachments))
 	for _, attachment := range m.Attachments {
 		attachments = append(attachments, core.Attachment{
-			IsImage:   attachment.Width > 0 && attachment.Height > 0,
+			IsImage:   isImageAttachment(attachment),
 			URL:       attachment.URL,
 			ExtraData: attachment,
 		})
 	}
 	return attachments
+}
+
+// isImageAttachment reports whether a Discord attachment is an image. Discord
+// sets Width/Height on videos and GIFs too, so prefer the MIME ContentType and
+// fall back to dimensions only when Discord omits it.
+func isImageAttachment(a *discordgo.MessageAttachment) bool {
+	if a.ContentType != "" {
+		return strings.HasPrefix(a.ContentType, "image/")
+	}
+	return a.Width > 0 && a.Height > 0
 }

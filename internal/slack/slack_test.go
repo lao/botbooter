@@ -33,7 +33,7 @@ func TestNew(t *testing.T) {
 	asserts.NotNil(t, SocketClient(bot), "Slack socket client should be initialized")
 }
 
-func TestIsBotMessage(t *testing.T) {
+func TestShouldSkipEvent(t *testing.T) {
 	tests := []struct {
 		name                 string
 		event                slackevents.EventsAPIEvent
@@ -113,7 +113,7 @@ func TestIsBotMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			asserts.Equal(t, isBotMessage(tt.event), tt.expectedIsBotMessage, "isBotMessage result")
+			asserts.Equal(t, shouldSkipEvent(tt.event), tt.expectedIsBotMessage, "shouldSkipEvent result")
 		})
 	}
 }
@@ -240,7 +240,9 @@ func TestHandleSocketEvent(t *testing.T) {
 			Request: &socketmode.Request{EnvelopeID: "test-envelope"},
 		}
 
-		a.handleSocketEvent(context.Background(), evt, captureDeps(&got))
+		if fn := a.prepareDispatch(context.Background(), evt, captureDeps(&got)); fn != nil {
+			fn()
+		}
 
 		asserts.NotNil(t, got, "Handler should be called for valid message event")
 	})
@@ -255,7 +257,9 @@ func TestHandleSocketEvent(t *testing.T) {
 			Request: &socketmode.Request{EnvelopeID: "test-envelope"},
 		}
 
-		a.handleSocketEvent(context.Background(), evt, captureDeps(&got))
+		if fn := a.prepareDispatch(context.Background(), evt, captureDeps(&got)); fn != nil {
+			fn()
+		}
 
 		asserts.True(t, got == nil, "Handler should not be called for invalid event data")
 	})
@@ -266,7 +270,9 @@ func TestHandleSocketEvent(t *testing.T) {
 
 		evt := socketmode.Event{Type: socketmode.EventTypeConnecting, Data: nil}
 
-		a.handleSocketEvent(context.Background(), evt, captureDeps(&got))
+		if fn := a.prepareDispatch(context.Background(), evt, captureDeps(&got)); fn != nil {
+			fn()
+		}
 
 		asserts.True(t, got == nil, "Handler should not be called for non-EventsAPI event types")
 	})
