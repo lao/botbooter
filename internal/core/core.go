@@ -256,14 +256,27 @@ func (b *Bot) Connect(ctx context.Context) error {
 // connection the adapter is disconnected; if c has been superseded by a
 // reconnect, only c's own runCtx/runDone are settled and the adapter — now
 // owned by the newer connection — is left untouched.
+//
+// b.conn is cleared only AFTER teardown returns, so a Connect racing a
+// slow adapter Disconnect (drains can take seconds) gets ErrAlreadyConnected
+// instead of starting a second live session on the shared adapter. Concurrent
+// teardowns of the same connection serialize on its sync.Once: the losers
+// block inside teardown until the winner's adapter Disconnect finishes.
 func (b *Bot) disconnectConn(c *connection) error {
 	b.mu.Lock()
 	current := b.conn == c
-	if current {
-		b.conn = nil
-	}
 	b.mu.Unlock()
-	return c.teardown(current)
+
+	err := c.teardown(current)
+
+	if current {
+		b.mu.Lock()
+		if b.conn == c {
+			b.conn = nil
+		}
+		b.mu.Unlock()
+	}
+	return err
 }
 
 // Disconnect tears down the active connection: it cancels the run context and
@@ -272,17 +285,15 @@ func (b *Bot) disconnectConn(c *connection) error {
 func (b *Bot) Disconnect() error {
 	b.mu.Lock()
 	c := b.conn
-	b.conn = nil
 	b.mu.Unlock()
 
-	if c != nil {
-		return c.teardown(true)
+	if c == nil {
+		if b.adapter == nil {
+			return ErrUnknownBotType
+		}
+		return nil
 	}
-
-	if b.adapter == nil {
-		return ErrUnknownBotType
-	}
-	return nil
+	return b.disconnectConn(c)
 }
 
 // Run connects the Bot and blocks until ctx is canceled, the event loop ends,

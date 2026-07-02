@@ -178,3 +178,45 @@ func TestLifecycle_ReconnectAfterDisconnect(t *testing.T) {
 	asserts.NoError(t, b.Connect(context.Background()), "connect 2")
 	asserts.NoError(t, b.Disconnect(), "disconnect 2")
 }
+
+// slowDisconnectAdapter blocks inside adapter.Disconnect until release is
+// closed, modeling the webhook adapters' multi-second shutdown drains.
+type slowDisconnectAdapter struct {
+	enteredOnce sync.Once
+	entered     chan struct{} // closed when Disconnect is first entered
+	release     chan struct{} // Disconnect blocks until this is closed
+}
+
+func (a *slowDisconnectAdapter) Connect(ctx context.Context, deps AdapterDeps) error { return nil }
+
+func (a *slowDisconnectAdapter) Disconnect() error {
+	a.enteredOnce.Do(func() { close(a.entered) })
+	<-a.release
+	return nil
+}
+
+func (a *slowDisconnectAdapter) Send(ctx context.Context, channelID, text string) error { return nil }
+
+func (a *slowDisconnectAdapter) Attachments(m *Message) ([]Attachment, error) { return nil, nil }
+
+// A slow adapter Disconnect (webhook drains run for seconds) must not open a
+// window where a concurrent Connect starts a second live session on the shared
+// adapter: until the teardown completes, Connect reports ErrAlreadyConnected,
+// and a reconnect succeeds only once Disconnect has returned.
+func TestLifecycle_ConnectDuringSlowDisconnectIsRejected(t *testing.T) {
+	a := &slowDisconnectAdapter{entered: make(chan struct{}), release: make(chan struct{})}
+	b := New(SlackBotType, a)
+	asserts.NoError(t, b.Connect(context.Background()), "connect 1")
+
+	discErr := make(chan error, 1)
+	go func() { discErr <- b.Disconnect() }()
+	<-a.entered // adapter.Disconnect is now in-flight
+
+	asserts.ErrorIs(t, b.Connect(context.Background()), ErrAlreadyConnected,
+		"Connect during an in-flight Disconnect")
+
+	close(a.release)
+	asserts.NoError(t, <-discErr, "disconnect 1")
+	asserts.NoError(t, b.Connect(context.Background()), "reconnect after teardown completed")
+	asserts.NoError(t, b.Disconnect(), "disconnect 2")
+}
