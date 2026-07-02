@@ -24,7 +24,7 @@ func requestedBotType(args []string) string {
 func newBot(botType string) (*botbooter.Bot, error) {
 	switch botType {
 	case "slack":
-		return slack.New(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN")), nil
+		return slack.New(slack.Config{AppToken: os.Getenv("SLACK_APP_TOKEN"), BotToken: os.Getenv("SLACK_BOT_TOKEN")})
 	case "discord":
 		return discord.New(os.Getenv("DISCORD_BOT_TOKEN"))
 	case "telegram":

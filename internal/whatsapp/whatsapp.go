@@ -108,6 +108,9 @@ type adapter struct {
 
 	mu  sync.Mutex
 	srv *http.Server
+	// boundAddr is the listener's actual address, resolved after net.Listen so a
+	// cfg.Addr of ":0" is recoverable via Addr. Set with srv, cleared with it.
+	boundAddr string
 	// detachedCancel aborts the current connection's dispatch goroutines. Each
 	// Connect derives one detached, cancelable context — context.WithCancel over
 	// context.WithoutCancel(runCtx) — and threads the context itself through the
@@ -117,6 +120,18 @@ type adapter struct {
 	// clears it only when a reconnect has not already installed a newer connection.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
+}
+
+// Addr returns the address the bot's webhook listener is bound to (host:port),
+// or "" if b is not a WhatsApp bot or is not currently connected. It lets a
+// caller that passed cfg.Addr ":0" discover the OS-assigned port.
+func Addr(b *core.Bot) string {
+	if a, ok := core.AdapterAs[*adapter](b); ok {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.boundAddr
+	}
+	return ""
 }
 
 // New creates a WhatsApp bot backed by the Meta Cloud API. It returns
@@ -192,6 +207,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 
 	a.mu.Lock()
 	a.srv = srv
+	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
 	a.mu.Unlock()
 
@@ -302,6 +318,7 @@ func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	if a.srv == srv {
 		a.srv = nil
+		a.boundAddr = ""
 		a.detachedCancel = nil
 	}
 	a.mu.Unlock()

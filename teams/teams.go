@@ -37,3 +37,10 @@ func New(cfg Config) (*botbooter.Bot, error) {
 func RawMessage(m *botbooter.Message) (*Message, bool) {
 	return teamsint.RawMessage(m)
 }
+
+// Addr returns the address b's webhook listener is bound to (host:port), or ""
+// if b is not a Teams bot or is not connected. Use it to recover the OS-assigned
+// port after passing cfg.Addr ":0".
+func Addr(b *botbooter.Bot) string {
+	return teamsint.Addr(b)
+}

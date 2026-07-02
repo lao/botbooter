@@ -71,6 +71,9 @@ type adapter struct {
 
 	mu  sync.Mutex
 	srv *http.Server
+	// boundAddr is the listener's actual address, resolved after net.Listen so a
+	// cfg.Addr of ":0" is recoverable via Addr. Set with srv, cleared with it.
+	boundAddr string
 	// detachedCancel aborts the current connection's dispatch goroutines. Connect
 	// derives one cancelable context per connection (WithCancel over
 	// WithoutCancel(runCtx)) and passes it through the handler closure, so only the
@@ -104,6 +107,18 @@ func New(cfg Config) (*core.Bot, error) {
 		return nil, err
 	}
 	return core.New(core.TeamsBotType, a), nil
+}
+
+// Addr returns the address the bot's webhook listener is bound to (host:port),
+// or "" if b is not a Teams bot or is not currently connected. It lets a caller
+// that passed cfg.Addr ":0" discover the OS-assigned port.
+func Addr(b *core.Bot) string {
+	if a, ok := core.AdapterAs[*adapter](b); ok {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.boundAddr
+	}
+	return ""
 }
 
 func newAdapter(cfg Config) (*adapter, error) {

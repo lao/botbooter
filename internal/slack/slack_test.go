@@ -25,12 +25,21 @@ func captureDeps(got **core.Message) core.AdapterDeps {
 }
 
 func TestNew(t *testing.T) {
-	bot := New("app_token", "bot_token")
+	bot, err := New(Config{AppToken: "app_token", BotToken: "bot_token"})
 
+	asserts.NoError(t, err, "New with full config")
 	asserts.NotNil(t, bot, "Bot should be initialized")
 	asserts.Equal(t, bot.BotType, core.SlackBotType, "Bot type should be Slack")
 	asserts.NotNil(t, Client(bot), "Slack client should be initialized")
 	asserts.NotNil(t, SocketClient(bot), "Slack socket client should be initialized")
+}
+
+func TestNew_MissingConfig(t *testing.T) {
+	_, err := New(Config{AppToken: "app_token"})
+	asserts.ErrorIs(t, err, ErrMissingConfig, "missing BotToken should return ErrMissingConfig")
+
+	_, err = New(Config{BotToken: "bot_token"})
+	asserts.ErrorIs(t, err, ErrMissingConfig, "missing AppToken should return ErrMissingConfig")
 }
 
 func TestShouldSkipEvent(t *testing.T) {
@@ -323,7 +332,7 @@ func TestParseSlackTimestamp(t *testing.T) {
 }
 
 func TestClientAccessors(t *testing.T) {
-	bot := New("xapp-test", "xoxb-test")
+	bot, _ := New(Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 	asserts.NotNil(t, Client(bot), "Client accessor returns the web client")
 	asserts.NotNil(t, SocketClient(bot), "SocketClient accessor returns the socket client")
 }

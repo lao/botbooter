@@ -70,14 +70,11 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 
 	a.mu.Lock()
 	a.srv = srv
+	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
 	a.mu.Unlock()
 
 	go serve(srv, ln, deps.Done)
-
-	// Warm the JWKS cache so the first inbound request doesn't pay the cold
-	// two-hop fetch, which can exceed WriteTimeout.
-	go a.prefetchKeys(ctx)
 
 	// Tear down when the run context is canceled.
 	go func() {
@@ -190,6 +187,7 @@ func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	if a.srv == srv {
 		a.srv = nil
+		a.boundAddr = ""
 		a.detachedCancel = nil
 	}
 	a.mu.Unlock()
@@ -221,7 +219,8 @@ func (a *adapter) drainDispatch(ctx context.Context) {
 // with FIFO eviction so a public endpoint cannot grow the map without limit.
 // Eviction is by first-seen: replies happen in the same dispatch as the recording,
 // so request/response bots always resolve. A much-later proactive send could find
-// an evicted conversation, and Send then returns a clear error.
+// an evicted conversation, and Send then returns [ErrUnknownConversation] so the
+// caller can distinguish it from a transport failure.
 func (a *adapter) recordConversation(id, serviceURL string, bot channelAccount) {
 	if id == "" || serviceURL == "" {
 		return

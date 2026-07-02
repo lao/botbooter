@@ -136,7 +136,7 @@ func TestBot_Disconnect(t *testing.T) {
 	})
 
 	t.Run("SlackBot", func(t *testing.T) {
-		bot := slack.New("xapp-test", "xoxb-test")
+		bot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 
 		err := bot.Disconnect()
 
@@ -161,7 +161,7 @@ func TestBot_SendMessage(t *testing.T) {
 		if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
 			t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; SendMessage performs a real Slack Web API call")
 		}
-		bot := slack.New("xapp-test", "xoxb-test")
+		bot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 
 		err := bot.SendMessage("channel123", "test message")
 
@@ -210,7 +210,7 @@ func TestBot_GetAttachments(t *testing.T) {
 	})
 
 	t.Run("SlackBot", func(t *testing.T) {
-		bot := slack.New("xapp-test", "xoxb-test")
+		bot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 		message := &botbooter.Message{
 			Raw: &slackevents.MessageEvent{
 				Files: []slackevents.File{
@@ -307,7 +307,7 @@ func TestConnectSlack_StartsAndStops(t *testing.T) {
 	if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
 		t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; performs real Slack network I/O via RunContext")
 	}
-	bot := slack.New("xapp-test", "xoxb-test")
+	bot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 	ctx, cancel := context.WithCancel(context.Background())
 
 	asserts.NoError(t, bot.Connect(ctx), "Connect Slack should start the loop")
@@ -424,7 +424,7 @@ func TestRawAccessors(t *testing.T) {
 }
 
 func TestSessionAccessors(t *testing.T) {
-	slackBot := slack.New("xapp-test", "xoxb-test")
+	slackBot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 	asserts.NotNil(t, slack.Client(slackBot), "SlackClient")
 	asserts.NotNil(t, slack.SocketClient(slackBot), "SlackSocketClient")
 

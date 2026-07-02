@@ -12,9 +12,16 @@ import (
 	slackint "github.com/lao/botbooter/internal/slack"
 )
 
-// New creates a Slack bot that connects via Socket Mode.
-func New(appToken, botToken string) *botbooter.Bot {
-	return slackint.New(appToken, botToken)
+// Config configures a Slack (Socket Mode) bot.
+type Config = slackint.Config
+
+// ErrMissingConfig is returned by [New] when a required [Config] field is empty.
+var ErrMissingConfig = slackint.ErrMissingConfig
+
+// New creates a Slack bot that connects via Socket Mode. It returns
+// [ErrMissingConfig] if a required config field is missing.
+func New(cfg Config) (*botbooter.Bot, error) {
+	return slackint.New(cfg)
 }
 
 // RawEvent returns the raw Slack message event carried on m, reporting whether m

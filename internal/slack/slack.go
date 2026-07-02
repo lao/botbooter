@@ -3,6 +3,7 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -58,15 +59,30 @@ func (a *adapter) startDispatcher(cancel context.CancelFunc) chan<- func() {
 	return queue
 }
 
-// New creates a Slack bot that connects via Socket Mode.
-func New(appToken, botToken string) *core.Bot {
+// Config configures a Slack bot connecting via Socket Mode.
+type Config struct {
+	// AppToken is the app-level token (starts "xapp-") that authorizes Socket Mode.
+	AppToken string
+	// BotToken is the bot-user OAuth token (starts "xoxb-") for Web API calls.
+	BotToken string
+}
+
+// ErrMissingConfig is returned by New when a required Config field is empty.
+var ErrMissingConfig = errors.New("slack: missing required config field")
+
+// New creates a Slack bot that connects via Socket Mode. It returns
+// ErrMissingConfig if a required Config field is missing.
+func New(cfg Config) (*core.Bot, error) {
+	if cfg.AppToken == "" || cfg.BotToken == "" {
+		return nil, fmt.Errorf("%w: AppToken and BotToken are required", ErrMissingConfig)
+	}
 	client := slackapi.New(
-		botToken,
-		slackapi.OptionAppLevelToken(appToken),
+		cfg.BotToken,
+		slackapi.OptionAppLevelToken(cfg.AppToken),
 	)
 	socket := socketmode.New(client)
 
-	return core.New(core.SlackBotType, &adapter{client: client, socket: socket})
+	return core.New(core.SlackBotType, &adapter{client: client, socket: socket}), nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {

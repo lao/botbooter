@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"net/url"
 	"slices"
@@ -41,6 +40,10 @@ const (
 	// retired signing key trusted forever. The window past jwksMaxAge tolerates a
 	// transient outage while still honoring the retirement the doc promises.
 	jwksHardMaxAge = 2 * jwksMaxAge
+	// jwksFetchTimeout bounds a cold JWKS resolution (metadata + keys, two hops)
+	// so it stays under the server's WriteTimeout and a stuck endpoint can't hang
+	// an inbound request past its response deadline.
+	jwksFetchTimeout = 15 * time.Second
 )
 
 // allowedServiceHosts / allowedServiceHostSuffixes are the only hosts replies may
@@ -212,26 +215,14 @@ func (a *adapter) lookupCached(kid string) (*jwksKey, bool, error) {
 	return k, false, nil
 }
 
-// prefetchKeys warms the JWKS cache so the first inbound request does not pay the
-// two-hop cold fetch (which can exceed the server's WriteTimeout). Best-effort:
-// a failure is logged and the normal on-demand fetch in publicKey still runs.
-func (a *adapter) prefetchKeys(ctx context.Context) {
-	keys, err := a.fetchJWKS(ctx)
-	if err != nil {
-		log.Printf("teams: JWKS prefetch failed (will fetch on demand): %v", err)
-		return
-	}
-	now := time.Now()
-	a.mu.Lock()
-	a.keys = keys
-	a.keysFreshAt = now
-	a.keysAt = now
-	a.mu.Unlock()
-}
-
 // fetchJWKS resolves the Bot Connector OpenID metadata to its jwks_uri and decodes
 // the RSA signing keys (with their channel endorsements) into a kid-indexed map.
 func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*jwksKey, error) {
+	// Bound the two-hop resolution independently of the caller's context so a
+	// hung endpoint can't outlast the server's WriteTimeout on an inbound request.
+	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
+	defer cancel()
+
 	var meta struct {
 		JWKSURI string `json:"jwks_uri"`
 	}
