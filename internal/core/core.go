@@ -96,12 +96,9 @@ type Command struct {
 }
 
 func (c *Command) match(content string) bool {
-	if c.re != nil {
-		return c.re.MatchString(content)
-	}
-	// Fallback for commands constructed without AddHandler.
-	matched, err := regexp.MatchString(c.Pattern, content)
-	return err == nil && matched
+	// re is compiled once in AddHandler, the only path that appends to
+	// Bot.commands, so it is always non-nil for a dispatched command.
+	return c.re.MatchString(content)
 }
 
 // Attachment is a platform-agnostic file attached to a message.
@@ -135,7 +132,11 @@ type AdapterDeps struct {
 	Disconnect func() error
 }
 
-// Bot is the platform-agnostic chat bot. A Bot is safe for concurrent use.
+// Bot is the platform-agnostic chat bot. A Bot is safe for concurrent use once
+// its handlers and middleware are registered: register them (AddHandler,
+// AddMiddleware, SetUnknownCommandHandler) before Connect, then call
+// Connect/Run/Disconnect/Send concurrently as needed. Registering after Connect
+// races the dispatch goroutine.
 type Bot struct {
 	BotType BotType
 
@@ -145,10 +146,39 @@ type Bot struct {
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan error
-	stop   func() error
+	mu   sync.Mutex
+	conn *connection
+}
+
+// connection holds a single connection's lifecycle state. Connect creates a
+// fresh one and Disconnect drops it, so nothing from a prior connection can
+// leak into a successor — the crux of surviving disconnect→reconnect races.
+type connection struct {
+	cancel  context.CancelFunc
+	done    chan error    // adapter reports event-loop termination here
+	runDone chan struct{} // closed exactly once when this connection tears down
+	once    sync.Once
+	adapter Adapter
+}
+
+// teardown cancels the run context and closes runDone exactly once. It runs the
+// adapter's Disconnect only when disconnectAdapter is true; a superseded
+// connection passes false so a lingering goroutine can never disconnect the
+// shared adapter that a newer connection now owns.
+func (c *connection) teardown(disconnectAdapter bool) error {
+	c.cancel()
+	var err error
+	c.once.Do(func() {
+		close(c.runDone)
+		if disconnectAdapter {
+			if c.adapter == nil {
+				err = ErrUnknownBotType
+				return
+			}
+			err = c.adapter.Disconnect()
+		}
+	})
+	return err
 }
 
 // New creates a Bot of the given type backed by adapter.
@@ -198,56 +228,63 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 // if the Bot has no adapter, or any error from the adapter's own Connect.
 func (b *Bot) Connect(ctx context.Context) error {
 	b.mu.Lock()
-	if b.cancel != nil {
+	if b.conn != nil {
 		b.mu.Unlock()
 		return ErrAlreadyConnected
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	b.cancel = cancel
-	b.done = make(chan error, 1)
-
-	// Each connection gets its own stop closure guarded by a fresh sync.Once.
-	// A reconnect installs a new closure rather than resetting a shared Once,
-	// so a lingering disconnect goroutine from a previous connection can never
-	// race a Once that the new connection has reset.
-	var once sync.Once
-	b.stop = func() error {
-		var err error
-		once.Do(func() {
-			if b.adapter == nil {
-				err = ErrUnknownBotType
-				return
-			}
-			err = b.adapter.Disconnect()
-		})
-		return err
-	}
-	b.mu.Unlock()
-
 	if b.adapter == nil {
-		cancel()
-		b.clearConnection()
+		b.mu.Unlock()
 		return ErrUnknownBotType
 	}
+	runCtx, cancel := context.WithCancel(ctx)
+	c := &connection{
+		cancel:  cancel,
+		done:    make(chan error, 1),
+		runDone: make(chan struct{}),
+		adapter: b.adapter,
+	}
+	b.conn = c
+	b.mu.Unlock()
 
+	// The callbacks capture THIS connection (c), never a bot field read late, so
+	// a lingering goroutine from a prior connection writes into its own dead
+	// channel and disconnectConn skips the shared adapter for it.
 	deps := AdapterDeps{
 		Dispatch:   b.dispatch,
-		Done:       func(err error) { b.done <- err },
-		Disconnect: b.Disconnect,
+		Done:       func(err error) { c.done <- err },
+		Disconnect: func() error { return b.disconnectConn(c) },
 	}
 	if err := b.adapter.Connect(runCtx, deps); err != nil {
-		cancel()
-		b.clearConnection()
+		_ = b.disconnectConn(c)
 		return err
+	}
+
+	// Close the window between releasing b.mu and adapter.Connect returning: a
+	// concurrent Disconnect may have already superseded this connection. If so,
+	// disconnectConn(c) ran teardown(false) (no adapter touch), so the resources
+	// adapter.Connect just opened would leak — disconnect the adapter directly.
+	b.mu.Lock()
+	current := b.conn == c
+	b.mu.Unlock()
+	if !current {
+		_ = c.adapter.Disconnect()
 	}
 	return nil
 }
 
-func (b *Bot) clearConnection() {
+// disconnectConn tears down connection c. If c is still the installed
+// connection it is popped and the adapter is disconnected; if c has already
+// been superseded (a reconnect installed a newer connection) the adapter is
+// left untouched — a newer connection owns it — and only c's own runCtx/runDone
+// are settled for any Run still watching c.
+func (b *Bot) disconnectConn(c *connection) error {
 	b.mu.Lock()
-	b.cancel = nil
-	b.stop = nil
+	current := b.conn == c
+	if current {
+		b.conn = nil
+	}
 	b.mu.Unlock()
+	return c.teardown(current)
 }
 
 // Disconnect tears down the active connection: it cancels the run context and
@@ -255,17 +292,12 @@ func (b *Bot) clearConnection() {
 // connected, returning ErrUnknownBotType only if the Bot has no adapter.
 func (b *Bot) Disconnect() error {
 	b.mu.Lock()
-	cancel := b.cancel
-	b.cancel = nil
-	stop := b.stop
-	b.stop = nil
+	c := b.conn
+	b.conn = nil
 	b.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
 
-	if stop != nil {
-		return stop()
+	if c != nil {
+		return c.teardown(true)
 	}
 
 	// Not connected: nothing to tear down. Still validate the bot type so a
@@ -276,22 +308,29 @@ func (b *Bot) Disconnect() error {
 	return nil
 }
 
-// Run connects the Bot and blocks until ctx is canceled or the event loop ends,
-// then disconnects. A clean shutdown via ctx cancellation returns nil rather
-// than ctx.Err(), so callers can safely do log.Fatal(bot.Run(ctx)).
+// Run connects the Bot and blocks until ctx is canceled, the event loop ends,
+// or Disconnect is called from elsewhere, then disconnects. A clean shutdown
+// (ctx cancellation or a local Disconnect) returns nil rather than ctx.Err(),
+// so callers can safely do log.Fatal(bot.Run(ctx)).
 func (b *Bot) Run(ctx context.Context) error {
 	if err := b.Connect(ctx); err != nil {
 		return err
 	}
 
 	b.mu.Lock()
-	done := b.done
+	c := b.conn
 	b.mu.Unlock()
+	// A concurrent Disconnect between Connect and here already tore the
+	// connection down; nothing to block on.
+	if c == nil {
+		return nil
+	}
 
 	var loopErr error
 	select {
 	case <-ctx.Done():
-	case loopErr = <-done:
+	case <-c.runDone: // a Disconnect from another goroutine woke us
+	case loopErr = <-c.done:
 	}
 
 	disconnectErr := b.Disconnect()
@@ -301,6 +340,12 @@ func (b *Bot) Run(ctx context.Context) error {
 	// context.Canceled; don't surface that to callers, which commonly do
 	// log.Fatal(bot.Run(ctx)) and would exit non-zero on a clean Ctrl-C.
 	if ctx.Err() != nil && errors.Is(loopErr, ctx.Err()) {
+		loopErr = nil
+	}
+	// A local Disconnect cancels runCtx without canceling ctx; the loop reports
+	// that as context.Canceled too. Strip it — a deliberate Disconnect is a
+	// clean shutdown, not an error.
+	if errors.Is(loopErr, context.Canceled) {
 		loopErr = nil
 	}
 
@@ -321,7 +366,9 @@ func (b *Bot) Start() error {
 	return b.Run(ctx)
 }
 
-// SendMessage sends text to channelID using a background context.
+// SendMessage sends text to channelID using a background context. Prefer
+// SendMessageContext from within a handler so the send honors shutdown and
+// cancellation; SendMessage's background context outlives Run's teardown.
 func (b *Bot) SendMessage(channelID, text string) error {
 	return b.SendMessageContext(context.Background(), channelID, text)
 }
