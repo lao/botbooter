@@ -1,6 +1,6 @@
 module github.com/lao/botbooter
 
-go 1.23
+go 1.25
 
 require (
 	github.com/bwmarrin/discordgo v0.27.1
