@@ -314,6 +314,26 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
 }
 
+func TestAddr_ExposesBoundListener(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a, err := newAdapter(validConfig()) // cfg.Addr is 127.0.0.1:0
+	asserts.NoError(t, err, "newAdapter")
+	b := core.New(core.TeamsBotType, a)
+	deps := core.AdapterDeps{Done: func(error) {}, Disconnect: func() error { return nil }}
+
+	asserts.Equal(t, Addr(b), "", "no bound address before Connect")
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+
+	_, port, err := net.SplitHostPort(Addr(b))
+	asserts.NoError(t, err, "Addr returns host:port after Connect")
+	asserts.True(t, port != "" && port != "0", "OS-assigned port is resolved from :0")
+
+	asserts.NoError(t, a.Disconnect(), "Disconnect")
+	asserts.Equal(t, Addr(b), "", "bound address cleared after Disconnect")
+}
+
 // TestDisconnect_CancelsDispatchContext guards the leak fix: Disconnect must cancel
 // the connection's detached dispatch context after the drain, so a handler blocked
 // on ctx.Done() cannot leak past shutdown. The connection's cancel is wired by hand

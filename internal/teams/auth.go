@@ -201,13 +201,17 @@ func (a *adapter) lookupCached(kid string) (*jwksKey, bool, error) {
 	a.mu.Lock()
 	k := a.keys[kid]
 	fresh := time.Since(a.keysFreshAt) < jwksMaxAge
+	withinHardCeiling := time.Since(a.keysFreshAt) < jwksHardMaxAge
 	rateLimited := time.Since(a.keysAt) < jwksMinRefreshInterval
 	a.mu.Unlock()
 	if k != nil && fresh {
 		return k, true, nil
 	}
 	if rateLimited {
-		if k != nil {
+		// The rate-limit fast path serves most requests during an outage, so it
+		// must honor jwksHardMaxAge too — otherwise a retired key would be served
+		// indefinitely between the once-a-minute fetch attempts.
+		if k != nil && withinHardCeiling {
 			return k, true, nil
 		}
 		return nil, true, fmt.Errorf("teams: unknown signing key %q", kid)
