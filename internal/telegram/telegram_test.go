@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -365,17 +366,17 @@ func TestAttachmentsFromMessage(t *testing.T) {
 var _ core.AttachmentResolver = (*adapter)(nil)
 
 func TestFileIDOf(t *testing.T) {
-	asserts.Equal(t, fileIDOf(models.PhotoSize{FileID: "p"}), "p", "photo size value yields its FileID")
-	asserts.Equal(t, fileIDOf(&models.PhotoSize{FileID: "pp"}), "pp", "photo size pointer also yields its FileID")
-	asserts.Equal(t, fileIDOf(&models.Document{FileID: "d"}), "d", "document pointer yields its FileID")
-	asserts.Equal(t, fileIDOf((*models.Document)(nil)), "", "nil document pointer is guarded")
-	asserts.Equal(t, fileIDOf(nil), "", "nil ExtraData yields no FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), models.PhotoSize{FileID: "p"}), "p", "photo size value yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), &models.PhotoSize{FileID: "pp"}), "pp", "photo size pointer also yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), &models.Document{FileID: "d"}), "d", "document pointer yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), (*models.Document)(nil)), "", "nil document pointer is guarded")
+	asserts.Equal(t, fileIDOf(slog.Default(), nil), "", "nil ExtraData yields no FileID")
 }
 
 func TestFileIDOf_UnhandledTypeWarns(t *testing.T) {
 	logs := captureLog(t)
 
-	got := fileIDOf(models.Video{FileID: "v"})
+	got := fileIDOf(slog.Default(), models.Video{FileID: "v"})
 
 	asserts.Equal(t, got, "", "an unhandled media type yields no file id")
 	asserts.True(t, strings.Contains(logs.String(), "unexpected type"),

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -294,7 +295,7 @@ func TestHandleWebhook_UnparseableBody(t *testing.T) {
 }
 
 func TestParseWebhook_Image(t *testing.T) {
-	messages := parseWebhook([]byte(imageWebhook))
+	messages := parseWebhook(slog.Default(), []byte(imageWebhook))
 
 	asserts.Equal(t, len(messages), 1, "one message expected")
 	m := messages[0]
@@ -306,7 +307,7 @@ func TestParseWebhook_Image(t *testing.T) {
 }
 
 func TestParseWebhook_SkipsUnparseable(t *testing.T) {
-	messages := parseWebhook([]byte(mixedBatchWebhook))
+	messages := parseWebhook(slog.Default(), []byte(mixedBatchWebhook))
 
 	asserts.Equal(t, len(messages), 1, "the valid message survives; the bad one is skipped")
 	asserts.Equal(t, messages[0].From, "123", "the surviving message is the valid one")

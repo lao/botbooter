@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"regexp"
@@ -118,11 +118,13 @@ type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
 }
 
-// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
+// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot,
+// plus the Bot's logger so adapter diagnostics route through the same sink.
 type AdapterDeps struct {
 	Dispatch   func(ctx context.Context, m *Message)
 	Done       func(err error)
 	Disconnect func() error
+	Logger     *slog.Logger // always non-nil
 }
 
 // Bot is the platform-agnostic chat bot. Register handlers and middleware
@@ -136,6 +138,7 @@ type Bot struct {
 	commands              []Command
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
+	logger                *slog.Logger
 
 	mu   sync.Mutex
 	conn *connection
@@ -212,6 +215,21 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }
 
+// SetLogger routes the Bot's and its adapter's diagnostics (panic recovery,
+// shutdown warnings, webhook rejections) through logger instead of
+// [slog.Default]. Like handler registration, call it before Connect.
+func (b *Bot) SetLogger(logger *slog.Logger) {
+	b.logger = logger
+}
+
+// log returns the configured logger, falling back to slog.Default().
+func (b *Bot) log() *slog.Logger {
+	if b.logger != nil {
+		return b.logger
+	}
+	return slog.Default()
+}
+
 // Connect starts the adapter's event loop and returns without blocking. It
 // returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
 // if the Bot has no adapter, or any error from the adapter's own Connect.
@@ -239,6 +257,7 @@ func (b *Bot) Connect(ctx context.Context) error {
 		Dispatch:   b.dispatch,
 		Done:       func(err error) { c.done <- err },
 		Disconnect: func() error { return b.disconnectConn(c) },
+		Logger:     b.log(),
 	}
 
 	// adapter.Connect is non-blocking by contract. Holding b.mu across it — and
@@ -332,7 +351,7 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	if disconnectErr != nil {
 		if ctx.Err() != nil {
-			log.Printf("botbooter: error disconnecting during shutdown: %v", disconnectErr)
+			b.log().Error("botbooter: error disconnecting during shutdown", "error", disconnectErr)
 		} else if loopErr == nil {
 			loopErr = disconnectErr
 		}
@@ -404,7 +423,7 @@ func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string,
 func (b *Bot) dispatch(ctx context.Context, message *Message) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("botbooter: recovered from panic while handling message: %v", r)
+			b.log().Error("botbooter: recovered from panic while handling message", "panic", r)
 		}
 	}()
 
