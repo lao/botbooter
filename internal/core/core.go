@@ -228,12 +228,11 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 // if the Bot has no adapter, or any error from the adapter's own Connect.
 func (b *Bot) Connect(ctx context.Context) error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.conn != nil {
-		b.mu.Unlock()
 		return ErrAlreadyConnected
 	}
 	if b.adapter == nil {
-		b.mu.Unlock()
 		return ErrUnknownBotType
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -243,8 +242,6 @@ func (b *Bot) Connect(ctx context.Context) error {
 		runDone: make(chan struct{}),
 		adapter: b.adapter,
 	}
-	b.conn = c
-	b.mu.Unlock()
 
 	// The callbacks capture THIS connection (c), never a bot field read late, so
 	// a lingering goroutine from a prior connection writes into its own dead
@@ -254,21 +251,19 @@ func (b *Bot) Connect(ctx context.Context) error {
 		Done:       func(err error) { c.done <- err },
 		Disconnect: func() error { return b.disconnectConn(c) },
 	}
+
+	// adapter.Connect is non-blocking by contract (it starts the event loop in a
+	// goroutine and returns). Holding b.mu across it — and only installing b.conn
+	// on success — means a concurrent Disconnect serializes behind this lock
+	// rather than racing a half-connected adapter, so the adapter is never
+	// connected-then-double-disconnected. The event-loop goroutine only invokes
+	// deps.Disconnect on runCtx cancellation, never synchronously here, so this
+	// cannot deadlock on b.mu.
 	if err := b.adapter.Connect(runCtx, deps); err != nil {
-		_ = b.disconnectConn(c)
+		cancel()
 		return err
 	}
-
-	// Close the window between releasing b.mu and adapter.Connect returning: a
-	// concurrent Disconnect may have already superseded this connection. If so,
-	// disconnectConn(c) ran teardown(false) (no adapter touch), so the resources
-	// adapter.Connect just opened would leak — disconnect the adapter directly.
-	b.mu.Lock()
-	current := b.conn == c
-	b.mu.Unlock()
-	if !current {
-		_ = c.adapter.Disconnect()
-	}
+	b.conn = c
 	return nil
 }
 
@@ -335,17 +330,15 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	disconnectErr := b.Disconnect()
 
-	// Canceling the run context is the normal graceful-shutdown signal. The
-	// event loop (e.g. socketmode.RunContext) reports it back through done as
-	// context.Canceled; don't surface that to callers, which commonly do
-	// log.Fatal(bot.Run(ctx)) and would exit non-zero on a clean Ctrl-C.
-	if ctx.Err() != nil && errors.Is(loopErr, ctx.Err()) {
-		loopErr = nil
-	}
-	// A local Disconnect cancels runCtx without canceling ctx; the loop reports
-	// that as context.Canceled too. Strip it — a deliberate Disconnect is a
-	// clean shutdown, not an error.
-	if errors.Is(loopErr, context.Canceled) {
+	// Both graceful-shutdown paths surface here as loopErr echoing the canceling
+	// context's error, and neither should reach callers (who commonly do
+	// log.Fatal(bot.Run(ctx)) and must not exit non-zero on a clean Ctrl-C):
+	//   - caller ctx canceled/timed out — the event loop (e.g.
+	//     socketmode.RunContext) reports ctx.Err() back through done;
+	//   - a local Disconnect cancels runCtx (not ctx), reported as
+	//     context.Canceled.
+	if errors.Is(loopErr, context.Canceled) ||
+		(ctx.Err() != nil && errors.Is(loopErr, ctx.Err())) {
 		loopErr = nil
 	}
 
