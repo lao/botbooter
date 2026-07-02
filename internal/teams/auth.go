@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net/url"
 	"slices"
@@ -34,6 +35,12 @@ const (
 	// out, so a key Microsoft has retired stops being trusted. Matches the
 	// reference SDK's 24h interval.
 	jwksMaxAge = 24 * time.Hour
+	// jwksHardMaxAge bounds the fetch-failure fallback: past this age a stale
+	// cached key is rejected outright rather than served, so a persistent outage
+	// (or an attacker degrading the path to the JWKS endpoint) cannot keep a
+	// retired signing key trusted forever. The window past jwksMaxAge tolerates a
+	// transient outage while still honoring the retirement the doc promises.
+	jwksHardMaxAge = 2 * jwksMaxAge
 )
 
 // allowedServiceHosts / allowedServiceHostSuffixes are the only hosts replies may
@@ -137,20 +144,8 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 // once per jwksMinRefreshInterval, and a failed one falls back to the cached key so
 // a transient outage does not reject valid tokens.
 func (a *adapter) publicKey(ctx context.Context, kid string) (*jwksKey, error) {
-	a.mu.Lock()
-	k := a.keys[kid]
-	fresh := time.Since(a.keysFreshAt) < jwksMaxAge
-	rateLimited := time.Since(a.keysAt) < jwksMinRefreshInterval
-	a.mu.Unlock()
-	if k != nil && fresh {
-		return k, nil
-	}
-	if rateLimited {
-		// Rate-limited: serve the cached key if present, else report the unknown kid.
-		if k != nil {
-			return k, nil
-		}
-		return nil, fmt.Errorf("teams: unknown signing key %q", kid)
+	if k, done, err := a.lookupCached(kid); done {
+		return k, err
 	}
 
 	// Serialize refreshes so a burst makes a single fetch. After winning fetchMu,
@@ -158,19 +153,9 @@ func (a *adapter) publicKey(ctx context.Context, kid string) (*jwksKey, error) {
 	a.fetchMu.Lock()
 	defer a.fetchMu.Unlock()
 
-	a.mu.Lock()
-	k = a.keys[kid]
-	fresh = time.Since(a.keysFreshAt) < jwksMaxAge
-	rateLimited = time.Since(a.keysAt) < jwksMinRefreshInterval
-	a.mu.Unlock()
-	if k != nil && fresh {
-		return k, nil
-	}
-	if rateLimited {
-		if k != nil {
-			return k, nil
-		}
-		return nil, fmt.Errorf("teams: unknown signing key %q", kid)
+	k, done, err := a.lookupCached(kid)
+	if done {
+		return k, err
 	}
 
 	// Advance keysAt (the attempt clock) before fetching so a failed fetch is still
@@ -182,8 +167,13 @@ func (a *adapter) publicKey(ctx context.Context, kid string) (*jwksKey, error) {
 	keys, err := a.fetchJWKS(ctx)
 	if err != nil {
 		// Fall back to the cached key so a transient outage does not reject valid
-		// tokens; a genuine unknown-kid miss surfaces err.
-		if k != nil {
+		// tokens — but only within jwksHardMaxAge, so a persistent outage cannot
+		// keep a retired key trusted indefinitely. A genuine unknown-kid miss, or a
+		// too-stale cache, surfaces err.
+		a.mu.Lock()
+		withinHardCeiling := time.Since(a.keysFreshAt) < jwksHardMaxAge
+		a.mu.Unlock()
+		if k != nil && withinHardCeiling {
 			return k, nil
 		}
 		return nil, err
@@ -197,6 +187,46 @@ func (a *adapter) publicKey(ctx context.Context, kid string) (*jwksKey, error) {
 		return nil, fmt.Errorf("teams: unknown signing key %q after refresh", kid)
 	}
 	return k, nil
+}
+
+// lookupCached reads the cache for kid and reports whether publicKey should
+// return immediately: a fresh hit returns (k, true, nil); when a refresh is
+// rate-limited it returns the cached key (k, true, nil) or an unknown-kid error
+// (nil, true, err); otherwise it returns (k, false, nil) — k may be a stale key
+// to use as the fetch-failure fallback — signaling the caller to fetch.
+func (a *adapter) lookupCached(kid string) (*jwksKey, bool, error) {
+	a.mu.Lock()
+	k := a.keys[kid]
+	fresh := time.Since(a.keysFreshAt) < jwksMaxAge
+	rateLimited := time.Since(a.keysAt) < jwksMinRefreshInterval
+	a.mu.Unlock()
+	if k != nil && fresh {
+		return k, true, nil
+	}
+	if rateLimited {
+		if k != nil {
+			return k, true, nil
+		}
+		return nil, true, fmt.Errorf("teams: unknown signing key %q", kid)
+	}
+	return k, false, nil
+}
+
+// prefetchKeys warms the JWKS cache so the first inbound request does not pay the
+// two-hop cold fetch (which can exceed the server's WriteTimeout). Best-effort:
+// a failure is logged and the normal on-demand fetch in publicKey still runs.
+func (a *adapter) prefetchKeys(ctx context.Context) {
+	keys, err := a.fetchJWKS(ctx)
+	if err != nil {
+		log.Printf("teams: JWKS prefetch failed (will fetch on demand): %v", err)
+		return
+	}
+	now := time.Now()
+	a.mu.Lock()
+	a.keys = keys
+	a.keysFreshAt = now
+	a.keysAt = now
+	a.mu.Unlock()
 }
 
 // fetchJWKS resolves the Bot Connector OpenID metadata to its jwks_uri and decodes

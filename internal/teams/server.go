@@ -51,7 +51,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		a.handleMessages(ctx, detachedCtx, w, r, deps)
+		a.handleMessages(detachedCtx, w, r, deps)
 	})
 
 	ln, err := net.Listen("tcp", a.cfg.Addr)
@@ -75,6 +75,10 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 
 	go serve(srv, ln, deps.Done)
 
+	// Warm the JWKS cache so the first inbound request doesn't pay the cold
+	// two-hop fetch, which can exceed WriteTimeout.
+	go a.prefetchKeys(ctx)
+
 	// Tear down when the run context is canceled.
 	go func() {
 		<-ctx.Done()
@@ -95,7 +99,7 @@ func serve(srv *http.Server, ln net.Listener, done func(error)) {
 	}
 }
 
-func (a *adapter) handleMessages(ctx, dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
+func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -108,8 +112,12 @@ func (a *adapter) handleMessages(ctx, dispatchCtx context.Context, w http.Respon
 		return
 	}
 
-	// Authenticate before trusting the body: validate the JWT and its serviceurl claim.
-	if err := a.validateInbound(ctx, r.Header.Get("Authorization"), act.ServiceURL, act.ChannelID); err != nil {
+	// Authenticate before trusting the body: validate the JWT and its serviceurl
+	// claim. Use the request context, not runCtx: core cancels runCtx before
+	// srv.Shutdown drains this handler, and srv.Shutdown does not cancel active
+	// request contexts — so a JWKS refresh during drain must ride r.Context() or
+	// it would fail "context canceled" and 401 an already-in-flight request.
+	if err := a.validateInbound(r.Context(), r.Header.Get("Authorization"), act.ServiceURL, act.ChannelID); err != nil {
 		log.Printf("teams: inbound request rejected with 401: %v", err)
 		w.WriteHeader(http.StatusUnauthorized)
 		return

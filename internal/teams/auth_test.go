@@ -308,16 +308,58 @@ func TestPublicKey_ServesCachedKeyWhenRefreshFails(t *testing.T) {
 	asserts.NoError(t, err, "warm cache")
 	asserts.NotNil(t, k, "key returned")
 
-	// Simulate a JWKS outage and age the cache past jwksMaxAge.
+	// Simulate a JWKS outage and age the cache past jwksMaxAge (forcing a
+	// refresh) but within jwksHardMaxAge, so the transient-outage fallback still
+	// serves the cached key.
 	srv.Close()
 	a.mu.Lock()
-	a.keysFreshAt = time.Now().Add(-2 * jwksMaxAge)
+	a.keysFreshAt = time.Now().Add(-jwksMaxAge - time.Hour)
 	a.keysAt = time.Now().Add(-2 * jwksMaxAge)
 	a.mu.Unlock()
 
 	got, err := a.publicKey(ctx, testKID)
-	asserts.NoError(t, err, "known kid served from cache when refresh fails")
+	asserts.NoError(t, err, "known kid served from cache when refresh fails within the hard ceiling")
 	asserts.NotNil(t, got, "cached key returned on refresh failure")
+}
+
+// TestPublicKey_RejectsStaleCacheBeyondHardCeiling guards the retirement bound:
+// once the cached key set is older than jwksHardMaxAge, a failed refresh must
+// reject it rather than keep trusting a possibly-retired key indefinitely.
+func TestPublicKey_RejectsStaleCacheBeyondHardCeiling(t *testing.T) {
+	pub := signingKey(t).Public().(*rsa.PublicKey)
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openid", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": base + "/keys"})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+			"kid": testKID,
+			"kty": "RSA",
+			"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+		}}})
+	})
+	srv := httptest.NewServer(mux)
+	base = srv.URL
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.openIDURL = srv.URL + "/openid"
+	ctx := context.Background()
+
+	_, err = a.publicKey(ctx, testKID)
+	asserts.NoError(t, err, "warm cache")
+
+	// Outage plus a cache aged beyond the hard ceiling: the key must be rejected.
+	srv.Close()
+	a.mu.Lock()
+	a.keysFreshAt = time.Now().Add(-jwksHardMaxAge - time.Hour)
+	a.keysAt = time.Now().Add(-2 * jwksHardMaxAge)
+	a.mu.Unlock()
+
+	_, err = a.publicKey(ctx, testKID)
+	asserts.Error(t, err, "stale-beyond-ceiling cached key must be rejected when refresh fails")
 }
 
 func TestPublicKey_OpenIDError(t *testing.T) {

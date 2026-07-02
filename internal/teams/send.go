@@ -22,6 +22,12 @@ const (
 	tokenRefreshSkew = time.Minute
 )
 
+// ErrUnknownConversation is returned by Send when no inbound Activity has been
+// seen for the target conversation — so no serviceUrl is known — or it was
+// evicted from the conversation map. Callers doing proactive sends can
+// errors.Is-branch it from transport failures.
+var ErrUnknownConversation = errors.New("teams: unknown conversation")
+
 type cachedToken struct {
 	value  string
 	expiry time.Time
@@ -44,12 +50,7 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	conv, ok := a.convs[channelID]
 	a.mu.Unlock()
 	if !ok || conv.serviceURL == "" {
-		return fmt.Errorf("teams: no serviceUrl known for conversation %q (no inbound activity seen)", channelID)
-	}
-
-	token, err := a.accessToken(ctx)
-	if err != nil {
-		return err
+		return fmt.Errorf("%w %q (no inbound activity seen)", ErrUnknownConversation, channelID)
 	}
 
 	// from (the bot account) is required; it was captured from the inbound
@@ -63,24 +64,53 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	body, _ := json.Marshal(payload)
 
 	endpoint := strings.TrimRight(conv.serviceURL, "/") + "/v3/conversations/" + url.PathEscape(channelID) + "/activities"
+
+	// The cached token can go stale independently of its local expiry (e.g. after
+	// an app-secret rotation), which the Connector rejects with 401/403. On that,
+	// drop the cache and retry once with a freshly minted token.
+	status, err := a.postActivity(ctx, endpoint, body)
+	if err != nil && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		a.invalidateToken()
+		_, err = a.postActivity(ctx, endpoint, body)
+	}
+	return err
+}
+
+// postActivity mints/uses the cached token and POSTs body to endpoint, returning
+// the HTTP status (0 if the request never reached a response) and any error.
+func (a *adapter) postActivity(ctx context.Context, endpoint string, body []byte) (int, error) {
+	token, err := a.accessToken(ctx)
+	if err != nil {
+		return 0, err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// No response body to decode; decodeJSON just validates status and drains.
+	status := resp.StatusCode
 	if err := decodeJSON(resp, nil); err != nil {
-		return fmt.Errorf("teams: send failed: %w", err)
+		return status, fmt.Errorf("teams: send failed: %w", err)
 	}
-	return nil
+	return status, nil
+}
+
+// invalidateToken clears the cached outbound token so the next accessToken mints
+// a fresh one.
+func (a *adapter) invalidateToken() {
+	a.mu.Lock()
+	a.token = cachedToken{}
+	a.mu.Unlock()
 }
 
 // accessToken returns a cached Bot Connector token, minting a fresh one via the

@@ -19,6 +19,11 @@ type Message = teamsint.Message
 // ErrMissingConfig is returned by [New] when a required [Config] field is empty.
 var ErrMissingConfig = teamsint.ErrMissingConfig
 
+// ErrUnknownConversation is returned by a Teams bot's Send when the target
+// conversation has not been seen on an inbound Activity (or was evicted), so no
+// serviceUrl is known. Branch it with errors.Is.
+var ErrUnknownConversation = teamsint.ErrUnknownConversation
+
 // New creates a Microsoft Teams bot backed by the Azure Bot Framework. It runs
 // an inbound webhook HTTP server at cfg.Addr, so put a TLS-terminating proxy in
 // front and register the public HTTPS URL as your Azure Bot resource's messaging

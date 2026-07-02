@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,47 @@ import (
 
 	"github.com/lao/botbooter/internal/asserts"
 )
+
+func TestSend_RetriesOnceOn401(t *testing.T) {
+	var attempts int
+	var tokens []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		tokens = append(tokens, r.Header.Get("Authorization"))
+		if attempts == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var mints int
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mints++
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": fmt.Sprintf("tok-%d", mints), "expires_in": 3600})
+	}))
+	defer tokenSrv.Close()
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.tokenURL = tokenSrv.URL
+	a.recordConversation("conv-1", srv.URL, channelAccount{ID: "bot-1", Name: "Bot"})
+
+	err = a.Send(context.Background(), "conv-1", "hi")
+	asserts.NoError(t, err, "Send succeeds after a 401-triggered token refresh")
+	asserts.Equal(t, attempts, 2, "exactly one retry after 401")
+	asserts.Equal(t, mints, 2, "token minted fresh for the retry")
+	asserts.Equal(t, tokens[0], "Bearer tok-1", "first attempt used the initially cached token")
+	asserts.Equal(t, tokens[1], "Bearer tok-2", "retry used a freshly minted token")
+}
+
+func TestSend_UnknownConversationSentinel(t *testing.T) {
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	err = a.Send(context.Background(), "never-seen", "hi")
+	asserts.ErrorIs(t, err, ErrUnknownConversation, "unknown conversation must be ErrUnknownConversation")
+}
 
 func TestSend(t *testing.T) {
 	var gotPath, gotAuth, gotBody string

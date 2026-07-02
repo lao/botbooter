@@ -85,7 +85,7 @@ func post(a *adapter, deps core.AdapterDeps, body, auth string) *httptest.Respon
 		r.Header.Set("Authorization", auth)
 	}
 	w := httptest.NewRecorder()
-	a.handleMessages(context.Background(), context.Background(), w, r, deps)
+	a.handleMessages(context.Background(), w, r, deps)
 	return w
 }
 
@@ -117,8 +117,6 @@ func TestHandleMessages_DispatchesText(t *testing.T) {
 // with "context canceled" mid-drain.
 func TestHandleMessages_DispatchesOnDetachedCtx(t *testing.T) {
 	a := testAdapter(t)
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	defer cancelRun()
 	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
 	defer cancelDispatch()
 
@@ -130,12 +128,13 @@ func TestHandleMessages_DispatchesOnDetachedCtx(t *testing.T) {
 	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
 	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
-	a.handleMessages(runCtx, dispatchCtx, httptest.NewRecorder(), r, deps)
+	a.handleMessages(dispatchCtx, httptest.NewRecorder(), r, deps)
 
 	select {
 	case c := <-gotCtx:
-		cancelRun() // core cancels runCtx at shutdown, before draining.
-		asserts.NoError(t, c.Err(), "dispatch ctx must not cancel with the run ctx")
+		// The dispatch context is detached from the request/run context, so a
+		// later shutdown cancellation cannot abort an already-acked dispatch.
+		asserts.NoError(t, c.Err(), "dispatch must ride the detached context")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for dispatch")
 	}
@@ -334,7 +333,7 @@ func TestDisconnect_CancelsDispatchContext(t *testing.T) {
 	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
 	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
-	a.handleMessages(context.Background(), dispatchCtx, httptest.NewRecorder(), r, deps)
+	a.handleMessages(dispatchCtx, httptest.NewRecorder(), r, deps)
 
 	var c context.Context
 	select {
@@ -374,7 +373,7 @@ func TestDisconnect_DrainTimeoutReturnsError(t *testing.T) {
 	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
 	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
-	a.handleMessages(context.Background(), context.Background(), httptest.NewRecorder(), r, deps)
+	a.handleMessages(context.Background(), httptest.NewRecorder(), r, deps)
 
 	select {
 	case <-dispatched:
