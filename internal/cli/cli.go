@@ -129,7 +129,9 @@ func fileAttachment(path string) (core.Attachment, bool) {
 	}
 
 	att := core.Attachment{URL: path, ExtraData: path}
-	if f, err := os.Open(path); err == nil {
+	// The CLI adapter is for trusted local input only (see package doc); opening
+	// an operator-typed path is the feature, not an injection vector.
+	if f, err := os.Open(path); err == nil { //nolint:gosec
 		defer func() { _ = f.Close() }()
 		buf := make([]byte, 512)
 		n, _ := f.Read(buf)

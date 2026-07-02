@@ -251,7 +251,9 @@ func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if q.Get("hub.mode") == "subscribe" && tokenOK {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, q.Get("hub.challenge"))
+		// Echoing hub.challenge is Meta's verification protocol; the explicit
+		// text/plain Content-Type above prevents HTML interpretation.
+		_, _ = io.WriteString(w, q.Get("hub.challenge")) //nolint:gosec // plain-text echo, not HTML output
 		return
 	}
 	w.WriteHeader(http.StatusForbidden)

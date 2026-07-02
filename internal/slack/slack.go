@@ -261,7 +261,7 @@ func parseSlackTimestamp(ts string) time.Time {
 	if frac != "" {
 		// Slack's fraction is microseconds; pad/truncate to 6 digits. ParseUint
 		// rejects a sign, so a malformed fraction leaves nsec at 0.
-		if micros, err := strconv.ParseUint((frac + "000000")[:6], 10, 64); err == nil {
+		if micros, err := strconv.ParseUint((frac + "000000")[:6], 10, 32); err == nil {
 			nsec = int64(micros) * 1000
 		}
 	}

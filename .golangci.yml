@@ -10,6 +10,7 @@ linters:
     # Defaults (errcheck, govet, ineffassign, staticcheck, unused) plus:
     - bodyclose
     - errorlint
+    - gosec
     - misspell
     - revive
     - unconvert
@@ -18,6 +19,13 @@ linters:
       rules:
         # Require doc comments on exported identifiers (godoc coverage gate).
         - name: exported
+  exclusions:
+    rules:
+      # Hardening lints target production servers; test fixtures and the
+      # go-list subprocess in the isolation guard don't need them.
+      - path: _test\.go
+        linters:
+          - gosec
 
 formatters:
   enable:

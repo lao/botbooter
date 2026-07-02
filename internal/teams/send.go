@@ -17,7 +17,7 @@ import (
 
 const (
 	// tokenScope requests an app-only token for the Bot Connector service.
-	tokenScope = "https://api.botframework.com/.default"
+	tokenScope = "https://api.botframework.com/.default" //nolint:gosec // OAuth scope URL, not a credential
 	// tokenRefreshSkew refreshes the outbound token a little before it expires.
 	tokenRefreshSkew = time.Minute
 )
