@@ -40,18 +40,14 @@ const (
 	signatureHeader     = "X-Hub-Signature-256"
 	signaturePrefix     = "sha256="
 
-	// maxRequestBytes caps the inbound webhook body. The endpoint is public, so
-	// this defends against memory-exhaustion from oversized/never-ending bodies;
-	// real Cloud API payloads are a few KB.
+	// The endpoint is public; cap bodies against memory exhaustion. Real Cloud
+	// API payloads are a few KB.
 	maxRequestBytes = 1 << 20 // 1 MiB
 
-	// maxErrorBodyBytes caps how much of a non-2xx Send response body is read into
-	// the returned error, bounding memory and log size from an unexpected response.
+	// maxErrorBodyBytes caps how much of a non-2xx response body is read into errors.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
 
-	// maxMediaMetaBytes caps the getMedia metadata response decoded when resolving
-	// an attachment URL. The payload is a small JSON object (url, mime_type, ...);
-	// the cap bounds memory from an unexpected response.
+	// maxMediaMetaBytes caps the getMedia metadata response (a small JSON object).
 	maxMediaMetaBytes = 64 << 10 // 64 KiB
 )
 
@@ -118,16 +114,14 @@ type adapter struct {
 
 	mu  sync.Mutex
 	srv *http.Server
-	// boundAddr is the listener's actual address, resolved after net.Listen so a
-	// cfg.Addr of ":0" is recoverable via Addr. Set with srv, cleared with it.
+	// boundAddr is the listener's resolved address, so a cfg.Addr of ":0" is
+	// recoverable via Addr. Set with srv, cleared with it.
 	boundAddr string
 	// detachedCancel aborts the current connection's dispatch goroutines. Each
-	// Connect derives one detached, cancelable context — context.WithCancel over
-	// context.WithoutCancel(runCtx) — and threads the context itself through the
-	// handler closure (like runCtx), so there is no shared context field to race on;
-	// only the cancel is stored here. Disconnect calls it after the drain window so a
-	// handler blocked on ctx.Done() or a reply on a no-timeout client cannot leak, and
-	// clears it only when a reconnect has not already installed a newer connection.
+	// Connect derives one detached, cancelable context and threads it through the
+	// handler closure, so only the cancel is shared state. Disconnect calls it
+	// after the drain window so a stuck handler cannot leak, and clears it only
+	// when a reconnect has not already installed a newer connection.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
 }
@@ -160,15 +154,14 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.Token == "" || cfg.PhoneNumberID == "" || cfg.AppSecret == "" || cfg.VerifyToken == "" || cfg.Addr == "" {
 		return nil, fmt.Errorf("%w: Token, PhoneNumberID, AppSecret, VerifyToken and Addr are required", ErrMissingConfig)
 	}
-	// A bare port ("8080") is shorthand for ":8080"; a host, host:port, :port or
-	// IPv6 literal is left for net.Listen to validate.
+	// A bare port ("8080") is shorthand for ":8080".
 	if _, err := strconv.Atoi(cfg.Addr); err == nil {
 		cfg.Addr = ":" + cfg.Addr
 	}
 	if cfg.Path == "" {
 		cfg.Path = defaultPath
 	}
-	// A pattern without a leading slash panics ServeMux at Connect; normalize one in.
+	// A pattern without a leading slash panics ServeMux at Connect.
 	if !strings.HasPrefix(cfg.Path, "/") {
 		cfg.Path = "/" + cfg.Path
 	}
@@ -183,10 +176,8 @@ func newAdapter(cfg Config) (*adapter, error) {
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	// One detached, cancelable context per connection parents all dispatch:
-	// WithoutCancel drops runCtx's deadline/cancellation so an acked reply can finish
-	// during the shutdown drain, WithCancel lets Disconnect abort stragglers after it.
-	// The handler closure captures the context directly (like runCtx), so there is no
-	// shared context field for a request and Disconnect to race on.
+	// WithoutCancel lets an acked reply finish during the shutdown drain, and
+	// WithCancel lets Disconnect abort stragglers after it.
 	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	mux := http.NewServeMux()
@@ -203,7 +194,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 
 	ln, err := net.Listen("tcp", a.cfg.Addr)
 	if err != nil {
-		detachedCancel() // nothing will consume the context; release it.
+		detachedCancel()
 		return err
 	}
 
@@ -270,16 +261,10 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 		return
 	}
 
-	// Dispatch on the per-connection detached context (captured in Connect and passed
-	// in): core cancels runCtx *before* calling Disconnect, whose drainDispatch waits
-	// for this in-flight handler, so the reply must not be threaded onto runCtx or it
-	// would fail with "context canceled" mid-drain. dispatchCtx keeps runCtx's values
-	// but drops its deadline/cancellation so an acked message finishes within the drain
-	// window; Disconnect cancels it after the drain so a stuck reply is bounded
-	// (otherwise only by the outbound HTTP client's timeout — 30s for the default
-	// client; set one on a custom cfg.HTTPClient). Add before starting the goroutine so
-	// the count is visible to drainDispatch: srv.Shutdown waits for this handler to
-	// return, so the increment lands before the drain observes the counter.
+	// Dispatch on the detached context: core cancels runCtx *before* Disconnect's
+	// drain waits for this handler, so a reply threaded onto runCtx would fail
+	// mid-drain. The increment lands before Shutdown returns, so drainDispatch
+	// always observes it.
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
@@ -299,7 +284,7 @@ func (a *adapter) Disconnect() error {
 	}
 	// Shutdown and drain each get their own budget: dispatch goroutines run
 	// outside the HTTP handler lifecycle, so a slow Shutdown must not consume the
-	// drain deadline and silently drop an already-acked in-flight message.
+	// drain deadline and drop an already-acked in-flight message.
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutCancel()
 	err := srv.Shutdown(shutCtx)
@@ -308,23 +293,19 @@ func (a *adapter) Disconnect() error {
 	defer drainCancel()
 	a.drainDispatch(drainCtx)
 
-	// If the drain timed out, dispatch goroutines are still running and the
-	// cancelDispatch below force-aborts them; surface that instead of aborting
-	// silently, since a forced abort of an already-acked message is operationally
-	// significant.
+	// If the drain timed out, surface it: cancelDispatch below force-aborts
+	// already-acked messages, which is operationally significant.
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
 		log.Printf("whatsapp: drain deadline reached; canceling %d in-flight dispatch(es)", n)
 		drainErr = fmt.Errorf("whatsapp: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 
-	// Clear the shared fields only if a reconnect has not already installed a newer
-	// connection (identity-compare on srv): core clears its own cancel before this
-	// up-to-10s Disconnect returns, so a fresh Connect can legitimately run
-	// concurrently, and nil-ing unconditionally could clobber its live cancel. Either
-	// way, cancel THIS connection's own detached context after the drain so a handler
-	// blocked on ctx.Done() (or a reply on a no-timeout client) cannot leak past
-	// shutdown. CancelFunc is idempotent and goroutine-safe.
+	// Clear the shared fields only if a reconnect has not installed a newer
+	// connection (identity-compare on srv): a fresh Connect can legitimately run
+	// during this up-to-10s Disconnect, and nil-ing unconditionally would clobber
+	// its live state. Either way, cancel THIS connection's detached context after
+	// the drain so a stuck handler cannot leak past shutdown.
 	a.mu.Lock()
 	if a.srv == srv {
 		a.srv = nil
@@ -342,11 +323,9 @@ func (a *adapter) Disconnect() error {
 	return drainErr
 }
 
-// drainDispatch waits for in-flight dispatch goroutines to finish so an acked
-// message is processed rather than dropped at shutdown, bounded by ctx. It polls
-// an atomic counter rather than a WaitGroup: the dispatch goroutines are started
-// from request handlers that Shutdown may abandon at its deadline, and a
-// WaitGroup Add racing that Wait would risk a misuse panic.
+// drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so an
+// acked message is processed rather than dropped at shutdown. It polls an atomic
+// counter rather than a WaitGroup: an Add racing Wait would risk a misuse panic.
 func (a *adapter) drainDispatch(ctx context.Context) {
 	for a.inflight.Load() > 0 {
 		select {
@@ -521,9 +500,8 @@ func (in inboundMessage) media() *mediaObject {
 }
 
 // parseWebhook extracts inbound user messages from a Cloud API webhook payload.
-// An individual message that fails to parse is logged and skipped rather than
-// failing the whole batch, so one bad entry never drops its valid siblings (and
-// the request can still be acked with 200 to stop Meta retrying).
+// A message that fails to parse is logged and skipped so one bad entry never
+// drops its valid siblings.
 func parseWebhook(body []byte) []*Message {
 	var env webhookEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {

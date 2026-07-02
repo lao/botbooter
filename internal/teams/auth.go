@@ -20,37 +20,29 @@ import (
 )
 
 const (
-	// botConnectorIssuer is the issuer of production Bot Connector tokens. (The
-	// Emulator uses an AAD issuer and is not supported.)
+	// The Emulator uses an AAD issuer and is not supported.
 	botConnectorIssuer = "https://api.botframework.com"
-	// openIDConfigURL is the Bot Connector OpenID metadata document; its jwks_uri
-	// points at the signing keys for inbound tokens.
-	openIDConfigURL = "https://login.botframework.com/v1/.well-known/openidconfiguration"
+	openIDConfigURL    = "https://login.botframework.com/v1/.well-known/openidconfiguration"
 
-	// jwksMinRefreshInterval rate-limits JWKS re-fetches so a flood of tokens with
-	// unknown kids cannot turn into a fetch-per-request DoS.
+	// jwksMinRefreshInterval rate-limits JWKS re-fetches so unknown kids cannot
+	// turn into a fetch-per-request DoS.
 	jwksMinRefreshInterval = time.Minute
-	// jwksMaxAge forces a full refresh even for a known kid once the key set ages
-	// out, so a key Microsoft has retired stops being trusted. Matches the
-	// reference SDK's 24h interval.
+	// jwksMaxAge forces a full refresh even for a known kid, so a key Microsoft
+	// has retired stops being trusted. Matches the reference SDK's 24h interval.
 	jwksMaxAge = 24 * time.Hour
 	// jwksHardMaxAge bounds the fetch-failure fallback: past this age a stale
-	// cached key is rejected outright rather than served, so a persistent outage
-	// (or an attacker degrading the path to the JWKS endpoint) cannot keep a
-	// retired signing key trusted forever. The window past jwksMaxAge tolerates a
-	// transient outage while still honoring the retirement the doc promises.
+	// cached key is rejected outright, so a persistent outage cannot keep a
+	// retired signing key trusted forever.
 	jwksHardMaxAge = 2 * jwksMaxAge
-	// jwksFetchTimeout bounds a cold JWKS resolution (metadata + keys, two hops)
-	// so it stays under the server's WriteTimeout and a stuck endpoint can't hang
-	// an inbound request past its response deadline.
+	// jwksFetchTimeout bounds a cold JWKS resolution (metadata + keys) so it
+	// stays under the server's WriteTimeout.
 	jwksFetchTimeout = 15 * time.Second
 )
 
 // allowedServiceHosts / allowedServiceHostSuffixes are the only hosts replies may
-// be POSTed to. The Activity's serviceUrl is attacker-influenced, so even a valid
-// token must not aim outbound requests at an arbitrary host. The broad
-// *.trafficmanager.net namespace (shared by every Azure tenant) is deliberately NOT
-// allowlisted; only smba.trafficmanager.net and *.botframework.com are.
+// be POSTed to: the Activity's serviceUrl is attacker-influenced. The broad
+// *.trafficmanager.net namespace (shared by every Azure tenant) is deliberately
+// NOT allowlisted.
 var (
 	allowedServiceHosts        = map[string]bool{"botframework.com": true, "smba.trafficmanager.net": true}
 	allowedServiceHostSuffixes = []string{".botframework.com"}
@@ -62,19 +54,17 @@ var errUnauthorized = errors.New("teams: unauthorized inbound request")
 // jwksKey is one Bot Connector signing key: its RSA public key plus the channel
 // endorsements from the JWKS. A token signed by it may only authenticate an
 // Activity whose channelId is endorsed; an empty list is the Emulator/Skill
-// exemption. See validateInbound.
+// exemption.
 type jwksKey struct {
 	pub          *rsa.PublicKey
 	endorsements []string
 }
 
-// validateInbound verifies the Bearer JWT on an inbound request: RS256 signature
-// against the JWKS, audience == AppID, issuer, exp, a serviceurl claim matching the
-// Activity, and a signing key endorsed for the Activity's channelId. The JWKS is
-// shared across all of a resource's channels and aud/iss/signature alone cannot
-// distinguish them; the endorsement is the only thing binding a key to a channel,
-// so without it a token minted for another enabled channel could pose as Teams.
-// This authenticates the channelId, not the from account.
+// validateInbound verifies the bearer token on an inbound request: RS256
+// signature against the JWKS, audience == AppID, issuer, exp, a serviceurl claim
+// matching the Activity, and a signing key endorsed for the Activity's channelId
+// (the endorsement is the only thing binding a key to a channel). This
+// authenticates the channelId, not the from account.
 func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServiceURL, activityChannelID string) error {
 	raw, ok := bearerToken(authHeader)
 	if !ok {
@@ -83,7 +73,7 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 
 	claims := jwt.MapClaims{}
 	// Capture the signing key's endorsements during verification so the channel
-	// check below uses the key that actually signed it, without a second lookup.
+	// check uses the key that actually signed the token.
 	var keyEndorsements []string
 	keyFunc := func(t *jwt.Token) (any, error) {
 		kid, _ := t.Header["kid"].(string)
@@ -103,13 +93,11 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 		jwt.WithLeeway(5*time.Minute),
 	)
 	if err != nil {
-		// golang-jwt returns specific sentinels, so wrapping err names the exact
-		// failing check. iss/aud are echoed from the rejected token for comparison.
 		gotIss, _ := claims["iss"].(string)
 		gotAud := claims["aud"]
 		gotAudStr := fmt.Sprintf("%v", gotAud)
-		// %q (not %v): the rejected token's aud is attacker-controlled and logged,
-		// so escape it to prevent log injection.
+		// %q: the rejected token's aud is attacker-controlled and logged, so
+		// escape it to prevent log injection.
 		return fmt.Errorf("%w: token validation failed (want aud=%q iss=%q; got aud=%q iss=%q): %w",
 			errUnauthorized, a.cfg.AppID, botConnectorIssuer, gotAudStr, gotIss, err)
 	}
@@ -127,9 +115,8 @@ func (a *adapter) validateInbound(ctx context.Context, authHeader, activityServi
 			errUnauthorized, svc, activityServiceURL)
 	}
 
-	// A token may only speak for a channel its key is endorsed for. An empty list is
-	// the Emulator/Skill exemption, trusted to pass as the reference SDKs do. An
-	// endorsed key with a blank channelId is rejected rather than skipped.
+	// A token may only speak for a channel its key is endorsed for; an empty list
+	// is the Emulator/Skill exemption, trusted as the reference SDKs do.
 	if len(keyEndorsements) > 0 {
 		if activityChannelID == "" {
 			return fmt.Errorf("%w: activity missing channelId for an endorsed signing key", errUnauthorized)
@@ -151,8 +138,8 @@ func (a *adapter) publicKey(ctx context.Context, kid string) (*jwksKey, error) {
 		return k, err
 	}
 
-	// Serialize refreshes so a burst makes a single fetch. After winning fetchMu,
-	// re-check: a concurrent refresh may have already resolved this kid.
+	// Serialize refreshes so a burst makes a single fetch; re-check after winning
+	// fetchMu since a concurrent refresh may have resolved this kid.
 	a.fetchMu.Lock()
 	defer a.fetchMu.Unlock()
 
@@ -161,8 +148,8 @@ func (a *adapter) publicKey(ctx context.Context, kid string) (*jwksKey, error) {
 		return k, err
 	}
 
-	// Advance keysAt (the attempt clock) before fetching so a failed fetch is still
-	// rate-limited. keysFreshAt (the max-age clock) advances only on success below.
+	// Advance keysAt (the attempt clock) before fetching so a failed fetch is
+	// still rate-limited; keysFreshAt (the max-age clock) advances only on success.
 	a.mu.Lock()
 	a.keysAt = time.Now()
 	a.mu.Unlock()
@@ -171,8 +158,7 @@ func (a *adapter) publicKey(ctx context.Context, kid string) (*jwksKey, error) {
 	if err != nil {
 		// Fall back to the cached key so a transient outage does not reject valid
 		// tokens — but only within jwksHardMaxAge, so a persistent outage cannot
-		// keep a retired key trusted indefinitely. A genuine unknown-kid miss, or a
-		// too-stale cache, surfaces err.
+		// keep a retired key trusted indefinitely.
 		a.mu.Lock()
 		withinHardCeiling := time.Since(a.keysFreshAt) < jwksHardMaxAge
 		a.mu.Unlock()
@@ -209,8 +195,8 @@ func (a *adapter) lookupCached(kid string) (*jwksKey, bool, error) {
 	}
 	if rateLimited {
 		// The rate-limit fast path serves most requests during an outage, so it
-		// must honor jwksHardMaxAge too — otherwise a retired key would be served
-		// indefinitely between the once-a-minute fetch attempts.
+		// must honor jwksHardMaxAge too, or a retired key would be served
+		// indefinitely between fetch attempts.
 		if k != nil && withinHardCeiling {
 			return k, true, nil
 		}
@@ -223,7 +209,7 @@ func (a *adapter) lookupCached(kid string) (*jwksKey, bool, error) {
 // the RSA signing keys (with their channel endorsements) into a kid-indexed map.
 func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*jwksKey, error) {
 	// Bound the two-hop resolution independently of the caller's context so a
-	// hung endpoint can't outlast the server's WriteTimeout on an inbound request.
+	// hung endpoint can't outlast the server's WriteTimeout.
 	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
 	defer cancel()
 
@@ -236,10 +222,9 @@ func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*jwksKey, error) {
 	if meta.JWKSURI == "" {
 		return nil, errors.New("teams: openid metadata missing jwks_uri")
 	}
-	// Pin jwks_uri to the metadata endpoint's scheme and host so a tampered document
-	// cannot redirect key fetching elsewhere or downgrade it to cleartext. Matching
-	// the metadata scheme (not a hardcoded "https") keeps the http httptest tests
-	// exercising this path.
+	// Pin jwks_uri to the metadata endpoint's scheme and host so a tampered
+	// document cannot redirect key fetching elsewhere. Matching the metadata
+	// scheme (not a hardcoded "https") keeps the httptest tests on this path.
 	if !sameSchemeHost(a.openIDURL, meta.JWKSURI) {
 		return nil, errors.New("teams: jwks_uri scheme/host does not match the OpenID metadata endpoint")
 	}
@@ -273,7 +258,7 @@ func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*jwksKey, error) {
 		}
 		n := new(big.Int).SetBytes(nBytes)
 		e := int(new(big.Int).SetBytes(eBytes).Int64())
-		// Reject implausible keys (tiny modulus or degenerate exponent) to keep the map clean.
+		// Reject implausible keys (tiny modulus or degenerate exponent).
 		if n.BitLen() < 1024 || e < 2 {
 			continue
 		}
@@ -308,10 +293,9 @@ func sameServiceURL(a, b string) bool {
 	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
 }
 
-// bearerToken extracts the credential from an Authorization header. The scheme is
-// matched case-insensitively and extra whitespace is tolerated (RFC 7235/6750), so
-// "bearer  <t>" is accepted. Lenient parsing does not weaken auth: the token is
-// still fully validated by the JWT parser.
+// bearerToken extracts the credential from an Authorization header, tolerating
+// case and extra whitespace per RFC 7235/6750; the token is still fully
+// validated by the JWT parser.
 func bearerToken(authHeader string) (string, bool) {
 	const scheme = "bearer"
 	h := strings.TrimSpace(authHeader)
@@ -330,9 +314,8 @@ func bearerToken(authHeader string) (string, bool) {
 	return token, true
 }
 
-// sameSchemeHost reports whether two URLs share a scheme and host, comparing
-// case-insensitively and ignoring any explicit port (via url.Hostname). It pins a
-// fetched jwks_uri to the origin of the OpenID metadata endpoint.
+// sameSchemeHost reports whether two URLs share a scheme and host,
+// case-insensitively and ignoring any explicit port.
 func sameSchemeHost(a, b string) bool {
 	au, aErr := url.Parse(a)
 	bu, bErr := url.Parse(b)

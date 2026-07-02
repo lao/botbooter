@@ -29,10 +29,9 @@ const (
 )
 
 // conversation holds what a reply needs: the serviceUrl to POST to and the bot's
-// own account (used as the reply's required from field). The reply's recipient is
-// not stored: it is per-activity while replies are keyed by conversation id, so
-// caching one would race concurrent senders in a shared channel. The bot account is
-// conversation-stable, so it is safe to cache.
+// own account (the reply's required from field). The recipient is not cached: it
+// is per-activity while replies are keyed by conversation id, so caching one
+// would race concurrent senders in a shared channel.
 type conversation struct {
 	serviceURL string
 	bot        channelAccount
@@ -41,8 +40,7 @@ type conversation struct {
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	// One detached, cancelable context per connection parents all dispatch:
 	// WithoutCancel lets an acked reply finish during the drain, WithCancel lets
-	// Disconnect abort stragglers after it. The handler captures it directly, so
-	// there is no shared context field to race on.
+	// Disconnect abort stragglers after it.
 	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	mux := http.NewServeMux()
@@ -56,7 +54,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 
 	ln, err := net.Listen("tcp", a.cfg.Addr)
 	if err != nil {
-		detachedCancel() // nothing will consume the context; release it.
+		detachedCancel()
 		return err
 	}
 
@@ -109,11 +107,10 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 		return
 	}
 
-	// Authenticate before trusting the body: validate the JWT and its serviceurl
-	// claim. Use the request context, not runCtx: core cancels runCtx before
-	// srv.Shutdown drains this handler, and srv.Shutdown does not cancel active
-	// request contexts — so a JWKS refresh during drain must ride r.Context() or
-	// it would fail "context canceled" and 401 an already-in-flight request.
+	// Authenticate before trusting the body. Use the request context, not runCtx:
+	// core cancels runCtx before srv.Shutdown drains this handler, so a JWKS
+	// refresh during drain must ride r.Context() or it would 401 an
+	// already-in-flight request.
 	if err := a.validateInbound(r.Context(), r.Header.Get("Authorization"), act.ServiceURL, act.ChannelID); err != nil {
 		log.Printf("teams: inbound request rejected with 401: %v", err)
 		w.WriteHeader(http.StatusUnauthorized)
@@ -139,12 +136,9 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 	a.recordConversation(act.Conversation.ID, act.ServiceURL, act.Recipient)
 
 	msg := toMessage(&act, body)
-	// Dispatch on the detached context, not runCtx: core cancels runCtx before
-	// Disconnect drains this handler, so a reply on runCtx would fail "context
-	// canceled" mid-drain. dispatchCtx drops runCtx's cancellation so an acked
-	// message finishes within the drain window; Disconnect cancels it afterward to
-	// bound a stuck reply. Increment before starting the goroutine so drainDispatch
-	// sees the count (Shutdown waits for this handler to return).
+	// Dispatch on the detached context: core cancels runCtx before Disconnect's
+	// drain waits for this handler, so a reply on runCtx would fail mid-drain.
+	// The increment lands before Shutdown returns, so drainDispatch observes it.
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
@@ -171,9 +165,8 @@ func (a *adapter) Disconnect() error {
 	defer drainCancel()
 	a.drainDispatch(drainCtx)
 
-	// If the drain timed out, cancelDispatch below force-aborts the stragglers; log
-	// that and surface it to the caller, since force-aborting an acked message is
-	// operationally significant and must not read as a clean shutdown.
+	// If the drain timed out, surface it: cancelDispatch below force-aborts
+	// already-acked messages, which is operationally significant.
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
 		log.Printf("teams: drain deadline reached; canceling %d in-flight dispatch(es)", n)
@@ -181,9 +174,9 @@ func (a *adapter) Disconnect() error {
 	}
 
 	// Clear the shared fields only if a reconnect has not installed a newer
-	// connection (identity-compare on srv), so a concurrent Connect's live cancel is
-	// not clobbered. Either way cancel this connection's own context after the drain
-	// so a blocked handler cannot leak. CancelFunc is idempotent.
+	// connection (identity-compare on srv), so a concurrent Connect's live state
+	// is not clobbered. Either way cancel this connection's own context after the
+	// drain so a blocked handler cannot leak.
 	a.mu.Lock()
 	if a.srv == srv {
 		a.srv = nil
@@ -201,10 +194,9 @@ func (a *adapter) Disconnect() error {
 	return drainErr
 }
 
-// drainDispatch waits (bounded by ctx) for in-flight dispatch to finish so an acked
-// message is not dropped at shutdown. It polls an atomic counter, not a WaitGroup:
-// handlers Shutdown may abandon could Add concurrently with Wait and risk a misuse
-// panic.
+// drainDispatch waits, bounded by ctx, for in-flight dispatch so an acked
+// message is not dropped at shutdown. It polls an atomic counter rather than a
+// WaitGroup: an Add racing Wait would risk a misuse panic.
 func (a *adapter) drainDispatch(ctx context.Context) {
 	for a.inflight.Load() > 0 {
 		select {
@@ -216,11 +208,9 @@ func (a *adapter) drainDispatch(ctx context.Context) {
 }
 
 // recordConversation maps a conversation to its serviceUrl and the bot account,
-// with FIFO eviction so a public endpoint cannot grow the map without limit.
-// Eviction is by first-seen: replies happen in the same dispatch as the recording,
-// so request/response bots always resolve. A much-later proactive send could find
-// an evicted conversation, and Send then returns [ErrUnknownConversation] so the
-// caller can distinguish it from a transport failure.
+// with FIFO eviction so a public endpoint cannot grow the map without limit. A
+// much-later proactive send may find an evicted conversation, and Send then
+// returns [ErrUnknownConversation].
 func (a *adapter) recordConversation(id, serviceURL string, bot channelAccount) {
 	if id == "" || serviceURL == "" {
 		return

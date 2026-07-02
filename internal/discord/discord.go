@@ -67,10 +67,7 @@ func (a *adapter) onMessage(ctx context.Context, s *discordgo.Session, m *discor
 	deps.Dispatch(ctx, toMessage(m))
 }
 
-// toMessage maps a Discord message-create event onto a platform-agnostic
-// Message. onMessage passes only fully-formed gateway events; the Author guard
-// tolerates a missing author. Other fields read the embedded *Message, which
-// discordgo always allocates when decoding an event.
+// toMessage maps a Discord message-create event onto a platform-agnostic Message.
 func toMessage(m *discordgo.MessageCreate) *core.Message {
 	msg := &core.Message{
 		ID:        m.ID,

@@ -53,8 +53,7 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 		return fmt.Errorf("%w %q (no inbound activity seen)", ErrUnknownConversation, channelID)
 	}
 
-	// from (the bot account) is required; it was captured from the inbound
-	// Activity's recipient when the conversation was recorded.
+	// from (the bot account) was captured from the inbound Activity's recipient.
 	payload := outboundActivity{
 		Type: "message",
 		Text: text,
@@ -66,8 +65,7 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	endpoint := strings.TrimRight(conv.serviceURL, "/") + "/v3/conversations/" + url.PathEscape(channelID) + "/activities"
 
 	// The cached token can go stale independently of its local expiry (e.g. after
-	// an app-secret rotation), which the Connector rejects with 401/403. On that,
-	// drop the cache and retry once with a freshly minted token.
+	// an app-secret rotation); on 401/403, drop the cache and retry once.
 	status, err := a.postActivity(ctx, endpoint, body)
 	if err != nil && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
 		a.invalidateToken()

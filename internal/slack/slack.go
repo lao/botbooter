@@ -86,9 +86,9 @@ func New(cfg Config) (*core.Bot, error) {
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
-	// A detached, cancelable context parents all dispatch: WithoutCancel drops
-	// runCtx's cancellation so a queued handler can finish during the shutdown
-	// drain, WithCancel lets Disconnect abort stragglers after the deadline.
+	// A detached, cancelable context parents all dispatch: WithoutCancel lets a
+	// queued handler finish during the shutdown drain, WithCancel lets Disconnect
+	// abort stragglers after the deadline.
 	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
 	queue := a.startDispatcher(detachedCancel)
 
@@ -132,11 +132,10 @@ func (a *adapter) pumpEvents(ctx, dispatchCtx context.Context, events <-chan soc
 }
 
 // Disconnect drains queued dispatch before returning so an acked event is not
-// abandoned at shutdown. core has already canceled runCtx, so the pump is
-// exiting and will close the queue; the dispatcher then finishes the remaining
-// handlers on the detached context and closes drained. Handlers must respect
-// their context: one that blocks past the drain deadline ignoring cancellation
-// leaks its dispatcher goroutine for the life of the process.
+// abandoned at shutdown: core has already canceled runCtx, so the pump is
+// exiting and will close the queue; the dispatcher then finishes the remainder
+// on the detached context. A handler that ignores cancellation past the drain
+// deadline leaks its dispatcher goroutine.
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	drained := a.drained
@@ -217,10 +216,8 @@ func SocketClient(b *core.Bot) *socketmode.Client {
 }
 
 // toMessage maps a Slack message event onto a platform-agnostic Message.
-// AuthorName is left empty: the event carries only a user id, and resolving a
-// name would require a per-message API call.
-// Slack has no separate message id, so the message ts is reused as ID and (via
-// ThreadTimeStamp) as the thread/reply key.
+// AuthorName is left empty (resolving it would need a per-message API call);
+// the message ts doubles as ID and, via ThreadTimeStamp, the reply key.
 func toMessage(msg *slackevents.MessageEvent) *core.Message {
 	return &core.Message{
 		ID:               msg.TimeStamp,
@@ -263,8 +260,7 @@ func parseSlackTimestamp(ts string) time.Time {
 	var nsec int64
 	if frac != "" {
 		// Slack's fraction is microseconds; pad/truncate to 6 digits. ParseUint
-		// rejects a sign, so a malformed fraction leaves nsec at 0 instead of
-		// shifting the whole time backward.
+		// rejects a sign, so a malformed fraction leaves nsec at 0.
 		if micros, err := strconv.ParseUint((frac + "000000")[:6], 10, 64); err == nil {
 			nsec = int64(micros) * 1000
 		}
