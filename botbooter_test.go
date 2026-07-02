@@ -360,17 +360,26 @@ func TestBot_Start_GracefulShutdownOnSignal(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- bot.Start() }()
 
-	// Give Start time to register the signal handler before we signal.
-	time.Sleep(150 * time.Millisecond)
 	proc, err := os.FindProcess(os.Getpid())
 	asserts.NoError(t, err, "FindProcess")
-	asserts.NoError(t, proc.Signal(syscall.SIGTERM), "send SIGTERM")
 
-	select {
-	case err := <-done:
-		asserts.NoError(t, err, "Start should return after SIGTERM")
-	case <-time.After(2 * time.Second):
-		t.Fatal("Start did not shut down after SIGTERM")
+	// Start registers its signal handler asynchronously, so a signal sent too
+	// early is missed. Resend SIGTERM until Start observes it and returns, rather
+	// than sleeping a load-dependent fixed interval. The guard handler above
+	// keeps an early signal from terminating the test binary.
+	resend := time.NewTicker(20 * time.Millisecond)
+	defer resend.Stop()
+	deadline := time.After(2 * time.Second)
+	for {
+		asserts.NoError(t, proc.Signal(syscall.SIGTERM), "send SIGTERM")
+		select {
+		case err := <-done:
+			asserts.NoError(t, err, "Start should return after SIGTERM")
+			return
+		case <-resend.C:
+		case <-deadline:
+			t.Fatal("Start did not shut down after SIGTERM")
+		}
 	}
 }
 

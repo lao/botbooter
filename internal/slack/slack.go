@@ -96,25 +96,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	// exit lets the dispatcher drain the remainder and signal drained.
 	go func() {
 		defer close(queue)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case evt, ok := <-a.socket.Events:
-				if !ok {
-					return
-				}
-				fn := a.prepareDispatch(detachedCtx, evt, deps)
-				if fn == nil {
-					continue
-				}
-				select {
-				case queue <- fn:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
+		a.pumpEvents(ctx, detachedCtx, a.socket.Events, queue, deps)
 	}()
 
 	go func() {
@@ -122,6 +104,31 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	}()
 
 	return nil
+}
+
+// pumpEvents drains events until ctx is canceled or the channel closes,
+// acking each and enqueuing its dispatch (on dispatchCtx) in order. A full
+// queue applies backpressure; a cancellation during that wait exits promptly.
+func (a *adapter) pumpEvents(ctx, dispatchCtx context.Context, events <-chan socketmode.Event, queue chan<- func(), deps core.AdapterDeps) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-events:
+			if !ok {
+				return
+			}
+			fn := a.prepareDispatch(dispatchCtx, evt, deps)
+			if fn == nil {
+				continue
+			}
+			select {
+			case queue <- fn:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
 }
 
 // Disconnect drains queued dispatch before returning so an acked event is not

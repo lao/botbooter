@@ -334,6 +334,84 @@ func TestAddr_ExposesBoundListener(t *testing.T) {
 	asserts.Equal(t, Addr(b), "", "bound address cleared after Disconnect")
 }
 
+// TestDisconnect_SlowShutdownDoesNotStarveDrain mirrors the whatsapp sibling: a
+// slow client makes srv.Shutdown burn its full budget, and the test proves the
+// in-flight dispatch drain still gets its own budget and finishes an acked
+// message. ~6s of real time, so it is env-gated like the whatsapp version.
+func TestDisconnect_SlowShutdownDoesNotStarveDrain(t *testing.T) {
+	if os.Getenv("BOTBOOTER_TEAMS_DRAIN_TIMING_TEST") == "" {
+		t.Skip("set BOTBOOTER_TEAMS_DRAIN_TIMING_TEST to run the ~6s slow-shutdown drain timing test")
+	}
+
+	a := testAdapter(t) // cfg.Addr is 127.0.0.1:0; wires a JWKS server for validation
+
+	dispatchDone := make(chan struct{})
+	deps := core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+		Dispatch: func(context.Context, *core.Message) {
+			time.Sleep(6 * time.Second)
+			close(dispatchDone)
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
+
+	a.mu.Lock()
+	addr := a.boundAddr
+	a.mu.Unlock()
+	asserts.True(t, addr != "", "listener address exposed after Connect")
+
+	// 1) A valid activity: the handler acks 200 and spawns the in-flight dispatch.
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+a.cfg.Path, strings.NewReader(body))
+	asserts.NoError(t, err, "build request")
+	req.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	resp, err := http.DefaultClient.Do(req)
+	asserts.NoError(t, err, "post activity")
+	_ = resp.Body.Close()
+	asserts.Equal(t, resp.StatusCode, http.StatusOK, "activity acked")
+
+	deadline := time.Now().Add(time.Second)
+	for a.inflight.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	asserts.Equal(t, a.inflight.Load(), int64(1), "dispatch is in-flight")
+
+	// 2) A slow client promises a body it never sends, holding a connection active
+	//    through Shutdown so Shutdown burns its full budget.
+	slow, err := net.Dial("tcp", addr)
+	asserts.NoError(t, err, "slow dial")
+	defer func() { _ = slow.Close() }()
+	_, err = slow.Write([]byte("POST " + a.cfg.Path + " HTTP/1.1\r\nHost: x\r\n" +
+		"Content-Length: 1000000\r\n\r\n"))
+	asserts.NoError(t, err, "slow write")
+	time.Sleep(100 * time.Millisecond)
+
+	// 3) Disconnect: Shutdown burns ~5s on the slow client; drain must still save
+	//    the acked 6s dispatch.
+	start := time.Now()
+	err = a.Disconnect()
+	elapsed := time.Since(start)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unexpected Disconnect error: %v", err)
+	}
+
+	asserts.Equal(t, a.inflight.Load(), int64(0),
+		"an acked in-flight dispatch must survive a slow shutdown (separate drain budget)")
+	if elapsed < 4*time.Second {
+		t.Fatalf("expected Shutdown to burn ~5s on the slow client, elapsed=%s", elapsed)
+	}
+
+	select {
+	case <-dispatchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch goroutine never completed")
+	}
+}
+
 // TestDisconnect_CancelsDispatchContext guards the leak fix: Disconnect must cancel
 // the connection's detached dispatch context after the drain, so a handler blocked
 // on ctx.Done() cannot leak past shutdown. The connection's cancel is wired by hand

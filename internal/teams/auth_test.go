@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,7 +166,29 @@ func TestPublicKey_LargeJWKSDecodes(t *testing.T) {
 }
 
 func TestPublicKey_ConcurrentRefreshRechecksCache(t *testing.T) {
-	a := testAdapter(t)
+	pub := signingKey(t).Public().(*rsa.PublicKey)
+	var keyFetches atomic.Int64
+	var base string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openid", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"jwks_uri": base + "/keys"})
+	})
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
+		keyFetches.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+			"kid": testKID,
+			"kty": "RSA",
+			"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+		}}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	base = srv.URL
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.openIDURL = srv.URL + "/openid"
 
 	type result struct {
 		key *jwksKey
@@ -183,8 +206,12 @@ func TestPublicKey_ConcurrentRefreshRechecksCache(t *testing.T) {
 		}()
 	}
 
-	// Make every caller observe the stale cache before allowing one of them to
-	// refresh it. The remaining callers then re-check the newly populated cache.
+	// Hold fetchMu so every caller passes its first cache check (cache empty,
+	// keysAt zero, so not rate-limited) and blocks on the refresh lock before any
+	// fetch sets keysAt; releasing it lets exactly one caller fetch while the rest
+	// re-check the freshly populated cache. The short settle lets all three reach
+	// fetchMu; the fetch-count assertion below then proves the coalescing actually
+	// happened rather than silently not exercising the recheck path.
 	a.fetchMu.Lock()
 	run(testKID, known)
 	run("missing-1", missing1)
@@ -200,6 +227,7 @@ func TestPublicKey_ConcurrentRefreshRechecksCache(t *testing.T) {
 	asserts.NotNil(t, knownResult.key, "known kid should use refreshed cache")
 	asserts.Error(t, (<-missing1).err, "first unknown kid")
 	asserts.Error(t, (<-missing2).err, "second unknown kid")
+	asserts.Equal(t, keyFetches.Load(), int64(1), "the concurrent burst coalesced into a single JWKS fetch")
 }
 
 func TestPublicKey_RejectsForeignJWKSURI(t *testing.T) {

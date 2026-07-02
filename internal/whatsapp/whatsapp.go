@@ -63,18 +63,28 @@ type Config struct {
 	// Token is the Cloud API access token sent as a Bearer credential on
 	// outbound calls. Prefer a long-lived system-user token; short-lived user
 	// tokens expire in ~24h, after which Send fails.
-	Token         string
+	Token string
+	// PhoneNumberID is the WhatsApp Business phone-number id that outbound
+	// messages are sent from; it forms the Graph API send path.
 	PhoneNumberID string
 	// AppSecret verifies the X-Hub-Signature-256 HMAC on inbound webhook
 	// requests. Required: without it the endpoint would accept spoofed payloads.
-	AppSecret   string
+	AppSecret string
+	// VerifyToken is the shared secret Meta echoes during the GET webhook
+	// verification handshake; the adapter accepts the subscription only on match.
 	VerifyToken string
 	// Addr is the local TCP address the webhook server binds, e.g. ":8080". A
 	// bare port ("8080") is accepted as shorthand for ":8080".
-	Addr         string
-	Path         string
+	Addr string
+	// Path is the webhook route the server handles; defaults to the adapter's
+	// standard path when empty.
+	Path string
+	// GraphVersion overrides the Meta Graph API version in outbound URLs;
+	// defaults to a pinned version when empty.
 	GraphVersion string
-	HTTPClient   *http.Client
+	// HTTPClient overrides the client used for outbound Cloud API calls; a
+	// default client with a 30s timeout is used when nil.
+	HTTPClient *http.Client
 }
 
 // Message is the parsed payload of a WhatsApp Cloud API webhook message.

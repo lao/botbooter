@@ -1,12 +1,65 @@
 package slack
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
+
 	"github.com/lao/botbooter/internal/asserts"
+	"github.com/lao/botbooter/internal/core"
 )
+
+// The event pump acks and enqueues an EventsAPI message event for dispatch,
+// exercising Connect's loop hermetically via the exported Events channel
+// without any network connection.
+func TestPumpEvents_EnqueuesDispatch(t *testing.T) {
+	a := newTestAdapter()
+	events := make(chan socketmode.Event, 1)
+	queue := make(chan func(), 1)
+
+	var got *core.Message
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.pumpEvents(ctx, context.Background(), events, queue, captureDeps(&got))
+
+	events <- socketmode.Event{
+		Type: socketmode.EventTypeEventsAPI,
+		Data: slackEvent(&slackevents.MessageEvent{Text: "hi", User: "U1", Channel: "C1"}),
+	}
+
+	select {
+	case fn := <-queue:
+		fn() // the dispatcher would run this; invoke it directly to observe dispatch
+	case <-time.After(2 * time.Second):
+		t.Fatal("pump did not enqueue a dispatch")
+	}
+	asserts.NotNil(t, got, "event dispatched through the pump")
+}
+
+// A canceled context stops the pump promptly even with no events pending.
+func TestPumpEvents_StopsOnCancel(t *testing.T) {
+	a := newTestAdapter()
+	events := make(chan socketmode.Event)
+	queue := make(chan func(), 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		a.pumpEvents(ctx, context.Background(), events, queue, captureDeps(nil))
+		close(done)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pump did not stop on context cancellation")
+	}
+}
 
 // The dispatcher must run queued handlers to completion when Disconnect drains,
 // rather than abandoning acked work at shutdown.
