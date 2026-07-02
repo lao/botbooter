@@ -111,7 +111,9 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 // Disconnect drains queued dispatch before returning so an acked event is not
 // abandoned at shutdown. core has already canceled runCtx, so the pump is
 // exiting and will close the queue; the dispatcher then finishes the remaining
-// handlers on the detached context and closes drained.
+// handlers on the detached context and closes drained. Handlers must respect
+// their context: one that blocks past the drain deadline ignoring cancellation
+// leaks its dispatcher goroutine for the life of the process.
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	drained := a.drained

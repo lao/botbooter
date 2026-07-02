@@ -136,12 +136,13 @@ func (a *adapter) ResolveAttachmentURL(ctx context.Context, att core.Attachment)
 	if id == "" {
 		return "", nil
 	}
-	f, err := a.client.GetFile(ctx, &bot.GetFileParams{FileID: id})
+	client := a.currentClient()
+	f, err := client.GetFile(ctx, &bot.GetFileParams{FileID: id})
 	if err != nil {
 		return "", fmt.Errorf("resolve telegram file %s: %w", id, err)
 	}
 	warnTokenInURL()
-	return a.client.FileDownloadLink(f), nil
+	return client.FileDownloadLink(f), nil
 }
 
 func warnTokenInURL() {
