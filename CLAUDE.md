@@ -14,7 +14,7 @@ make test       # go test ./...
 make test-race  # race detector (CI runs this; the lifecycle code is concurrency-heavy)
 make cover      # race + atomic coverage, prints total
 make lint       # golangci-lint v2 (needs golangci-lint installed)
-make run-cli    # run _examples/v1 in CLI mode, no credentials
+make run-cli    # run _examples/basic in CLI mode, no credentials
 ```
 
 Run a single test: `go test -race -run TestBot_Connect/AlreadyConnected ./...` (subtests use `t.Run`, address them with `Parent/Child`).

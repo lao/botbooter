@@ -27,7 +27,7 @@ vet:
 
 # Run the example bot locally in CLI mode (no credentials required).
 run-cli:
-	go run ./_examples/v1 cli
+	go run ./_examples/basic cli
 
 tidy:
 	go mod tidy

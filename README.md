@@ -66,11 +66,11 @@ func main() {
 Or run the bundled example directly:
 
 ```bash
-go run ./_examples/v1            # CLI mode (default, no credentials)
-go run ./_examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
-go run ./_examples/v1 discord    # uses DISCORD_BOT_TOKEN
-go run ./_examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
-go run ./_examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
+go run ./_examples/basic            # CLI mode (default, no credentials)
+go run ./_examples/basic slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
+go run ./_examples/basic discord    # uses DISCORD_BOT_TOKEN
+go run ./_examples/basic telegram   # uses TELEGRAM_BOT_TOKEN
+go run ./_examples/basic whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
 ```
 
 ## Concepts
