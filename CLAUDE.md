@@ -39,6 +39,14 @@ The codebase is a **facade over internal packages**. Understanding the split is 
 
 Commands are regex patterns compiled once in `AddHandler` (invalid patterns return an error there). Matching is **first-match-wins**; no match falls through to the unknown-command handler if set. Middleware is composed inner-to-outer so registration order = execution order, each calling `next`. The whole dispatch is wrapped in a `recover` — a panicking handler is logged, not fatal.
 
+### Reactions (`core.Bot.dispatchReaction`)
+
+Emoji-reaction handling is a **second, optional ingress path** alongside messages, built on the same optional-capability seam as `AttachmentResolver` — the mandatory `Adapter` interface is unchanged.
+
+- Ingress: adapters that see reaction events map them into a `core.Reaction` and call `deps.DispatchReaction`; consumers register `bot.OnReaction(handler)`. Unlike commands, reaction handlers are **not** regex-matched (branch on `Reaction.Emoji` in code), run **all** registered handlers with **per-handler** `recover`, and **bypass the `Middleware` chain**.
+- Egress: `bot.ReplyToMessage(ctx, channelID, replyToID, text)` posts a threaded reply. Adapters implement the optional `core.ThreadedSender` (`SendThreaded`) to thread it (Slack `thread_ts`, Discord message reference, Telegram `reply_to_message_id`, WhatsApp `context.message_id`); adapters without it fall back to a plain unthreaded `Send`.
+- Scope is **added-only** (removed reactions are dropped). `Reaction.Emoji` is platform-shaped: a shortname (`thumbsup`) on Slack, a unicode char elsewhere — best-effort, not normalized. There is **no self-reaction filter** anywhere: v1 has no reaction egress, so a self-reply loop is impossible; revisit this if a reaction-add egress is ever added. Per platform: Slack skips file/file-comment reactions (no reply target); Telegram diffs `NewReaction`/`OldReaction` for genuine adds and needs `message_reaction` in `allowed_updates` (plus bot-admin in groups); WhatsApp treats an empty-emoji reaction as a removal. Read `Reaction.Raw` with the matching typed accessor (`slack.RawReaction`, `discord.RawReaction`, `telegram.RawReactionUpdate`, `whatsapp.RawReaction`). **A Slack consumer must also subscribe the app to the `reaction_added` Events API event and grant `reactions:read`, or `OnReaction` never fires — a config requirement, not a code bug.**
+
 ### Lifecycle (the subtle part — read `internal/core/core.go` before touching it)
 
 - `Connect` is **non-blocking**: adapters start their event loop in a goroutine and report termination via `deps.Done(err)`. `Run` blocks, selecting on `ctx.Done()` vs the done channel, then disconnects.
