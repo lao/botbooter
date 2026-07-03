@@ -78,6 +78,27 @@ type CLIMessage struct {
 	Attachments []Attachment
 }
 
+// Reaction is a platform-agnostic emoji reaction added to a message, handed to
+// handlers registered with [Bot.OnReaction]. UserID, ChannelID and MessageID are
+// always set; MessageID identifies the reacted message and is the reply target for
+// [Bot.ReplyToMessage]. Emoji is best-effort and platform-shaped: a shortname
+// ("thumbsup") on Slack, a unicode character elsewhere. AuthorName is best-effort
+// and inline-only — empty on platforms whose reaction payload carries only a user
+// id. Raw carries the originating platform event; read it with the matching typed
+// accessor (e.g. slack.RawReaction).
+type Reaction struct {
+	Emoji      string
+	UserID     string
+	AuthorName string
+	ChannelID  string
+	MessageID  string
+
+	Raw any
+}
+
+// ReactionHandler handles an emoji reaction dispatched to [Bot.OnReaction].
+type ReactionHandler func(ctx context.Context, b *Bot, r *Reaction)
+
 // CommandHandler handles a dispatched message for a matched command.
 type CommandHandler func(ctx context.Context, b *Bot, m *Message)
 
@@ -125,11 +146,23 @@ type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
 }
 
+// ThreadedSender is an OPTIONAL capability an Adapter may implement to post a
+// reply nested on a specific message. Like [AttachmentResolver] it is deliberately
+// NOT part of the mandatory Adapter interface: adapters that implement it get
+// threaded replies via [Bot.ReplyToMessage]; those that do not fall back to a
+// plain channel message.
+type ThreadedSender interface {
+	SendThreaded(ctx context.Context, channelID, replyToID, text string) error
+}
+
 // AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
+// DispatchReaction is optional: adapters on platforms without reaction events
+// simply never call it.
 type AdapterDeps struct {
-	Dispatch   func(ctx context.Context, m *Message)
-	Done       func(err error)
-	Disconnect func() error
+	Dispatch         func(ctx context.Context, m *Message)
+	DispatchReaction func(ctx context.Context, r *Reaction)
+	Done             func(err error)
+	Disconnect       func() error
 }
 
 // Bot is the platform-agnostic chat bot. A Bot is safe for concurrent use.
@@ -141,6 +174,7 @@ type Bot struct {
 	commands              []Command
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
+	reactionHandlers      []ReactionHandler
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -190,6 +224,30 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }
 
+// OnReaction registers h to run whenever a user adds an emoji reaction, on the
+// platforms that surface reaction events (Slack, Discord, Telegram, WhatsApp).
+// Handlers are not regex-matched — branch on Reaction.Emoji inside the handler —
+// and, unlike message dispatch, reactions bypass the Middleware chain.
+func (b *Bot) OnReaction(h ReactionHandler) {
+	b.reactionHandlers = append(b.reactionHandlers, h)
+}
+
+// dispatchReaction runs every registered reaction handler. Each handler call is
+// recovered individually, so a panic in one handler neither skips the others nor
+// takes down the adapter's event loop.
+func (b *Bot) dispatchReaction(ctx context.Context, r *Reaction) {
+	for _, h := range b.reactionHandlers {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("botbooter: recovered from panic while handling reaction: %v", rec)
+				}
+			}()
+			h(ctx, b, r)
+		}()
+	}
+}
+
 // Connect starts the adapter's event loop and returns without blocking. It
 // returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
 // if the Bot has no adapter, or any error from the adapter's own Connect.
@@ -228,9 +286,10 @@ func (b *Bot) Connect(ctx context.Context) error {
 	}
 
 	deps := AdapterDeps{
-		Dispatch:   b.dispatch,
-		Done:       func(err error) { b.done <- err },
-		Disconnect: b.Disconnect,
+		Dispatch:         b.dispatch,
+		DispatchReaction: b.dispatchReaction,
+		Done:             func(err error) { b.done <- err },
+		Disconnect:       b.Disconnect,
 	}
 	if err := b.adapter.Connect(runCtx, deps); err != nil {
 		cancel()
@@ -327,6 +386,21 @@ func (b *Bot) SendMessage(channelID, text string) error {
 func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) error {
 	if b.adapter == nil {
 		return ErrUnknownBotType
+	}
+	return b.adapter.Send(ctx, channelID, text)
+}
+
+// ReplyToMessage posts text as a reply nested on the message identified by
+// replyToID in channelID. If the Bot's adapter implements [ThreadedSender] the
+// call is delegated; otherwise it falls back to a plain [Bot.SendMessageContext],
+// so the reply still reaches the channel, just not threaded. It returns
+// [ErrUnknownBotType] if the Bot has no adapter.
+func (b *Bot) ReplyToMessage(ctx context.Context, channelID, replyToID, text string) error {
+	if b.adapter == nil {
+		return ErrUnknownBotType
+	}
+	if s, ok := b.adapter.(ThreadedSender); ok {
+		return s.SendThreaded(ctx, channelID, replyToID, text)
 	}
 	return b.adapter.Send(ctx, channelID, text)
 }

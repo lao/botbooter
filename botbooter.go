@@ -46,4 +46,8 @@ type (
 	CommandHandler = core.CommandHandler
 	// Middleware wraps message dispatch. See [core.Middleware].
 	Middleware = core.Middleware
+	// Reaction is an emoji reaction added to a message. See [core.Reaction].
+	Reaction = core.Reaction
+	// ReactionHandler handles a reaction. See [core.ReactionHandler].
+	ReactionHandler = core.ReactionHandler
 )

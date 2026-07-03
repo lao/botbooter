@@ -332,3 +332,115 @@ func TestBot_ResolveAttachmentURL_ResolverEmptyNotOverridden(t *testing.T) {
 	asserts.NoError(t, err, "a resolver returning empty is not an error")
 	asserts.Equal(t, url, "", "an adapter-returned empty is NOT overridden by att.URL")
 }
+
+// threadedStub is a stubAdapter that also implements ThreadedSender, recording
+// the arguments it was handed.
+type threadedStub struct {
+	stubAdapter
+	gotChannel, gotReplyTo, gotText string
+	called                          bool
+}
+
+func (t *threadedStub) SendThreaded(_ context.Context, channelID, replyToID, text string) error {
+	t.called = true
+	t.gotChannel, t.gotReplyTo, t.gotText = channelID, replyToID, text
+	return nil
+}
+
+// sendRecorder is a stubAdapter that records plain Send calls (stubAdapter.Send
+// discards them) so the ReplyToMessage fallback can be asserted.
+type sendRecorder struct {
+	stubAdapter
+	gotChannel, gotText string
+	called              bool
+}
+
+func (s *sendRecorder) Send(_ context.Context, channelID, text string) error {
+	s.called = true
+	s.gotChannel, s.gotText = channelID, text
+	return nil
+}
+
+// reactionCaptureAdapter captures the AdapterDeps it was handed at Connect so a
+// test can drive DispatchReaction directly.
+type reactionCaptureAdapter struct {
+	stubAdapter
+	deps AdapterDeps
+}
+
+func (a *reactionCaptureAdapter) Connect(_ context.Context, deps AdapterDeps) error {
+	a.deps = deps
+	return nil
+}
+
+func TestBot_OnReaction_RunsAllHandlers(t *testing.T) {
+	bot := &Bot{}
+	var got1, got2 *Reaction
+	bot.OnReaction(func(_ context.Context, _ *Bot, r *Reaction) { got1 = r })
+	bot.OnReaction(func(_ context.Context, _ *Bot, r *Reaction) { got2 = r })
+
+	r := &Reaction{Emoji: "thumbsup", UserID: "U1", ChannelID: "C1", MessageID: "M1"}
+	bot.dispatchReaction(context.Background(), r)
+
+	asserts.True(t, got1 == r, "first reaction handler runs")
+	asserts.True(t, got2 == r, "second reaction handler runs")
+}
+
+func TestBot_dispatchReaction_PerHandlerRecover(t *testing.T) {
+	bot := &Bot{}
+	secondCalled := false
+	bot.OnReaction(func(_ context.Context, _ *Bot, _ *Reaction) { panic("reaction boom") })
+	bot.OnReaction(func(_ context.Context, _ *Bot, _ *Reaction) { secondCalled = true })
+
+	// A panic in the first handler must neither skip the second nor propagate.
+	bot.dispatchReaction(context.Background(), &Reaction{Emoji: "x"})
+
+	asserts.True(t, secondCalled, "a panicking handler must not skip later handlers")
+}
+
+func TestBot_Connect_WiresDispatchReaction(t *testing.T) {
+	a := &reactionCaptureAdapter{}
+	bot := New(SlackBotType, a)
+	fired := false
+	bot.OnReaction(func(_ context.Context, _ *Bot, _ *Reaction) { fired = true })
+
+	asserts.NoError(t, bot.Connect(context.Background()), "Connect")
+	t.Cleanup(func() { _ = bot.Disconnect() })
+
+	asserts.True(t, a.deps.DispatchReaction != nil, "Connect wires DispatchReaction into AdapterDeps")
+	a.deps.DispatchReaction(context.Background(), &Reaction{Emoji: "x"})
+	asserts.True(t, fired, "dispatching through the wired callback runs OnReaction handlers")
+}
+
+func TestBot_ReplyToMessage_NilAdapter(t *testing.T) {
+	bot := &Bot{BotType: BotType(999)}
+
+	err := bot.ReplyToMessage(context.Background(), "C1", "M1", "hi")
+
+	asserts.ErrorIs(t, err, ErrUnknownBotType, "ReplyToMessage with no adapter")
+}
+
+func TestBot_ReplyToMessage_DelegatesToThreadedSender(t *testing.T) {
+	ts := &threadedStub{}
+	bot := New(SlackBotType, ts)
+
+	err := bot.ReplyToMessage(context.Background(), "C1", "M1", "hi")
+
+	asserts.NoError(t, err, "threaded send")
+	asserts.True(t, ts.called, "SendThreaded invoked")
+	asserts.Equal(t, ts.gotChannel, "C1", "channel threaded through")
+	asserts.Equal(t, ts.gotReplyTo, "M1", "replyToID threaded through")
+	asserts.Equal(t, ts.gotText, "hi", "text threaded through")
+}
+
+func TestBot_ReplyToMessage_FallsBackToSend(t *testing.T) {
+	s := &sendRecorder{}
+	bot := New(CLIBotType, s)
+
+	err := bot.ReplyToMessage(context.Background(), "C1", "M1", "hi")
+
+	asserts.NoError(t, err, "fallback send")
+	asserts.True(t, s.called, "an adapter without ThreadedSender falls back to Send")
+	asserts.Equal(t, s.gotChannel, "C1", "fallback posts to the channel")
+	asserts.Equal(t, s.gotText, "hi", "fallback sends the text")
+}
