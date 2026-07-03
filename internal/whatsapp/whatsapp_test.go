@@ -79,6 +79,84 @@ const statusWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WAB
 // field is a string (not an object), which fails to unmarshal into inboundMessage.
 const mixedBatchWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"messages":[{"from":"123","id":"wamid.1","type":"text","text":{"body":"ok"}},{"from":"456","id":"wamid.2","type":"text","text":"oops"}]}}]}]}`
 
+const reactionWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"contacts":[{"wa_id":"123","profile":{"name":"Ada"}}],"messages":[{"from":"123","id":"wamid.r1","timestamp":"1","type":"reaction","reaction":{"message_id":"wamid.orig","emoji":"👍"}}]}}]}]}`
+
+const reactionRemovalWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"messages":[{"from":"123","id":"wamid.r2","timestamp":"1","type":"reaction","reaction":{"message_id":"wamid.orig","emoji":""}}]}}]}]}`
+
+// captureReactionDeps returns AdapterDeps that append every dispatched reaction to
+// *got, signaling done after each (mirrors captureDeps for the reaction path).
+func captureReactionDeps(got *[]*core.Reaction, done chan<- struct{}) core.AdapterDeps {
+	return core.AdapterDeps{
+		DispatchReaction: func(_ context.Context, r *core.Reaction) {
+			*got = append(*got, r)
+			if done != nil {
+				done <- struct{}{}
+			}
+		},
+	}
+}
+
+func TestHandleWebhook_DispatchesReaction(t *testing.T) {
+	a := testAdapter()
+	var got []*core.Reaction
+	body := []byte(reactionWebhook)
+
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(reactionWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w := httptest.NewRecorder()
+	done := make(chan struct{}, 1)
+
+	a.handleWebhook(context.Background(), w, r, captureReactionDeps(&got, done))
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, len(got), 1, "one reaction should be dispatched")
+	asserts.Equal(t, got[0].Emoji, "👍", "Emoji")
+	asserts.Equal(t, got[0].UserID, "123", "UserID is the sender")
+	asserts.Equal(t, got[0].ChannelID, "123", "ChannelID is the sender (reply target)")
+	asserts.Equal(t, got[0].MessageID, "wamid.orig", "MessageID is the reacted message")
+	asserts.Equal(t, got[0].AuthorName, "Ada", "AuthorName from the contacts profile")
+	wm, ok := RawReaction(got[0])
+	asserts.True(t, ok, "RawReaction recovers the message")
+	asserts.Equal(t, wm.Reaction.Emoji, "👍", "raw carries the reaction")
+}
+
+func TestHandleWebhook_SkipsReactionRemoval(t *testing.T) {
+	a := testAdapter()
+	var got []*core.Reaction
+	body := []byte(reactionRemovalWebhook)
+
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(reactionRemovalWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, r, captureReactionDeps(&got, nil))
+
+	// Dispatch is off the request path; wait for the goroutine to drain, then
+	// assert nothing was dispatched (empty emoji = removal, added-only scope).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.drainDispatch(ctx)
+	asserts.Equal(t, len(got), 0, "a reaction removal (empty emoji) is not dispatched")
+}
+
+func TestSendThreaded_IncludesContext(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := &adapter{cfg: validConfig(), baseURL: srv.URL, http: srv.Client()}
+	a.cfg.GraphVersion = defaultGraphVersion
+
+	err := a.SendThreaded(context.Background(), "123", "wamid.orig", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should succeed")
+	asserts.True(t, strings.Contains(string(body), `"context"`), "body carries a context object: "+string(body))
+	asserts.True(t, strings.Contains(string(body), `"message_id":"wamid.orig"`), "context targets the reacted message: "+string(body))
+}
+
 func TestNew(t *testing.T) {
 	bot, err := New(validConfig())
 

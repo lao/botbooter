@@ -90,7 +90,15 @@ type Message struct {
 	AuthorName string
 	Timestamp  time.Time
 	Media      *Media
+	Reaction   *ReactionInfo
 	Raw        json.RawMessage
+}
+
+// ReactionInfo is set on a Message of Type "reaction": the id of the message the
+// user reacted to and the emoji. Emoji is empty when the reaction was removed.
+type ReactionInfo struct {
+	MessageID string
+	Emoji     string
 }
 
 // Media is a media object attached to a WhatsApp message. The Cloud API delivers
@@ -230,6 +238,16 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 	go func() {
 		defer a.inflight.Add(-1)
 		for _, m := range messages {
+			if m.Reaction != nil {
+				// An empty emoji means the reaction was removed; scope is
+				// added-only, so skip it. No self-reaction filter: the bot never
+				// adds reactions, so a self-reply loop is impossible.
+				if m.Reaction.Emoji == "" {
+					continue
+				}
+				deps.DispatchReaction(ctx, toReaction(m))
+				continue
+			}
 			deps.Dispatch(ctx, toMessage(m))
 		}
 	}()
@@ -266,13 +284,19 @@ func (a *adapter) drainDispatch(ctx context.Context) {
 }
 
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	payload := map[string]any{
+	return a.postMessage(ctx, map[string]any{
 		"messaging_product": "whatsapp",
 		"recipient_type":    "individual",
 		"to":                channelID,
 		"type":              "text",
 		"text":              map[string]any{"preview_url": false, "body": text},
-	}
+	})
+}
+
+// postMessage POSTs a Cloud API message payload to the /messages endpoint,
+// shared by Send and SendThreaded so the request/auth/error handling stays in one
+// place.
+func (a *adapter) postMessage(ctx context.Context, payload map[string]any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -299,6 +323,20 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	// Drain the success body so the connection can be reused (keep-alive).
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// SendThreaded implements [core.ThreadedSender]: it sends text as a reply that
+// quotes the message identified by replyToID via the Cloud API message context.
+func (a *adapter) SendThreaded(ctx context.Context, channelID, replyToID, text string) error {
+	payload := map[string]any{
+		"messaging_product": "whatsapp",
+		"recipient_type":    "individual",
+		"to":                channelID,
+		"type":              "text",
+		"text":              map[string]any{"preview_url": false, "body": text},
+		"context":           map[string]any{"message_id": replyToID},
+	}
+	return a.postMessage(ctx, payload)
 }
 
 // Attachments returns the media attached to m. The Cloud API delivers media by
@@ -368,6 +406,14 @@ func RawMessage(m *core.Message) (*Message, bool) {
 	return wm, ok
 }
 
+// RawReaction returns the parsed WhatsApp reaction message carried on r, reporting
+// whether r originated from a WhatsApp reaction. The reacted message's id and
+// emoji are on the returned Message's Reaction field.
+func RawReaction(r *core.Reaction) (*Message, bool) {
+	wm, ok := r.Raw.(*Message)
+	return wm, ok
+}
+
 func validateSignature(secret, header string, body []byte) bool {
 	if secret == "" || !strings.HasPrefix(header, signaturePrefix) {
 		return false
@@ -410,6 +456,10 @@ type inboundMessage struct {
 	Video    *mediaObject `json:"video"`
 	Audio    *mediaObject `json:"audio"`
 	Sticker  *mediaObject `json:"sticker"`
+	Reaction *struct {
+		MessageID string `json:"message_id"`
+		Emoji     string `json:"emoji"`
+	} `json:"reaction"`
 }
 
 type mediaObject struct {
@@ -480,6 +530,9 @@ func parseMessage(raw json.RawMessage) (*Message, error) {
 			msg.Text = media.Caption
 		}
 	}
+	if in.Reaction != nil {
+		msg.Reaction = &ReactionInfo{MessageID: in.Reaction.MessageID, Emoji: in.Reaction.Emoji}
+	}
 	return msg, nil
 }
 
@@ -499,6 +552,21 @@ func toMessage(m *Message) *core.Message {
 		ChannelID:  m.From,
 		Content:    m.Text,
 		Timestamp:  m.Timestamp,
+		Raw:        m,
+	}
+}
+
+// toReaction maps a WhatsApp reaction message onto a platform-agnostic Reaction.
+// The reacted message's id comes from the reaction payload; ChannelID and UserID
+// are both the sender's WhatsApp id, and AuthorName is correlated from the
+// webhook's contacts list (as for messages).
+func toReaction(m *Message) *core.Reaction {
+	return &core.Reaction{
+		Emoji:      m.Reaction.Emoji,
+		UserID:     m.From,
+		AuthorName: m.AuthorName,
+		ChannelID:  m.From,
+		MessageID:  m.Reaction.MessageID,
 		Raw:        m,
 	}
 }
