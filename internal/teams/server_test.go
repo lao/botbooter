@@ -1,9 +1,11 @@
 package teams
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -150,6 +152,23 @@ func TestHandleMessages_RejectsMissingToken(t *testing.T) {
 
 	asserts.Equal(t, w.Code, http.StatusUnauthorized, "no token should be 401")
 	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+// TestHandleMessages_Routes401ToInjectedLogger proves the logger stored at
+// Connect (here set directly) carries the rejection diagnostic, rather than
+// always falling back to slog.Default.
+func TestHandleMessages_Routes401ToInjectedLogger(t *testing.T) {
+	a := testAdapter(t)
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	var got []*core.Message
+
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	w := post(a, captureDeps(&got, nil), body, "")
+
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "no token should be 401")
+	asserts.True(t, strings.Contains(buf.String(), "rejected with 401"),
+		"the injected logger receives the rejection diagnostic")
 }
 
 func TestHandleMessages_RejectsBadSignature(t *testing.T) {

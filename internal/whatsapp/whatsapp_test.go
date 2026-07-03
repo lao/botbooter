@@ -250,6 +250,26 @@ func TestHandleWebhook_BadSignature(t *testing.T) {
 	asserts.Equal(t, len(got), 0, "no message should be dispatched")
 }
 
+// TestHandleWebhook_RoutesWarningToInjectedLogger proves the logger stored at
+// Connect (here set directly) actually carries adapter diagnostics: a signed but
+// unparseable body must warn through a.log(), not slog.Default.
+func TestHandleWebhook_RoutesWarningToInjectedLogger(t *testing.T) {
+	a := testAdapter()
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	body := []byte("{ not json")
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(string(body)))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, r, captureDeps(&[]*core.Message{}, nil))
+
+	asserts.Equal(t, w.Code, http.StatusOK, "an unparseable body is still acked 200")
+	asserts.True(t, strings.Contains(buf.String(), "unparseable body"),
+		"the injected logger receives the parse-failure warning")
+}
+
 func TestHandleWebhook_StatusOnlyIgnored(t *testing.T) {
 	a := testAdapter()
 	var got []*core.Message

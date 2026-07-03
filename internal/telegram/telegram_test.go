@@ -470,6 +470,25 @@ func TestResolveAttachmentURL_WarnsTokenInURL(t *testing.T) {
 		"a successful resolve warns that the URL carries the token")
 }
 
+// TestResolveAttachmentURL_RoutesWarningToInjectedLogger proves the logger
+// stored at Connect (here set directly) carries the resolve warning, rather
+// than always falling back to slog.Default.
+func TestResolveAttachmentURL_RoutesWarningToInjectedLogger(t *testing.T) {
+	t.Setenv(EnvSuppressURLWarning, "")
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"file_id":"f","file_path":"photos/file_1.jpg"}}`))
+	})
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	_, err := a.ResolveAttachmentURL(context.Background(),
+		core.Attachment{ExtraData: models.PhotoSize{FileID: "f"}})
+
+	asserts.NoError(t, err, "getFile succeeds against the stub server")
+	asserts.True(t, strings.Contains(buf.String(), "embeds the bot token"),
+		"the injected logger receives the token-in-URL warning")
+}
+
 func TestResolveAttachmentURL_SuppressesWarning(t *testing.T) {
 	t.Setenv(EnvSuppressURLWarning, "1")
 	logs := captureLog(t)
