@@ -3,9 +3,12 @@ package slack
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	slackapi "github.com/slack-go/slack"
@@ -15,35 +18,85 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
+// dispatchBuffer bounds the per-connection dispatch queue; a full queue applies
+// backpressure to the event pump rather than dropping events.
+const dispatchBuffer = 64
+
+// dispatchDrainTimeout bounds how long Disconnect waits for queued handlers to
+// finish before canceling stragglers. A var so tests can shrink it.
+var dispatchDrainTimeout = 5 * time.Second
+
 type adapter struct {
 	client *slackapi.Client
 	socket *socketmode.Client
+
+	// Per-connection dispatch state, guarded by mu. A dedicated dispatcher
+	// goroutine drains queue in order so a slow handler cannot freeze the event
+	// pump, and Disconnect waits on drained so in-flight work is not abandoned.
+	mu             sync.Mutex
+	queue          chan func()
+	drained        chan struct{}
+	detachedCancel context.CancelFunc
 }
 
-// New creates a Slack bot that connects via Socket Mode.
-func New(appToken, botToken string) *core.Bot {
+// startDispatcher launches the in-order dispatch goroutine for one connection
+// and records its handles for Disconnect to drain. cancel aborts the detached
+// dispatch context after the drain deadline.
+func (a *adapter) startDispatcher(cancel context.CancelFunc) chan<- func() {
+	queue := make(chan func(), dispatchBuffer)
+	drained := make(chan struct{})
+	a.mu.Lock()
+	a.queue = queue
+	a.drained = drained
+	a.detachedCancel = cancel
+	a.mu.Unlock()
+	go func() {
+		defer close(drained)
+		for fn := range queue {
+			fn()
+		}
+	}()
+	return queue
+}
+
+// Config configures a Slack bot connecting via Socket Mode.
+type Config struct {
+	// AppToken is the app-level token (starts "xapp-") that authorizes Socket Mode.
+	AppToken string
+	// BotToken is the bot-user OAuth token (starts "xoxb-") for Web API calls.
+	BotToken string
+}
+
+// ErrMissingConfig is returned by New when a required Config field is empty.
+var ErrMissingConfig = errors.New("slack: missing required config field")
+
+// New creates a Slack bot that connects via Socket Mode. It returns
+// ErrMissingConfig if a required Config field is missing.
+func New(cfg Config) (*core.Bot, error) {
+	if cfg.AppToken == "" || cfg.BotToken == "" {
+		return nil, fmt.Errorf("%w: AppToken and BotToken are required", ErrMissingConfig)
+	}
 	client := slackapi.New(
-		botToken,
-		slackapi.OptionAppLevelToken(appToken),
+		cfg.BotToken,
+		slackapi.OptionAppLevelToken(cfg.AppToken),
 	)
 	socket := socketmode.New(client)
 
-	return core.New(core.SlackBotType, &adapter{client: client, socket: socket})
+	return core.New(core.SlackBotType, &adapter{client: client, socket: socket}), nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
+	// A detached, cancelable context parents all dispatch: WithoutCancel lets a
+	// queued handler finish during the shutdown drain, WithCancel lets Disconnect
+	// abort stragglers after the deadline.
+	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
+	queue := a.startDispatcher(detachedCancel)
+
+	// Event pump: Ack promptly and enqueue dispatch in order. Closing queue on
+	// exit lets the dispatcher drain the remainder and signal drained.
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case evt, ok := <-a.socket.Events:
-				if !ok {
-					return
-				}
-				a.handleSocketEvent(ctx, evt, deps)
-			}
-		}
+		defer close(queue)
+		a.pumpEvents(ctx, detachedCtx, a.socket.Events, queue, deps)
 	}()
 
 	go func() {
@@ -53,10 +106,65 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// Disconnect is a no-op: the loop is driven by the run context, so canceling it
-// is what stops the connection.
+// pumpEvents drains events until ctx is canceled or the channel closes,
+// acking each and enqueuing its dispatch (on dispatchCtx) in order. A full
+// queue applies backpressure; a cancellation during that wait exits promptly.
+func (a *adapter) pumpEvents(ctx, dispatchCtx context.Context, events <-chan socketmode.Event, queue chan<- func(), deps core.AdapterDeps) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-events:
+			if !ok {
+				return
+			}
+			fn := a.prepareDispatch(dispatchCtx, evt, deps)
+			if fn == nil {
+				continue
+			}
+			select {
+			case queue <- fn:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+// Disconnect drains queued dispatch before returning so an acked event is not
+// abandoned at shutdown: core has already canceled runCtx, so the pump is
+// exiting and will close the queue; the dispatcher then finishes the remainder
+// on the detached context. A handler that ignores cancellation past the drain
+// deadline leaks its dispatcher goroutine.
 func (a *adapter) Disconnect() error {
-	return nil
+	a.mu.Lock()
+	drained := a.drained
+	cancel := a.detachedCancel
+	a.mu.Unlock()
+	if drained == nil {
+		return nil
+	}
+
+	var err error
+	select {
+	case <-drained:
+	case <-time.After(dispatchDrainTimeout):
+		err = fmt.Errorf("slack: dispatch drain timed out")
+	}
+	if cancel != nil {
+		cancel()
+	}
+
+	// Clear the fields only if a reconnect has not installed a newer dispatcher
+	// (identity-compare on drained), mirroring the webhook siblings.
+	a.mu.Lock()
+	if a.drained == drained {
+		a.queue = nil
+		a.drained = nil
+		a.detachedCancel = nil
+	}
+	a.mu.Unlock()
+	return err
 }
 
 // Send posts text to channelID via the Web API.
@@ -125,10 +233,8 @@ func SocketClient(b *core.Bot) *socketmode.Client {
 }
 
 // toMessage maps a Slack message event onto a platform-agnostic Message.
-// AuthorName is left empty: the event carries only a user id, and resolving a
-// name would require a per-message API call.
-// Slack has no separate message id, so the message ts is reused as ID and (via
-// ThreadTimeStamp) as the thread/reply key.
+// AuthorName is left empty (resolving it would need a per-message API call);
+// the message ts doubles as ID and, via ThreadTimeStamp, the reply key.
 func toMessage(msg *slackevents.MessageEvent) *core.Message {
 	return &core.Message{
 		ID:               msg.TimeStamp,
@@ -184,8 +290,7 @@ func parseSlackTimestamp(ts string) time.Time {
 	var nsec int64
 	if frac != "" {
 		// Slack's fraction is microseconds; pad/truncate to 6 digits. ParseUint
-		// rejects a sign, so a malformed fraction leaves nsec at 0 instead of
-		// shifting the whole time backward.
+		// rejects a sign, so a malformed fraction leaves nsec at 0.
 		if micros, err := strconv.ParseUint((frac + "000000")[:6], 10, 64); err == nil {
 			nsec = int64(micros) * 1000
 		}
@@ -193,22 +298,25 @@ func parseSlackTimestamp(ts string) time.Time {
 	return time.Unix(s, nsec).UTC()
 }
 
-func (a *adapter) handleSocketEvent(ctx context.Context, evt socketmode.Event, deps core.AdapterDeps) {
-	switch evt.Type {
-	case socketmode.EventTypeEventsAPI:
-		payload, ok := evt.Data.(slackevents.EventsAPIEvent)
-		if !ok {
-			return
-		}
-		if evt.Request != nil {
-			a.socket.Ack(*evt.Request)
-		}
-		a.handleEventsAPI(ctx, payload, deps)
+// prepareDispatch acknowledges evt on the event-pump goroutine and returns a
+// closure that dispatches it, or nil when evt carries nothing to dispatch. Ack
+// stays on the pump so it is never delayed behind queued handler work.
+func (a *adapter) prepareDispatch(ctx context.Context, evt socketmode.Event, deps core.AdapterDeps) func() {
+	if evt.Type != socketmode.EventTypeEventsAPI {
+		return nil
 	}
+	payload, ok := evt.Data.(slackevents.EventsAPIEvent)
+	if !ok {
+		return nil
+	}
+	if evt.Request != nil {
+		a.socket.Ack(*evt.Request)
+	}
+	return func() { a.handleEventsAPI(ctx, payload, deps) }
 }
 
 func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent, deps core.AdapterDeps) {
-	if isBotMessage(e) {
+	if shouldSkipEvent(e) {
 		return
 	}
 
@@ -230,7 +338,10 @@ func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEv
 	}
 }
 
-func isBotMessage(event slackevents.EventsAPIEvent) bool {
+// shouldSkipEvent reports whether an inbound event must not be dispatched: it
+// drops messages from bots (loop prevention) and messages with no text and no
+// files (nothing actionable — e.g. edits, joins).
+func shouldSkipEvent(event slackevents.EventsAPIEvent) bool {
 	switch ev := event.InnerEvent.Data.(type) {
 	case *slackevents.MessageEvent:
 		return ev.BotID != "" || ev.SubType == "bot_message" || (ev.Text == "" && len(ev.Files) == 0)

@@ -31,6 +31,7 @@ const (
 	CLIBotType
 	TelegramBotType
 	WhatsAppBotType
+	TeamsBotType
 )
 
 func (t BotType) String() string {
@@ -45,20 +46,17 @@ func (t BotType) String() string {
 		return "telegram"
 	case WhatsAppBotType:
 		return "whatsapp"
+	case TeamsBotType:
+		return "teams"
 	default:
 		return fmt.Sprintf("BotType(%d)", int(t))
 	}
 }
 
 // Message is a platform-agnostic incoming message handed to command handlers.
-// UserID, ChannelID and Content are always set. The remaining normalized fields
-// are best-effort: a platform that cannot supply one leaves it at its zero
-// value. Raw carries the originating platform's untouched event; read it with
-// the matching typed accessor (e.g. discord.RawEvent).
-//
-// MentionedUserIDs holds mentioned user ids and is best-effort per platform: Slack and
-// Discord surface every mention, while Telegram contributes only text_mention
-// entities (a plain @username carries no numeric id and is omitted).
+// UserID, ChannelID and Content are always set; the remaining normalized fields
+// are best-effort per platform. Raw carries the originating platform's untouched
+// event; read it with the matching typed accessor (e.g. discord.RawEvent).
 type Message struct {
 	ID               string
 	UserID           string
@@ -114,12 +112,8 @@ type Command struct {
 }
 
 func (c *Command) match(content string) bool {
-	if c.re != nil {
-		return c.re.MatchString(content)
-	}
-	// Fallback for commands constructed without AddHandler.
-	matched, err := regexp.MatchString(c.Pattern, content)
-	return err == nil && matched
+	// re is always non-nil: AddHandler is the only path that appends to Bot.commands.
+	return c.re.MatchString(content)
 }
 
 // Attachment is a platform-agnostic file attached to a message.
@@ -138,10 +132,9 @@ type Adapter interface {
 	Attachments(m *Message) ([]Attachment, error)
 }
 
-// AttachmentResolver is an OPTIONAL capability an Adapter may implement to turn
-// an Attachment into a downloadable URL. It is deliberately NOT part of the
-// mandatory Adapter interface: adapters whose Attachment.URL is already usable
-// implement nothing and ride the passthrough in [Bot.ResolveAttachmentURL].
+// AttachmentResolver is an optional capability an Adapter may implement to turn
+// an Attachment into a downloadable URL; adapters whose Attachment.URL is already
+// usable ride the passthrough in [Bot.ResolveAttachmentURL].
 type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
 }
@@ -165,7 +158,9 @@ type AdapterDeps struct {
 	Disconnect       func() error
 }
 
-// Bot is the platform-agnostic chat bot. A Bot is safe for concurrent use.
+// Bot is the platform-agnostic chat bot. Register handlers and middleware
+// before Connect; after that, Connect/Run/Disconnect/Send are safe to call
+// concurrently. Registering after Connect races the dispatch goroutine.
 type Bot struct {
 	BotType BotType
 
@@ -176,10 +171,39 @@ type Bot struct {
 	middlewares           []Middleware
 	reactionHandlers      []ReactionHandler
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan error
-	stop   func() error
+	mu   sync.Mutex
+	conn *connection
+}
+
+// connection holds a single connection's lifecycle state. Connect creates a
+// fresh one and Disconnect drops it, so nothing from a prior connection can
+// leak into a successor across disconnect→reconnect races.
+type connection struct {
+	cancel  context.CancelFunc
+	done    chan error    // adapter reports event-loop termination here
+	runDone chan struct{} // closed exactly once when this connection tears down
+	once    sync.Once
+	adapter Adapter
+}
+
+// teardown cancels the run context and closes runDone exactly once. It runs the
+// adapter's Disconnect only when disconnectAdapter is true; a superseded
+// connection passes false so it can never disconnect the shared adapter a newer
+// connection now owns.
+func (c *connection) teardown(disconnectAdapter bool) error {
+	c.cancel()
+	var err error
+	c.once.Do(func() {
+		close(c.runDone)
+		if disconnectAdapter {
+			if c.adapter == nil {
+				err = ErrUnknownBotType
+				return
+			}
+			err = c.adapter.Disconnect()
+		}
+	})
+	return err
 }
 
 // New creates a Bot of the given type backed by adapter.
@@ -188,9 +212,7 @@ func New(botType BotType, adapter Adapter) *Bot {
 }
 
 // AdapterAs returns the Bot's adapter as T, reporting whether it is that type.
-// Adapter packages use it to recover their concrete adapter — and the platform
-// client it holds — from a *Bot, so callers get typed access without core
-// importing any platform SDK.
+// Adapter packages use it to recover their concrete adapter from a *Bot.
 func AdapterAs[T any](b *Bot) (T, bool) {
 	a, ok := b.adapter.(T)
 	return a, ok
@@ -253,57 +275,54 @@ func (b *Bot) dispatchReaction(ctx context.Context, r *Reaction) {
 // if the Bot has no adapter, or any error from the adapter's own Connect.
 func (b *Bot) Connect(ctx context.Context) error {
 	b.mu.Lock()
-	if b.cancel != nil {
-		b.mu.Unlock()
+	defer b.mu.Unlock()
+	if b.conn != nil {
 		return ErrAlreadyConnected
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	b.cancel = cancel
-	b.done = make(chan error, 1)
-
-	// Each connection gets its own stop closure guarded by a fresh sync.Once.
-	// A reconnect installs a new closure rather than resetting a shared Once,
-	// so a lingering disconnect goroutine from a previous connection can never
-	// race a Once that the new connection has reset.
-	var once sync.Once
-	b.stop = func() error {
-		var err error
-		once.Do(func() {
-			if b.adapter == nil {
-				err = ErrUnknownBotType
-				return
-			}
-			err = b.adapter.Disconnect()
-		})
-		return err
-	}
-	b.mu.Unlock()
-
 	if b.adapter == nil {
-		cancel()
-		b.clearConnection()
 		return ErrUnknownBotType
 	}
+	runCtx, cancel := context.WithCancel(ctx)
+	c := &connection{
+		cancel:  cancel,
+		done:    make(chan error, 1),
+		runDone: make(chan struct{}),
+		adapter: b.adapter,
+	}
 
+	// The callbacks capture THIS connection (c), so a lingering goroutine from a
+	// prior connection writes into its own dead channel and never touches the
+	// shared adapter.
 	deps := AdapterDeps{
 		Dispatch:         b.dispatch,
 		DispatchReaction: b.dispatchReaction,
-		Done:             func(err error) { b.done <- err },
-		Disconnect:       b.Disconnect,
+		Done:             func(err error) { c.done <- err },
+		Disconnect:       func() error { return b.disconnectConn(c) },
 	}
+
+	// adapter.Connect is non-blocking by contract. Holding b.mu across it — and
+	// installing b.conn only on success — serializes a concurrent Disconnect
+	// behind this lock instead of racing a half-connected adapter.
 	if err := b.adapter.Connect(runCtx, deps); err != nil {
 		cancel()
-		b.clearConnection()
 		return err
 	}
+	b.conn = c
 	return nil
 }
 
-func (b *Bot) clearConnection() {
+// disconnectConn tears down connection c. If c is still the installed
+// connection the adapter is disconnected; if c has been superseded by a
+// reconnect, only c's own runCtx/runDone are settled and the adapter — now
+// owned by the newer connection — is left untouched.
+func (b *Bot) disconnectConn(c *connection) error {
 	b.mu.Lock()
-	b.cancel = nil
-	b.stop = nil
+	current := b.conn == c
+	if current {
+		b.conn = nil
+	}
 	b.mu.Unlock()
+	return c.teardown(current)
 }
 
 // Disconnect tears down the active connection: it cancels the run context and
@@ -311,52 +330,51 @@ func (b *Bot) clearConnection() {
 // connected, returning ErrUnknownBotType only if the Bot has no adapter.
 func (b *Bot) Disconnect() error {
 	b.mu.Lock()
-	cancel := b.cancel
-	b.cancel = nil
-	stop := b.stop
-	b.stop = nil
+	c := b.conn
+	b.conn = nil
 	b.mu.Unlock()
-	if cancel != nil {
-		cancel()
+
+	if c != nil {
+		return c.teardown(true)
 	}
 
-	if stop != nil {
-		return stop()
-	}
-
-	// Not connected: nothing to tear down. Still validate the bot type so a
-	// misconfigured bot reports the same error it would on connect.
 	if b.adapter == nil {
 		return ErrUnknownBotType
 	}
 	return nil
 }
 
-// Run connects the Bot and blocks until ctx is canceled or the event loop ends,
-// then disconnects. A clean shutdown via ctx cancellation returns nil rather
-// than ctx.Err(), so callers can safely do log.Fatal(bot.Run(ctx)).
+// Run connects the Bot and blocks until ctx is canceled, the event loop ends,
+// or Disconnect is called from elsewhere, then disconnects. A clean shutdown
+// (ctx cancellation or a local Disconnect) returns nil rather than ctx.Err(),
+// so callers can safely do log.Fatal(bot.Run(ctx)).
 func (b *Bot) Run(ctx context.Context) error {
 	if err := b.Connect(ctx); err != nil {
 		return err
 	}
 
 	b.mu.Lock()
-	done := b.done
+	c := b.conn
 	b.mu.Unlock()
+	// A concurrent Disconnect already tore the connection down.
+	if c == nil {
+		return nil
+	}
 
 	var loopErr error
 	select {
 	case <-ctx.Done():
-	case loopErr = <-done:
+	case <-c.runDone: // a Disconnect from another goroutine woke us
+	case loopErr = <-c.done:
 	}
 
 	disconnectErr := b.Disconnect()
 
-	// Canceling the run context is the normal graceful-shutdown signal. The
-	// event loop (e.g. socketmode.RunContext) reports it back through done as
-	// context.Canceled; don't surface that to callers, which commonly do
-	// log.Fatal(bot.Run(ctx)) and would exit non-zero on a clean Ctrl-C.
-	if ctx.Err() != nil && errors.Is(loopErr, ctx.Err()) {
+	// Graceful shutdown (ctx canceled, or a local Disconnect canceling runCtx)
+	// surfaces as loopErr echoing the canceling context's error; swallow it so
+	// log.Fatal(bot.Run(ctx)) doesn't exit non-zero on a clean Ctrl-C.
+	if errors.Is(loopErr, context.Canceled) ||
+		(ctx.Err() != nil && errors.Is(loopErr, ctx.Err())) {
 		loopErr = nil
 	}
 
@@ -377,7 +395,9 @@ func (b *Bot) Start() error {
 	return b.Run(ctx)
 }
 
-// SendMessage sends text to channelID using a background context.
+// SendMessage sends text to channelID using a background context. Prefer
+// SendMessageContext from within a handler so the send honors shutdown and
+// cancellation; SendMessage's background context outlives Run's teardown.
 func (b *Bot) SendMessage(channelID, text string) error {
 	return b.SendMessageContext(context.Background(), channelID, text)
 }
@@ -413,25 +433,23 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 	return b.adapter.Attachments(message)
 }
 
-// ResolveAttachmentURL returns a downloadable URL for att — the unified
-// cross-platform entry point. If the Bot's adapter implements
-// [AttachmentResolver] the call is delegated in full (the adapter owns the
-// result, including ("", nil) meaning "nothing to resolve"); otherwise att.URL is
-// returned verbatim. It returns [ErrUnknownBotType] if the Bot has no adapter. An
-// empty string with a nil error means "not resolvable", not a failure.
+// ResolveAttachmentURL returns a downloadable URL for att. If the adapter
+// implements [AttachmentResolver] the call is delegated; otherwise att.URL is
+// returned verbatim. It returns [ErrUnknownBotType] if the Bot has no adapter.
+// An empty string with a nil error means "not resolvable", not a failure.
 //
-// The result is consumed DIFFERENTLY per platform and is not uniformly fetchable
-// with a bare GET:
-//   - Discord: att.URL is already a signed CDN link (~24h), returned as-is via the
-//     passthrough; fetch it with a plain GET and consume promptly.
-//   - Slack: NOT directly fetchable — download via the Slack Web API client
+// The result is consumed differently per platform:
+//   - Discord: a signed CDN link (~24h); plain GET, consume promptly.
+//   - Slack: not directly fetchable — download via the Slack Web API client
 //     (SlackClient(b).GetFileContext), which injects the bot token.
-//   - Telegram: a plain GET on a SECRET, ~1h URL that embeds the bot token in
-//     plaintext — never log or cache it. Each successful Telegram resolve logs a
-//     warning, suppressible via the BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING
-//     environment variable.
-//   - WhatsApp: NOT directly fetchable — GET it with an Authorization: Bearer
-//     <token> header (the Cloud API token used to send). Short-lived; consume promptly.
+//   - Telegram: a plain GET on a secret, ~1h URL that embeds the bot token —
+//     never log or cache it. Each resolve logs a warning, suppressible via
+//     BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING.
+//   - WhatsApp: GET with an "Authorization: Bearer <token>" header (the Cloud
+//     API token used to send). Short-lived; consume promptly.
+//   - Teams: a pre-authorized link carrying a short-lived token — consume
+//     promptly, never log or cache. Inline images may need an Authorization
+//     header this adapter does not yet supply.
 //   - CLI: a local filesystem path (open with os.Open), not an HTTP URL.
 func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error) {
 	if b.adapter == nil {

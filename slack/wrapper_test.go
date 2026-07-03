@@ -10,7 +10,8 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	bot := New("app", "bot")
+	bot, err := New(Config{AppToken: "app", BotToken: "bot"})
+	asserts.NoError(t, err, "New")
 	asserts.Equal(t, bot.BotType, botbooter.SlackBotType, "bot type")
 	asserts.NotNil(t, Client(bot), "client")
 	asserts.NotNil(t, SocketClient(bot), "socket client")

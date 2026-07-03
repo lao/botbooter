@@ -39,26 +39,42 @@ func New(in io.Reader, out io.Writer) *core.Bot {
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
-	scanner := bufio.NewScanner(a.in)
+	// Scanning runs on its own goroutine because a blocking read on stdin cannot
+	// be canceled; the lifecycle loop below selects on ctx so shutdown never
+	// waits for the next line, and a line read after cancellation is dropped
+	// rather than dispatched.
+	lines := make(chan string)
+	scanErr := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(a.in)
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-ctx.Done():
+				return
+			}
+		}
+		scanErr <- scanner.Err()
+	}()
 
 	go func() {
-		for scanner.Scan() {
+		for {
 			select {
 			case <-ctx.Done():
 				deps.Done(nil)
 				return
-			default:
+			case err := <-scanErr:
+				deps.Done(err)
+				return
+			case line := <-lines:
+				deps.Dispatch(ctx, &core.Message{
+					UserID:    userID,
+					ChannelID: channelID,
+					Content:   line,
+					Raw:       parseMessage(line),
+				})
 			}
-
-			line := scanner.Text()
-			deps.Dispatch(ctx, &core.Message{
-				UserID:    userID,
-				ChannelID: channelID,
-				Content:   line,
-				Raw:       parseMessage(line),
-			})
 		}
-		deps.Done(scanner.Err())
 	}()
 
 	return nil

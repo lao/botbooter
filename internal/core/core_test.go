@@ -20,18 +20,8 @@ func TestBotType_String(t *testing.T) {
 	asserts.Equal(t, CLIBotType.String(), "cli", "CLI string")
 	asserts.Equal(t, TelegramBotType.String(), "telegram", "Telegram string")
 	asserts.Equal(t, WhatsAppBotType.String(), "whatsapp", "WhatsApp string")
+	asserts.Equal(t, TeamsBotType.String(), "teams", "Teams string")
 	asserts.Equal(t, BotType(999).String(), "BotType(999)", "unknown string")
-}
-
-func TestCommand_matchFallback(t *testing.T) {
-	// A Command constructed directly (not via AddHandler) has no precompiled
-	// regexp and must fall back to compiling on the fly.
-	c := Command{Pattern: "^hi$"}
-	asserts.True(t, c.match("hi"), "fallback should match")
-	asserts.False(t, c.match("bye"), "fallback should not match")
-
-	bad := Command{Pattern: "[invalid("}
-	asserts.False(t, bad.match("anything"), "invalid pattern should not match")
 }
 
 func TestBot_AddHandler(t *testing.T) {

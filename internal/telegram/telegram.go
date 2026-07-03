@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -20,8 +21,16 @@ import (
 
 type adapter struct {
 	newClient func() (*bot.Bot, error)
-	client    *bot.Bot
 	selfID    int64
+
+	mu     sync.Mutex
+	client *bot.Bot // the client running the active poll loop; guarded by mu
+}
+
+func (a *adapter) currentClient() *bot.Bot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.client
 }
 
 type depsContextKey struct{}
@@ -69,6 +78,12 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		return err
 	}
 
+	// Publish the poll-loop client so Client(b) and Send target the client that
+	// actually receives updates — a RegisterHandler on it now fires.
+	a.mu.Lock()
+	a.client = tg
+	a.mu.Unlock()
+
 	go func() {
 		tg.Start(ctx)
 		deps.Done(ctx.Err())
@@ -83,7 +98,7 @@ func (a *adapter) Disconnect() error {
 }
 
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	_, err := a.client.SendMessage(ctx, &bot.SendMessageParams{
+	_, err := a.currentClient().SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: chatID(channelID),
 		Text:   text,
 	})
@@ -134,7 +149,7 @@ func RawReactionUpdate(r *core.Reaction) (*models.MessageReactionUpdated, bool) 
 // Client returns the go-telegram bot client backing b, or nil if b is not a Telegram bot.
 func Client(b *core.Bot) *bot.Bot {
 	if a, ok := core.AdapterAs[*adapter](b); ok {
-		return a.client
+		return a.currentClient()
 	}
 	return nil
 }
@@ -155,12 +170,13 @@ func (a *adapter) ResolveAttachmentURL(ctx context.Context, att core.Attachment)
 	if id == "" {
 		return "", nil
 	}
-	f, err := a.client.GetFile(ctx, &bot.GetFileParams{FileID: id})
+	client := a.currentClient()
+	f, err := client.GetFile(ctx, &bot.GetFileParams{FileID: id})
 	if err != nil {
 		return "", fmt.Errorf("resolve telegram file %s: %w", id, err)
 	}
 	warnTokenInURL()
-	return a.client.FileDownloadLink(f), nil
+	return client.FileDownloadLink(f), nil
 }
 
 func warnTokenInURL() {

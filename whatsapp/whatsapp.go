@@ -45,3 +45,10 @@ func RawMessage(m *botbooter.Message) (*Message, bool) {
 func RawReaction(r *botbooter.Reaction) (*Message, bool) {
 	return waint.RawReaction(r)
 }
+
+// Addr returns the address b's webhook listener is bound to (host:port), or ""
+// if b is not a WhatsApp bot or is not connected. Use it to recover the
+// OS-assigned port after passing cfg.Addr ":0".
+func Addr(b *botbooter.Bot) string {
+	return waint.Addr(b)
+}

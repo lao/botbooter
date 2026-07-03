@@ -38,18 +38,31 @@ func TestIsolationDeps(t *testing.T) {
 		discordgo  = "github.com/bwmarrin/discordgo"
 		slackgo    = "github.com/slack-go/slack"
 		gotelegram = "github.com/go-telegram/bot"
+		// jwtv5 is the Teams adapter's only third-party dependency. It must stay
+		// confined to the teams closure and never leak into another package. The
+		// full versioned module path matches the other constants and how
+		// `go list -deps` emits it.
+		jwtv5 = "github.com/golang-jwt/jwt/v5"
 	)
+	// The SDK checks above miss a cross-import of a marker-less internal package
+	// (internal/cli and internal/whatsapp pull in no third-party SDK), so also
+	// assert directly on the first-party internal/<platform> build paths: each
+	// public package must contain only its own platform's internal package.
+	const internalBase = "github.com/lao/botbooter/internal/"
+	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp", "teams"}
 	cases := []struct {
-		pkg     string
-		absent  []string
-		present []string
+		pkg         string
+		absent      []string
+		present     []string
+		internalOwn string // the one internal/<platform> its closure may contain ("" = none)
 	}{
-		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram}, nil},
-		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram}, nil},
-		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram}, []string{slackgo}},
-		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram}, []string{discordgo}},
-		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo}, []string{gotelegram}},
-		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram}, nil},
+		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5}, nil, ""},
+		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5}, nil, "cli"},
+		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5}, []string{slackgo}, "slack"},
+		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5}, []string{discordgo}, "discord"},
+		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5}, []string{gotelegram}, "telegram"},
+		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram, jwtv5}, nil, "whatsapp"},
+		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram}, []string{jwtv5}, "teams"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.pkg, func(t *testing.T) {
@@ -59,6 +72,17 @@ func TestIsolationDeps(t *testing.T) {
 			}
 			for _, sdk := range tc.present {
 				asserts.True(t, strings.Contains(closure, sdk), tc.pkg+" build closure should contain its own SDK "+sdk)
+			}
+			for _, p := range allPlatforms {
+				path := internalBase + p
+				// Match a whole path segment so internal/telegram does not satisfy a
+				// check for internal/teams.
+				contains := strings.Contains(closure, path+"\n") || strings.HasSuffix(closure, path)
+				if p == tc.internalOwn {
+					asserts.True(t, contains, tc.pkg+" should contain its own "+path)
+				} else {
+					asserts.False(t, contains, tc.pkg+" must not contain "+path)
+				}
 			}
 		})
 	}

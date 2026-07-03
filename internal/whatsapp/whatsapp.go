@@ -40,18 +40,14 @@ const (
 	signatureHeader     = "X-Hub-Signature-256"
 	signaturePrefix     = "sha256="
 
-	// maxRequestBytes caps the inbound webhook body. The endpoint is public, so
-	// this defends against memory-exhaustion from oversized/never-ending bodies;
-	// real Cloud API payloads are a few KB.
+	// The endpoint is public; cap bodies against memory exhaustion. Real Cloud
+	// API payloads are a few KB.
 	maxRequestBytes = 1 << 20 // 1 MiB
 
-	// maxErrorBodyBytes caps how much of a non-2xx Send response body is read into
-	// the returned error, bounding memory and log size from an unexpected response.
+	// maxErrorBodyBytes caps how much of a non-2xx response body is read into errors.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
 
-	// maxMediaMetaBytes caps the getMedia metadata response decoded when resolving
-	// an attachment URL. The payload is a small JSON object (url, mime_type, ...);
-	// the cap bounds memory from an unexpected response.
+	// maxMediaMetaBytes caps the getMedia metadata response (a small JSON object).
 	maxMediaMetaBytes = 64 << 10 // 64 KiB
 )
 
@@ -63,18 +59,28 @@ type Config struct {
 	// Token is the Cloud API access token sent as a Bearer credential on
 	// outbound calls. Prefer a long-lived system-user token; short-lived user
 	// tokens expire in ~24h, after which Send fails.
-	Token         string
+	Token string
+	// PhoneNumberID is the WhatsApp Business phone-number id that outbound
+	// messages are sent from; it forms the Graph API send path.
 	PhoneNumberID string
 	// AppSecret verifies the X-Hub-Signature-256 HMAC on inbound webhook
 	// requests. Required: without it the endpoint would accept spoofed payloads.
-	AppSecret   string
+	AppSecret string
+	// VerifyToken is the shared secret Meta echoes during the GET webhook
+	// verification handshake; the adapter accepts the subscription only on match.
 	VerifyToken string
 	// Addr is the local TCP address the webhook server binds, e.g. ":8080". A
 	// bare port ("8080") is accepted as shorthand for ":8080".
-	Addr         string
-	Path         string
+	Addr string
+	// Path is the webhook route the server handles; defaults to the adapter's
+	// standard path when empty.
+	Path string
+	// GraphVersion overrides the Meta Graph API version in outbound URLs;
+	// defaults to a pinned version when empty.
 	GraphVersion string
-	HTTPClient   *http.Client
+	// HTTPClient overrides the client used for outbound Cloud API calls; a
+	// default client with a 30s timeout is used when nil.
+	HTTPClient *http.Client
 }
 
 // Message is the parsed payload of a WhatsApp Cloud API webhook message.
@@ -114,9 +120,30 @@ type adapter struct {
 	baseURL string
 	http    *http.Client
 
-	mu       sync.Mutex
-	srv      *http.Server
-	inflight atomic.Int64
+	mu  sync.Mutex
+	srv *http.Server
+	// boundAddr is the listener's resolved address, so a cfg.Addr of ":0" is
+	// recoverable via Addr. Set with srv, cleared with it.
+	boundAddr string
+	// detachedCancel aborts the current connection's dispatch goroutines. Each
+	// Connect derives one detached, cancelable context and threads it through the
+	// handler closure, so only the cancel is shared state. Disconnect calls it
+	// after the drain window so a stuck handler cannot leak, and clears it only
+	// when a reconnect has not already installed a newer connection.
+	detachedCancel context.CancelFunc
+	inflight       atomic.Int64
+}
+
+// Addr returns the address the bot's webhook listener is bound to (host:port),
+// or "" if b is not a WhatsApp bot or is not currently connected. It lets a
+// caller that passed cfg.Addr ":0" discover the OS-assigned port.
+func Addr(b *core.Bot) string {
+	if a, ok := core.AdapterAs[*adapter](b); ok {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.boundAddr
+	}
+	return ""
 }
 
 // New creates a WhatsApp bot backed by the Meta Cloud API. It returns
@@ -135,15 +162,14 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.Token == "" || cfg.PhoneNumberID == "" || cfg.AppSecret == "" || cfg.VerifyToken == "" || cfg.Addr == "" {
 		return nil, fmt.Errorf("%w: Token, PhoneNumberID, AppSecret, VerifyToken and Addr are required", ErrMissingConfig)
 	}
-	// A bare port ("8080") is shorthand for ":8080"; a host, host:port, :port or
-	// IPv6 literal is left for net.Listen to validate.
+	// A bare port ("8080") is shorthand for ":8080".
 	if _, err := strconv.Atoi(cfg.Addr); err == nil {
 		cfg.Addr = ":" + cfg.Addr
 	}
 	if cfg.Path == "" {
 		cfg.Path = defaultPath
 	}
-	// A pattern without a leading slash panics ServeMux at Connect; normalize one in.
+	// A pattern without a leading slash panics ServeMux at Connect.
 	if !strings.HasPrefix(cfg.Path, "/") {
 		cfg.Path = "/" + cfg.Path
 	}
@@ -157,13 +183,18 @@ func newAdapter(cfg Config) (*adapter, error) {
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
+	// One detached, cancelable context per connection parents all dispatch:
+	// WithoutCancel lets an acked reply finish during the shutdown drain, and
+	// WithCancel lets Disconnect abort stragglers after it.
+	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(a.cfg.Path, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			a.handleVerify(w, r)
 		case http.MethodPost:
-			a.handleWebhook(ctx, w, r, deps)
+			a.handleWebhook(detachedCtx, w, r, deps)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -171,6 +202,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 
 	ln, err := net.Listen("tcp", a.cfg.Addr)
 	if err != nil {
+		detachedCancel()
 		return err
 	}
 
@@ -181,8 +213,11 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		WriteTimeout:      20 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+
 	a.mu.Lock()
 	a.srv = srv
+	a.boundAddr = ln.Addr().String()
+	a.detachedCancel = detachedCancel
 	a.mu.Unlock()
 
 	go func() {
@@ -217,7 +252,7 @@ func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusForbidden)
 }
 
-func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
+func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -234,6 +269,10 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 		return
 	}
 
+	// Dispatch on the detached context: core cancels runCtx *before* Disconnect's
+	// drain waits for this handler, so a reply threaded onto runCtx would fail
+	// mid-drain. The increment lands before Shutdown returns, so drainDispatch
+	// always observes it.
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
@@ -245,10 +284,10 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 				if m.Reaction.Emoji == "" {
 					continue
 				}
-				deps.DispatchReaction(ctx, toReaction(m))
+				deps.DispatchReaction(dispatchCtx, toReaction(m))
 				continue
 			}
-			deps.Dispatch(ctx, toMessage(m))
+			deps.Dispatch(dispatchCtx, toMessage(m))
 		}
 	}()
 }
@@ -256,23 +295,55 @@ func (a *adapter) handleWebhook(ctx context.Context, w http.ResponseWriter, r *h
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	srv := a.srv
-	a.srv = nil
+	cancelDispatch := a.detachedCancel
 	a.mu.Unlock()
 	if srv == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := srv.Shutdown(ctx)
-	a.drainDispatch(ctx)
-	return err
+	// Shutdown and drain each get their own budget: dispatch goroutines run
+	// outside the HTTP handler lifecycle, so a slow Shutdown must not consume the
+	// drain deadline and drop an already-acked in-flight message.
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutCancel()
+	err := srv.Shutdown(shutCtx)
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	a.drainDispatch(drainCtx)
+
+	// If the drain timed out, surface it: cancelDispatch below force-aborts
+	// already-acked messages, which is operationally significant.
+	var drainErr error
+	if n := a.inflight.Load(); n > 0 {
+		log.Printf("whatsapp: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		drainErr = fmt.Errorf("whatsapp: dispatch drain timed out with %d in-flight dispatch(es)", n)
+	}
+
+	// Clear the shared fields only if a reconnect has not installed a newer
+	// connection (identity-compare on srv): a fresh Connect can legitimately run
+	// during this up-to-10s Disconnect, and nil-ing unconditionally would clobber
+	// its live state. Either way, cancel THIS connection's detached context after
+	// the drain so a stuck handler cannot leak past shutdown.
+	a.mu.Lock()
+	if a.srv == srv {
+		a.srv = nil
+		a.boundAddr = ""
+		a.detachedCancel = nil
+	}
+	a.mu.Unlock()
+
+	if cancelDispatch != nil {
+		cancelDispatch()
+	}
+	if err != nil {
+		return err
+	}
+	return drainErr
 }
 
-// drainDispatch waits for in-flight dispatch goroutines to finish so an acked
-// message is processed rather than dropped at shutdown, bounded by ctx. It polls
-// an atomic counter rather than a WaitGroup: the dispatch goroutines are started
-// from request handlers that Shutdown may abandon at its deadline, and a
-// WaitGroup Add racing that Wait would risk a misuse panic.
+// drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so an
+// acked message is processed rather than dropped at shutdown. It polls an atomic
+// counter rather than a WaitGroup: an Add racing Wait would risk a misuse panic.
 func (a *adapter) drainDispatch(ctx context.Context) {
 	for a.inflight.Load() > 0 {
 		select {
@@ -479,9 +550,8 @@ func (in inboundMessage) media() *mediaObject {
 }
 
 // parseWebhook extracts inbound user messages from a Cloud API webhook payload.
-// An individual message that fails to parse is logged and skipped rather than
-// failing the whole batch, so one bad entry never drops its valid siblings (and
-// the request can still be acked with 200 to stop Meta retrying).
+// A message that fails to parse is logged and skipped so one bad entry never
+// drops its valid siblings.
 func parseWebhook(body []byte) []*Message {
 	var env webhookEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {

@@ -109,7 +109,11 @@ func configuredBots() ([]namedBot, error) {
 	var bots []namedBot
 
 	if appToken, botToken := os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"); appToken != "" && botToken != "" {
-		bots = append(bots, namedBot{"slack", slack.New(appToken, botToken)})
+		bot, err := slack.New(slack.Config{AppToken: appToken, BotToken: botToken})
+		if err != nil {
+			return nil, err
+		}
+		bots = append(bots, namedBot{"slack", bot})
 	}
 	if token := os.Getenv("DISCORD_BOT_TOKEN"); token != "" {
 		bot, err := discord.New(token)

@@ -10,9 +10,9 @@ coverage.txt
 # Build artifacts
 /bin/
 /dist/
-# Compiled example binary (go build ./_examples/v1); anchored so it does not
-# match the _examples/v1 source directory.
-/v1
+# Compiled example binary (go build ./_examples/basic); anchored so it does not
+# match the _examples/basic source directory.
+/basic
 
 # Editor / OS noise
 .DS_Store
