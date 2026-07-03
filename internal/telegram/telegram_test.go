@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,18 @@ func newCaptureAdapter(selfID int64, got **core.Message) (*adapter, context.Cont
 	return a, withDeps(context.Background(), &deps)
 }
 
+// newReactionCapture builds an adapter and a deps-carrying ctx that collects
+// every dispatched reaction, so onUpdate's reaction path can be tested directly.
+func newReactionCapture(selfID int64) (*adapter, context.Context, *[]*core.Reaction) {
+	got := &[]*core.Reaction{}
+	deps := core.AdapterDeps{DispatchReaction: func(_ context.Context, r *core.Reaction) { *got = append(*got, r) }}
+	return &adapter{selfID: selfID}, withDeps(context.Background(), &deps), got
+}
+
+func emojiReaction(e string) models.ReactionType {
+	return models.ReactionType{Type: models.ReactionTypeTypeEmoji, ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: e}}
+}
+
 // newStubAdapter wires an adapter to an httptest Bot API server, mirroring New without real network I/O.
 func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
 	t.Helper()
@@ -52,6 +65,86 @@ func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapt
 	asserts.NoError(t, err, "bot.New for stub server")
 	a.client = tg
 	return a
+}
+
+func TestOnReaction(t *testing.T) {
+	reactionUpdate := func(newR, oldR []models.ReactionType) *models.Update {
+		return &models.Update{MessageReaction: &models.MessageReactionUpdated{
+			Chat:        models.Chat{ID: 100},
+			MessageID:   55,
+			User:        &models.User{ID: 7, Username: "alice"},
+			NewReaction: newR,
+			OldReaction: oldR,
+		}}
+	}
+
+	t.Run("AddedEmojiDispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate([]models.ReactionType{emojiReaction("👍")}, nil))
+
+		asserts.Equal(t, len(*got), 1, "one reaction dispatched")
+		r := (*got)[0]
+		asserts.Equal(t, r.Emoji, "👍", "emoji")
+		asserts.Equal(t, r.UserID, "7", "reactor id")
+		asserts.Equal(t, r.AuthorName, "alice", "reactor name is inline on the update")
+		asserts.Equal(t, r.ChannelID, "100", "chat id")
+		asserts.Equal(t, r.MessageID, "55", "reacted message id")
+		ru, ok := RawReactionUpdate(r)
+		asserts.True(t, ok, "RawReactionUpdate recovers the update")
+		asserts.Equal(t, ru.MessageID, 55, "raw carries the reaction update")
+	})
+
+	t.Run("RemovalNotDispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate(nil, []models.ReactionType{emojiReaction("👍")}))
+		asserts.Equal(t, len(*got), 0, "a removal (present in Old, gone from New) dispatches nothing")
+	})
+
+	t.Run("AlreadyPresentNotRedispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate(
+			[]models.ReactionType{emojiReaction("👍"), emojiReaction("❤")},
+			[]models.ReactionType{emojiReaction("👍")},
+		))
+		asserts.Equal(t, len(*got), 1, "only the newly-added emoji dispatches")
+		asserts.Equal(t, (*got)[0].Emoji, "❤", "the newly-added emoji")
+	})
+
+	t.Run("NonEmojiTypeSkipped", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		// A zero-value ReactionType has a non-emoji Type; a nil ReactionTypeEmoji
+		// is likewise skipped.
+		a.onUpdate(ctx, nil, reactionUpdate([]models.ReactionType{{}}, nil))
+		asserts.Equal(t, len(*got), 0, "non-emoji reaction types are skipped")
+	})
+
+	t.Run("AnonymousNoUser", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		u := &models.Update{MessageReaction: &models.MessageReactionUpdated{
+			Chat: models.Chat{ID: 100}, MessageID: 55,
+			NewReaction: []models.ReactionType{emojiReaction("👍")},
+		}}
+		a.onUpdate(ctx, nil, u)
+		asserts.Equal(t, len(*got), 0, "anonymous reaction (no user) dispatches nothing")
+	})
+}
+
+func TestSendThreaded(t *testing.T) {
+	var body string
+	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "sendMessage") {
+			b, _ := io.ReadAll(r.Body)
+			body = string(b)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":100,"type":"private"}}}`))
+	})
+
+	err := a.SendThreaded(context.Background(), "100", "55", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should succeed")
+	asserts.True(t, strings.Contains(body, "reply_parameters"), "reply_parameters sent: "+body)
+	asserts.True(t, strings.Contains(body, `"message_id":55`), "reply targets message 55: "+body)
 }
 
 func TestNew(t *testing.T) {
