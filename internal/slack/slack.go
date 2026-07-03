@@ -219,8 +219,13 @@ func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEv
 
 	// reaction_added carries no BotID, so isBotMessage never blocks it. There is
 	// no self-reaction filter: the bot never adds reactions (no reaction egress),
-	// so a self-reply loop is impossible.
+	// so a self-reply loop is impossible. Only message reactions carry a channel +
+	// ts to reply to; reactions on files/file-comments leave Item.Channel and
+	// Item.Timestamp empty, so skip them to keep Reaction.ChannelID/MessageID set.
 	if react, ok := e.InnerEvent.Data.(*slackevents.ReactionAddedEvent); ok {
+		if react.Item.Type != "message" {
+			return
+		}
 		deps.DispatchReaction(ctx, toReaction(react))
 	}
 }

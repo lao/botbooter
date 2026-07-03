@@ -289,6 +289,7 @@ func TestHandleEventsAPI_Reaction(t *testing.T) {
 		User:     "U123",
 		Reaction: "thumbsup",
 		Item: slackevents.Item{
+			Type:      "message",
 			Channel:   "C456",
 			Timestamp: "1700000000.000100",
 		},
@@ -303,6 +304,24 @@ func TestHandleEventsAPI_Reaction(t *testing.T) {
 	raw, ok := RawReaction(got)
 	asserts.True(t, ok, "RawReaction recovers the event")
 	asserts.Equal(t, raw.Reaction, "thumbsup", "raw carries the reaction event")
+}
+
+func TestHandleEventsAPI_ReactionOnFileSkipped(t *testing.T) {
+	a := newTestAdapter()
+	dispatched := false
+	deps := core.AdapterDeps{
+		DispatchReaction: func(_ context.Context, _ *core.Reaction) { dispatched = true },
+	}
+
+	// A reaction on a file (not a message) has empty Item.Channel/Timestamp and
+	// cannot be replied to, so it must not be dispatched.
+	a.handleEventsAPI(context.Background(), slackEvent(&slackevents.ReactionAddedEvent{
+		User:     "U123",
+		Reaction: "thumbsup",
+		Item:     slackevents.Item{Type: "file"},
+	}), deps)
+
+	asserts.False(t, dispatched, "a file reaction should not be dispatched")
 }
 
 func slackEvent(data any) slackevents.EventsAPIEvent {
