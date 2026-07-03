@@ -152,6 +152,7 @@ type connection struct {
 	done    chan error    // adapter reports event-loop termination here
 	runDone chan struct{} // closed exactly once when this connection tears down
 	once    sync.Once
+	discErr error // adapter.Disconnect result, recorded once and shared by all callers
 	adapter Adapter
 }
 
@@ -161,18 +162,17 @@ type connection struct {
 // connection now owns.
 func (c *connection) teardown(disconnectAdapter bool) error {
 	c.cancel()
-	var err error
 	c.once.Do(func() {
 		close(c.runDone)
 		if disconnectAdapter {
 			if c.adapter == nil {
-				err = ErrUnknownBotType
+				c.discErr = ErrUnknownBotType
 				return
 			}
-			err = c.adapter.Disconnect()
+			c.discErr = c.adapter.Disconnect()
 		}
 	})
-	return err
+	return c.discErr
 }
 
 // New creates a Bot of the given type backed by adapter.
