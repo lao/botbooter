@@ -113,7 +113,7 @@ func (a *adapter) SendThreaded(ctx context.Context, channelID, replyToID, text s
 	if err != nil {
 		return a.Send(ctx, channelID, text)
 	}
-	_, err = a.client.SendMessage(ctx, &bot.SendMessageParams{
+	_, err = a.currentClient().SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:          chatID(channelID),
 		Text:            text,
 		ReplyParameters: &models.ReplyParameters{MessageID: replyID},
