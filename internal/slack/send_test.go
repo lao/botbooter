@@ -35,6 +35,38 @@ func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+// capturingRoundTripper records the outgoing request body so a test can assert
+// which form values slack-go serialized.
+type capturingRoundTripper struct{ body string }
+
+func (c *capturingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		c.body = string(b)
+		_ = req.Body.Close()
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Request:    req,
+	}, nil
+}
+
+// TestSendThreaded_IncludesThreadTS verifies the reply is posted in the reacted
+// message's thread (thread_ts = replyToID).
+func TestSendThreaded_IncludesThreadTS(t *testing.T) {
+	rt := &capturingRoundTripper{}
+	client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(&http.Client{Transport: rt}))
+	a := &adapter{client: client}
+
+	err := a.SendThreaded(context.Background(), "C123", "1700000000.000100", "hi there")
+
+	asserts.NoError(t, err, "SendThreaded should succeed")
+	asserts.True(t, strings.Contains(rt.body, "thread_ts=1700000000.000100"), "body carries thread_ts: "+rt.body)
+	asserts.True(t, strings.Contains(rt.body, "channel=C123"), "body carries channel: "+rt.body)
+}
+
 // TestSend_SurfacesError verifies adapter.Send returns the Slack API's error.
 func TestSend_SurfacesError(t *testing.T) {
 	httpStub := &http.Client{Transport: stubRoundTripper{

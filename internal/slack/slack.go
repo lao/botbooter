@@ -65,6 +65,16 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	return err
 }
 
+// SendThreaded implements [core.ThreadedSender]: it posts text in the thread of
+// the message identified by replyToID (a Slack ts) via MsgOptionTS.
+func (a *adapter) SendThreaded(ctx context.Context, channelID, replyToID, text string) error {
+	_, _, err := a.client.PostMessageContext(ctx, channelID,
+		slackapi.MsgOptionText(text, false),
+		slackapi.MsgOptionTS(replyToID),
+	)
+	return err
+}
+
 // Attachments returns the files attached to the message's Slack event.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	msg, _ := RawEvent(m)
@@ -86,6 +96,13 @@ func (a *adapter) ResolveAttachmentURL(_ context.Context, att core.Attachment) (
 // m originated from Slack.
 func RawEvent(m *core.Message) (*slackevents.MessageEvent, bool) {
 	e, ok := m.Raw.(*slackevents.MessageEvent)
+	return e, ok
+}
+
+// RawReaction returns the raw Slack reaction event carried on r, reporting
+// whether r originated from Slack.
+func RawReaction(r *core.Reaction) (*slackevents.ReactionAddedEvent, bool) {
+	e, ok := r.Raw.(*slackevents.ReactionAddedEvent)
 	return e, ok
 }
 
@@ -122,6 +139,19 @@ func toMessage(msg *slackevents.MessageEvent) *core.Message {
 		ReplyToID:        msg.ThreadTimeStamp,
 		MentionedUserIDs: slackMentions(msg.Text),
 		Raw:              msg,
+	}
+}
+
+// toReaction maps a Slack reaction_added event onto a platform-agnostic Reaction.
+// The reacted message's channel and ts live under Item; Emoji is a Slack shortname
+// (e.g. "thumbsup"), and AuthorName is left empty (the event carries only a user id).
+func toReaction(ev *slackevents.ReactionAddedEvent) *core.Reaction {
+	return &core.Reaction{
+		Emoji:     ev.Reaction,
+		UserID:    ev.User,
+		ChannelID: ev.Item.Channel,
+		MessageID: ev.Item.Timestamp,
+		Raw:       ev,
 	}
 }
 
@@ -184,6 +214,14 @@ func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEv
 
 	if msg, ok := e.InnerEvent.Data.(*slackevents.MessageEvent); ok {
 		deps.Dispatch(ctx, toMessage(msg))
+		return
+	}
+
+	// reaction_added carries no BotID, so isBotMessage never blocks it. There is
+	// no self-reaction filter: the bot never adds reactions (no reaction egress),
+	// so a self-reply loop is impossible.
+	if react, ok := e.InnerEvent.Data.(*slackevents.ReactionAddedEvent); ok {
+		deps.DispatchReaction(ctx, toReaction(react))
 	}
 }
 
