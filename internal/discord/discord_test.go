@@ -37,6 +37,36 @@ func TestNew(t *testing.T) {
 		"message-content intent should be enabled")
 }
 
+func TestNew_HasReactionIntents(t *testing.T) {
+	bot, err := New("token")
+	asserts.NoError(t, err, "New")
+	intents := Session(bot).Identify.Intents
+	asserts.True(t, intents&discordgo.IntentsGuildMessageReactions != 0, "guild reaction intent set")
+	asserts.True(t, intents&discordgo.IntentsDirectMessageReactions != 0, "DM reaction intent set")
+}
+
+func TestOnReaction(t *testing.T) {
+	a := newTestAdapter(t)
+	var got *core.Reaction
+	deps := core.AdapterDeps{DispatchReaction: func(_ context.Context, r *core.Reaction) { got = r }}
+
+	a.onReaction(context.Background(), &discordgo.MessageReactionAdd{MessageReaction: &discordgo.MessageReaction{
+		UserID:    "user-1",
+		ChannelID: "chan-1",
+		MessageID: "msg-1",
+		Emoji:     discordgo.Emoji{Name: "👍"},
+	}}, deps)
+
+	asserts.NotNil(t, got, "reaction should be dispatched")
+	asserts.Equal(t, got.Emoji, "👍", "emoji name")
+	asserts.Equal(t, got.UserID, "user-1", "reactor user id")
+	asserts.Equal(t, got.ChannelID, "chan-1", "channel")
+	asserts.Equal(t, got.MessageID, "msg-1", "reacted message id")
+	raw, ok := RawReaction(got)
+	asserts.True(t, ok, "RawReaction recovers the event")
+	asserts.Equal(t, raw.MessageID, "msg-1", "raw carries the reaction event")
+}
+
 func TestConnect(t *testing.T) {
 	a := newTestAdapter(t)
 

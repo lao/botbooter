@@ -30,6 +30,34 @@ func (rt stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}, nil
 }
 
+// capturingRoundTripper records the outgoing request body so a test can assert
+// what discordgo serialized.
+type capturingRoundTripper struct {
+	status int
+	body   string
+}
+
+func (rt *capturingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		rt.body = string(b)
+		_ = req.Body.Close()
+	}
+	return &http.Response{StatusCode: rt.status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+}
+
+func TestSendThreaded(t *testing.T) {
+	a := newTestAdapter(t)
+	rt := &capturingRoundTripper{status: 200}
+	a.session.Client = &http.Client{Transport: rt}
+
+	err := a.SendThreaded(context.Background(), "C1", "M1", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should succeed on 200")
+	asserts.True(t, strings.Contains(rt.body, "message_reference"), "body carries a message reference: "+rt.body)
+	asserts.True(t, strings.Contains(rt.body, "M1"), "reference targets the reacted message: "+rt.body)
+}
+
 // nonDiscordAdapter is a minimal core.Adapter that is not discord's *adapter.
 type nonDiscordAdapter struct{}
 

@@ -23,15 +23,23 @@ func New(token string) (*core.Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
+	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent |
+		discordgo.IntentsGuildMessageReactions | discordgo.IntentsDirectMessageReactions
 
 	return core.New(core.DiscordBotType, &adapter{session: dg}), nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
-	remove := a.session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+	removeMsg := a.session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		a.onMessage(ctx, s, m, deps)
 	})
+	removeReaction := a.session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageReactionAdd) {
+		a.onReaction(ctx, m, deps)
+	})
+	remove := func() {
+		removeMsg()
+		removeReaction()
+	}
 
 	if err := a.session.Open(); err != nil {
 		remove()
@@ -64,6 +72,26 @@ func (a *adapter) onMessage(ctx context.Context, s *discordgo.Session, m *discor
 	}
 
 	deps.Dispatch(ctx, toMessage(m))
+}
+
+// onReaction dispatches a Discord reaction-add event. There is no self-reaction
+// filter: the bot never adds reactions (no reaction egress), so a self-reply loop
+// is impossible.
+func (a *adapter) onReaction(ctx context.Context, m *discordgo.MessageReactionAdd, deps core.AdapterDeps) {
+	deps.DispatchReaction(ctx, toReaction(m))
+}
+
+// toReaction maps a Discord reaction-add event onto a platform-agnostic Reaction.
+// Emoji.Name is the unicode character for a standard emoji (or the custom emoji's
+// name); AuthorName is left empty (the event carries only a user id).
+func toReaction(m *discordgo.MessageReactionAdd) *core.Reaction {
+	return &core.Reaction{
+		Emoji:     m.Emoji.Name,
+		UserID:    m.UserID,
+		ChannelID: m.ChannelID,
+		MessageID: m.MessageID,
+		Raw:       m,
+	}
 }
 
 // toMessage maps a Discord message-create event onto a platform-agnostic
@@ -113,6 +141,16 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	return err
 }
 
+// SendThreaded implements [core.ThreadedSender]: it posts text as a reply
+// referencing the message identified by replyToID.
+func (a *adapter) SendThreaded(ctx context.Context, channelID, replyToID, text string) error {
+	_, err := a.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:   text,
+		Reference: &discordgo.MessageReference{MessageID: replyToID, ChannelID: channelID},
+	}, discordgo.WithContext(ctx))
+	return err
+}
+
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	mc, ok := RawEvent(m)
 	if !ok {
@@ -125,6 +163,13 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 // whether m originated from Discord.
 func RawEvent(m *core.Message) (*discordgo.MessageCreate, bool) {
 	e, ok := m.Raw.(*discordgo.MessageCreate)
+	return e, ok
+}
+
+// RawReaction returns the raw Discord reaction-add event carried on r, reporting
+// whether r originated from Discord.
+func RawReaction(r *core.Reaction) (*discordgo.MessageReactionAdd, bool) {
+	e, ok := r.Raw.(*discordgo.MessageReactionAdd)
 	return e, ok
 }
 
