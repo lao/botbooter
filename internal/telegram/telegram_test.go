@@ -129,6 +129,21 @@ func TestOnReaction(t *testing.T) {
 	})
 }
 
+func TestRawReactionUpdate_NonTelegram(t *testing.T) {
+	t.Run("foreign raw", func(t *testing.T) {
+		u, ok := RawReactionUpdate(&core.Reaction{Raw: "not-a-telegram-update"})
+		asserts.False(t, ok, "a non-Telegram reaction is not recovered")
+		asserts.True(t, u == nil, "no update returned for a foreign reaction")
+	})
+
+	t.Run("telegram update without a reaction", func(t *testing.T) {
+		// A Telegram *models.Update whose MessageReaction is nil is not a reaction.
+		u, ok := RawReactionUpdate(&core.Reaction{Raw: &models.Update{}})
+		asserts.False(t, ok, "an update carrying no MessageReaction is not a reaction")
+		asserts.True(t, u == nil, "no update returned when MessageReaction is nil")
+	})
+}
+
 func TestSendThreaded(t *testing.T) {
 	var body string
 	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +160,27 @@ func TestSendThreaded(t *testing.T) {
 	asserts.NoError(t, err, "SendThreaded should succeed")
 	asserts.True(t, strings.Contains(body, "reply_parameters"), "reply_parameters sent: "+body)
 	asserts.True(t, strings.Contains(body, `"message_id":55`), "reply targets message 55: "+body)
+}
+
+// A non-numeric replyToID cannot be a Telegram message id, so SendThreaded falls
+// back to a plain send with no reply_parameters rather than failing.
+func TestSendThreaded_NonNumericFallsBack(t *testing.T) {
+	var gotText, gotReply string
+	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "sendMessage") {
+			_ = r.ParseMultipartForm(1 << 20)
+			gotText = r.FormValue("text")
+			gotReply = r.FormValue("reply_parameters")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":100,"type":"private"}}}`))
+	})
+
+	err := a.SendThreaded(context.Background(), "100", "not-a-number", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should fall back to a plain send")
+	asserts.Equal(t, gotText, "hi", "text is still sent on the fallback path")
+	asserts.Equal(t, gotReply, "", "no reply_parameters on the fallback path")
 }
 
 func TestNew(t *testing.T) {

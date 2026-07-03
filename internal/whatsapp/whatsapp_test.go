@@ -143,6 +143,56 @@ func TestHandleWebhook_SkipsReactionRemoval(t *testing.T) {
 	asserts.Equal(t, len(got), 0, "a reaction removal (empty emoji) is not dispatched")
 }
 
+func TestParseMessage_Reaction(t *testing.T) {
+	raw := json.RawMessage(`{"from":"123","id":"wamid.r1","timestamp":"1","type":"reaction","reaction":{"message_id":"wamid.orig","emoji":"👍"}}`)
+
+	m, err := parseMessage(raw)
+
+	asserts.NoError(t, err, "a reaction message should parse")
+	asserts.Equal(t, m.Type, "reaction", "type is reaction")
+	asserts.NotNil(t, m.Reaction, "Reaction should be populated")
+	asserts.Equal(t, m.Reaction.MessageID, "wamid.orig", "reacted message id")
+	asserts.Equal(t, m.Reaction.Emoji, "👍", "emoji")
+	asserts.True(t, m.Media == nil, "a reaction carries no media")
+}
+
+func TestParseWebhook_Reaction(t *testing.T) {
+	messages := parseWebhook([]byte(reactionWebhook))
+
+	asserts.Equal(t, len(messages), 1, "one reaction message expected")
+	m := messages[0]
+	asserts.Equal(t, m.Type, "reaction", "type is reaction")
+	asserts.NotNil(t, m.Reaction, "Reaction should be populated")
+	asserts.Equal(t, m.Reaction.Emoji, "👍", "emoji")
+	asserts.Equal(t, m.Reaction.MessageID, "wamid.orig", "reacted message id")
+	asserts.Equal(t, m.AuthorName, "Ada", "AuthorName enriched from contacts")
+}
+
+func TestRawReaction_NonMatch(t *testing.T) {
+	// A Reaction that did not originate from WhatsApp (Raw is not *Message).
+	wm, ok := RawReaction(&core.Reaction{Raw: "not-whatsapp"})
+	asserts.False(t, ok, "a non-WhatsApp reaction should not match")
+	asserts.True(t, wm == nil, "no message is recovered on a non-match")
+}
+
+func TestSend_OmitsContext(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := testAdapter()
+	a.baseURL = srv.URL
+	a.http = srv.Client()
+
+	err := a.Send(context.Background(), "123", "hi")
+
+	asserts.NoError(t, err, "Send should succeed")
+	asserts.False(t, strings.Contains(string(body), `"context"`), "a plain Send carries no context object: "+string(body))
+}
+
 func TestSendThreaded_IncludesContext(t *testing.T) {
 	var body []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -578,6 +628,22 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Connect(ctx, deps), "Connect should bind and start")
 	asserts.NoError(t, a.Disconnect(), "Disconnect should shut down cleanly")
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
+}
+
+// foreignAdapter is a non-WhatsApp core.Adapter used to prove Addr returns ""
+// when the bot's adapter is not the WhatsApp adapter type.
+type foreignAdapter struct{}
+
+func (foreignAdapter) Connect(context.Context, core.AdapterDeps) error { return nil }
+func (foreignAdapter) Disconnect() error                               { return nil }
+func (foreignAdapter) Send(context.Context, string, string) error      { return nil }
+func (foreignAdapter) Attachments(*core.Message) ([]core.Attachment, error) {
+	return nil, nil
+}
+
+func TestAddr_WrongBot(t *testing.T) {
+	b := core.New(core.WhatsAppBotType, foreignAdapter{})
+	asserts.Equal(t, Addr(b), "", "Addr returns \"\" when the adapter is not the WhatsApp adapter")
 }
 
 func TestAddr_ExposesBoundListener(t *testing.T) {

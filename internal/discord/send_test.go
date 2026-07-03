@@ -58,6 +58,15 @@ func TestSendThreaded(t *testing.T) {
 	asserts.True(t, strings.Contains(rt.body, "M1"), "reference targets the reacted message: "+rt.body)
 }
 
+func TestSendThreaded_Error(t *testing.T) {
+	a := newTestAdapter(t)
+	a.session.Client = &http.Client{
+		Transport: stubRoundTripper{status: 401, body: `{"code":0,"message":"401: Unauthorized"}`},
+	}
+
+	asserts.Error(t, a.SendThreaded(context.Background(), "C1", "M1", "hi"), "SendThreaded should fail on 401")
+}
+
 // nonDiscordAdapter is a minimal core.Adapter that is not discord's *adapter.
 type nonDiscordAdapter struct{}
 
