@@ -49,7 +49,7 @@ func TestIsolationDeps(t *testing.T) {
 	// assert directly on the first-party internal/<platform> build paths: each
 	// public package must contain only its own platform's internal package.
 	const internalBase = "github.com/lao/botbooter/internal/"
-	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp", "teams"}
+	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp", "teams", "signal"}
 	cases := []struct {
 		pkg         string
 		absent      []string
@@ -63,6 +63,7 @@ func TestIsolationDeps(t *testing.T) {
 		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5}, []string{gotelegram}, "telegram"},
 		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram, jwtv5}, nil, "whatsapp"},
 		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram}, []string{jwtv5}, "teams"},
+		{"github.com/lao/botbooter/signal", []string{discordgo, slackgo, gotelegram, jwtv5}, nil, "signal"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.pkg, func(t *testing.T) {

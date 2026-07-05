@@ -32,6 +32,7 @@ const (
 	TelegramBotType
 	WhatsAppBotType
 	TeamsBotType
+	SignalBotType
 )
 
 func (t BotType) String() string {
@@ -48,6 +49,8 @@ func (t BotType) String() string {
 		return "whatsapp"
 	case TeamsBotType:
 		return "teams"
+	case SignalBotType:
+		return "signal"
 	default:
 		return fmt.Sprintf("BotType(%d)", int(t))
 	}
