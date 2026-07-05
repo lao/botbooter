@@ -30,6 +30,7 @@ const (
 	TelegramBotType = core.TelegramBotType
 	WhatsAppBotType = core.WhatsAppBotType
 	TeamsBotType    = core.TeamsBotType
+	GitHubBotType   = core.GitHubBotType
 )
 
 type (
