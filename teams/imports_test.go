@@ -13,5 +13,5 @@ import (
 // isolation deps test.
 func TestTeamsImportsNoPlatformSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack", "go-telegram/bot"}, "teams")
+		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "google/go-github"}, "teams")
 }

@@ -13,5 +13,5 @@ import (
 // deps test.
 func TestTelegramImportsNoForeignSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack"}, "telegram")
+		[]string{"discordgo", "slack-go/slack", "google/go-github"}, "telegram")
 }
