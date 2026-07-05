@@ -202,5 +202,4 @@ func newAdapter(cfg Config) (*adapter, error) {
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error { return nil }
 func (a *adapter) Disconnect() error                                        { return nil }
-func (a *adapter) Send(ctx context.Context, channelID, text string) error   { return nil }
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error)   { return nil, nil }
