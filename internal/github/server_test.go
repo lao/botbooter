@@ -176,6 +176,208 @@ func TestHandleWebhook_Rejections(t *testing.T) {
 	}
 }
 
+func selfIdentityServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			_, _ = w.Write([]byte(`{"id": 777, "login": "bot-account"}`))
+		case r.URL.Path == "/app":
+			_, _ = w.Write([]byte(`{"id": 7, "slug": "my-app"}`))
+		case strings.Contains(r.URL.Path, "/users/my-app"):
+			_, _ = w.Write([]byte(`{"id": 555, "login": "my-app[bot]"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func connectedAdapter(t *testing.T, deps core.AdapterDeps) (*adapter, *httptest.Server, context.CancelFunc) {
+	t.Helper()
+	srv := selfIdentityServer(t)
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	a.client = testClient(t, srv)
+	ctx, cancel := context.WithCancel(context.Background())
+	asserts.NoError(t, a.Connect(ctx, deps), "connect")
+	return a, srv, cancel
+}
+
+func TestConnect_ResolvesSelfAndBinds(t *testing.T) {
+	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
+		Dispatch:   func(context.Context, *core.Message) {},
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	})
+	defer srv.Close()
+	defer cancel()
+	defer func() { _ = a.Disconnect() }()
+
+	a.mu.Lock()
+	selfID, boundAddr := a.selfID, a.boundAddr
+	a.mu.Unlock()
+	asserts.Equal(t, selfID, int64(777), "PAT self-identity resolved via /user")
+	asserts.True(t, boundAddr != "", "listener bound, addr recoverable")
+}
+
+func TestConnect_SelfIdentityFailureIsFatal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	a.client = testClient(t, srv)
+
+	err = a.Connect(context.Background(), core.AdapterDeps{})
+
+	asserts.Error(t, err, "a bot that cannot recognize itself must not start")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	asserts.True(t, a.srv == nil, "no server installed on failure")
+}
+
+func TestConnect_AppModeResolvesBotUser(t *testing.T) {
+	srv := selfIdentityServer(t)
+	defer srv.Close()
+	a, err := newAdapter(appConfig(t))
+	asserts.NoError(t, err, "new App adapter")
+	a.client = testClient(t, srv)
+	a.baseURL = srv.URL // one-shot App-JWT client also hits the fake
+
+	asserts.NoError(t, a.Connect(context.Background(), core.AdapterDeps{
+		Done: func(error) {}, Disconnect: func() error { return nil },
+	}), "connect in App mode")
+	defer func() { _ = a.Disconnect() }()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	asserts.Equal(t, a.selfID, int64(555), "App self-identity resolved via /app then /users/{slug}[bot]")
+}
+
+func TestDisconnect_IdempotentAndClears(t *testing.T) {
+	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
+		Done: func(error) {}, Disconnect: func() error { return nil },
+	})
+	defer srv.Close()
+	defer cancel()
+
+	asserts.NoError(t, a.Disconnect(), "first disconnect")
+	a.mu.Lock()
+	cleared := a.srv == nil && a.boundAddr == "" && a.detachedCancel == nil
+	stillSelf := a.selfID == 777
+	a.mu.Unlock()
+	asserts.True(t, cleared, "server state cleared")
+	asserts.True(t, stillSelf, "self identity persists across Disconnect")
+	asserts.NoError(t, a.Disconnect(), "second disconnect is a no-op")
+}
+
+func TestDisconnect_NeverConnected(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	asserts.NoError(t, a.Disconnect(), "disconnect before connect is nil")
+}
+
+func TestConnect_CtxCancelTriggersDisconnect(t *testing.T) {
+	disconnected := make(chan struct{}, 1)
+	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { disconnected <- struct{}{}; return nil },
+	})
+	defer srv.Close()
+	defer func() { _ = a.Disconnect() }()
+
+	cancel()
+
+	select {
+	case <-disconnected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not call deps.Disconnect on ctx cancel")
+	}
+}
+
+// A stale watcher from a superseded connection must not tear down its
+// replacement: connect, disconnect, reconnect, then cancel the FIRST ctx and
+// assert deps.Disconnect is not called for the second connection.
+func TestConnect_StaleWatcherIgnoresReplacedServer(t *testing.T) {
+	srv := selfIdentityServer(t)
+	defer srv.Close()
+	disconnects := make(chan struct{}, 2)
+	deps := core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { disconnects <- struct{}{}; return nil },
+	}
+
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	a.client = testClient(t, srv)
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	asserts.NoError(t, a.Connect(ctx1, deps), "first connect")
+	asserts.NoError(t, a.Disconnect(), "disconnect first connection")
+
+	asserts.NoError(t, a.Connect(context.Background(), deps), "reconnect")
+	defer func() { _ = a.Disconnect() }()
+
+	cancel1()
+
+	select {
+	case <-disconnects:
+		t.Fatal("stale watcher tore down the replacement connection")
+	case <-time.After(200 * time.Millisecond):
+		// No Disconnect call: the stale watcher saw a.srv != its srv and bailed.
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	asserts.True(t, a.srv != nil, "second connection still installed")
+}
+
+// Disconnect must cancel the connection's detached dispatch context after the
+// drain, so a stuck handler cannot leak past shutdown.
+func TestDisconnect_CancelsDetachedCtx(t *testing.T) {
+	gotCtx := make(chan context.Context, 1)
+	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
+		Dispatch:   func(c context.Context, _ *core.Message) { gotCtx <- c },
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	})
+	defer srv.Close()
+	defer cancel()
+
+	// Drive one real delivery through the bound server so dispatch runs on the
+	// connection's detached context.
+	a.mu.Lock()
+	addr := a.boundAddr
+	a.mu.Unlock()
+	r, err := http.NewRequest(http.MethodPost, "http://"+addr+"/webhook", strings.NewReader(issueCommentCreated))
+	asserts.NoError(t, err, "build request")
+	r.Header.Set("X-GitHub-Event", "issue_comment")
+	r.Header.Set("X-Hub-Signature-256", sign("hook-secret", []byte(issueCommentCreated)))
+	resp, err := http.DefaultClient.Do(r)
+	asserts.NoError(t, err, "deliver webhook")
+	_ = resp.Body.Close()
+
+	var dispatchCtx context.Context
+	select {
+	case dispatchCtx = <-gotCtx:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch")
+	}
+	asserts.NoError(t, dispatchCtx.Err(), "detached ctx live while connected")
+
+	asserts.NoError(t, a.Disconnect(), "disconnect")
+	asserts.ErrorIs(t, dispatchCtx.Err(), context.Canceled, "detached ctx canceled by Disconnect")
+}
+
+func TestAttachments_AlwaysNil(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	atts, err := a.Attachments(&core.Message{})
+	asserts.NoError(t, err, "no error")
+	asserts.True(t, atts == nil, "v1 has no attachments")
+}
+
 func TestHandleWebhook_AckedButDropped(t *testing.T) {
 	cases := []struct {
 		name    string

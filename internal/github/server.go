@@ -2,18 +2,20 @@ package github
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"time"
 
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	gogithub "github.com/google/go-github/v88/github"
 	"github.com/lao/botbooter/internal/core"
 )
 
-const (
-	signatureHeader = "X-Hub-Signature-256"
-	eventHeader     = "X-GitHub-Event"
-)
+const signatureHeader = "X-Hub-Signature-256"
 
 // handleWebhook authenticates, filters, acks and dispatches one webhook
 // delivery. The ack (200) is written before dispatch runs: GitHub times out
@@ -75,4 +77,179 @@ func (a *adapter) isSelfOrBot(event *gogithub.IssueCommentEvent) bool {
 	selfID := a.selfID
 	a.mu.Unlock()
 	return selfID != 0 && user.GetID() == selfID
+}
+
+func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
+	// One detached, cancelable context per connection parents all dispatch:
+	// WithoutCancel lets an acked reply finish during the shutdown drain, and
+	// WithCancel lets Disconnect abort stragglers after it.
+	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
+
+	// A bot that cannot recognize itself is a reply-loop hazard: fail loudly
+	// at startup, in either auth mode, rather than silently at dispatch.
+	selfID, selfLogin, err := a.resolveSelf(ctx)
+	if err != nil {
+		detachedCancel()
+		return err
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(a.cfg.Path, func(w http.ResponseWriter, r *http.Request) {
+		// GitHub webhooks are always POST; there is no GET handshake.
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		a.handleWebhook(detachedCtx, w, r, deps)
+	})
+
+	ln, err := net.Listen("tcp", a.cfg.Addr)
+	if err != nil {
+		detachedCancel()
+		return err
+	}
+
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       20 * time.Second,
+		WriteTimeout:      20 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	a.mu.Lock()
+	a.selfID, a.selfLogin = selfID, selfLogin
+	a.srv = srv
+	a.boundAddr = ln.Addr().String()
+	a.detachedCancel = detachedCancel
+	a.mu.Unlock()
+
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			deps.Done(err)
+		}
+	}()
+
+	// Tear down when the run context is canceled; identity-compare so a stale
+	// watcher from a superseded connection never tears down its replacement.
+	go func() {
+		<-ctx.Done()
+		a.mu.Lock()
+		current := a.srv == srv
+		a.mu.Unlock()
+		if current {
+			_ = deps.Disconnect()
+		}
+	}()
+
+	return nil
+}
+
+// resolveSelf resolves the bot's own account for loop prevention. PAT mode is
+// one call; App mode cannot call GET /user with an installation token, so it
+// asks GET /app (App JWT) for the slug, then resolves "<slug>[bot]" to an id.
+func (a *adapter) resolveSelf(ctx context.Context) (int64, string, error) {
+	if a.cfg.Token != "" {
+		user, _, err := a.client.Users.Get(ctx, "")
+		if err != nil {
+			return 0, "", fmt.Errorf("github: resolve self identity: %w", err)
+		}
+		return user.GetID(), user.GetLogin(), nil
+	}
+
+	atr, err := ghinstallation.NewAppsTransport(a.baseTransport, a.cfg.AppID, a.cfg.PrivateKey)
+	if err != nil {
+		return 0, "", fmt.Errorf("github: build app transport: %w", err)
+	}
+	appClient, err := gogithub.NewClient(gogithub.WithHTTPClient(
+		&http.Client{Transport: atr, Timeout: a.cfg.HTTPClient.Timeout},
+	))
+	if err != nil {
+		return 0, "", fmt.Errorf("github: build app client: %w", err)
+	}
+	if a.baseURL != "" { // test hook: point the one-shot client at a fake API
+		appClient, err = gogithub.NewClient(gogithub.WithHTTPClient(
+			&http.Client{Transport: atr, Timeout: a.cfg.HTTPClient.Timeout},
+		), gogithub.WithURLs(gogithub.Ptr(a.baseURL+"/"), gogithub.Ptr(a.baseURL+"/")))
+		if err != nil {
+			return 0, "", fmt.Errorf("github: build app client: %w", err)
+		}
+	}
+
+	app, _, err := appClient.Apps.Get(ctx, "")
+	if err != nil {
+		return 0, "", fmt.Errorf("github: resolve app slug: %w", err)
+	}
+	user, _, err := a.client.Users.Get(ctx, app.GetSlug()+"[bot]")
+	if err != nil {
+		return 0, "", fmt.Errorf("github: resolve bot user %s[bot]: %w", app.GetSlug(), err)
+	}
+	return user.GetID(), user.GetLogin(), nil
+}
+
+func (a *adapter) Disconnect() error {
+	a.mu.Lock()
+	srv := a.srv
+	cancelDispatch := a.detachedCancel
+	a.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	// Shutdown and drain each get their own budget: dispatch goroutines run
+	// outside the HTTP handler lifecycle, so a slow Shutdown must not consume
+	// the drain deadline and drop an already-acked in-flight message.
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutCancel()
+	err := srv.Shutdown(shutCtx)
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
+	defer drainCancel()
+	a.drainDispatch(drainCtx)
+
+	var drainErr error
+	if n := a.inflight.Load(); n > 0 {
+		log.Printf("github: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		drainErr = fmt.Errorf("github: dispatch drain timed out with %d in-flight dispatch(es)", n)
+	}
+
+	// Clear the shared fields only if a reconnect has not installed a newer
+	// connection (identity-compare on srv). Either way, cancel THIS
+	// connection's detached context after the drain so a stuck handler cannot
+	// leak past shutdown. selfID/selfLogin persist: they are re-resolved on
+	// the next Connect and harmless while no server is up.
+	a.mu.Lock()
+	if a.srv == srv {
+		a.srv = nil
+		a.boundAddr = ""
+		a.detachedCancel = nil
+	}
+	a.mu.Unlock()
+
+	if cancelDispatch != nil {
+		cancelDispatch()
+	}
+	if err != nil {
+		return err
+	}
+	return drainErr
+}
+
+// drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so an
+// acked message is processed rather than dropped at shutdown. It polls an
+// atomic counter rather than a WaitGroup: an Add racing Wait would risk a
+// misuse panic.
+func (a *adapter) drainDispatch(ctx context.Context) {
+	for a.inflight.Load() > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// Attachments implements core.Adapter. GitHub issue comments carry markdown,
+// not an upload channel worth modeling; v1 has no attachment support.
+func (a *adapter) Attachments(_ *core.Message) ([]core.Attachment, error) {
+	return nil, nil
 }

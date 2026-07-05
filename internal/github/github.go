@@ -103,6 +103,10 @@ type adapter struct {
 	// only when a reconnect has not already installed a newer connection.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
+
+	// baseURL overrides the API base for the one-shot self-identity client in
+	// App mode; tests point it at an httptest server. Empty in production.
+	baseURL string
 }
 
 // New creates a GitHub bot. It returns ErrMissingConfig if a required field is
@@ -199,7 +203,3 @@ func newAdapter(cfg Config) (*adapter, error) {
 	}
 	return a, nil
 }
-
-func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error { return nil }
-func (a *adapter) Disconnect() error                                        { return nil }
-func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error)   { return nil, nil }
