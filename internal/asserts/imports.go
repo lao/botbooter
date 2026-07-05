@@ -3,7 +3,8 @@ package asserts
 import (
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -13,23 +14,28 @@ import (
 // per-package import guards that lock in the platform-SDK decoupling.
 func CheckBannedImports(t TestingT, dir string, banned []string, label string) {
 	t.Helper()
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ImportsOnly)
-	NoError(t, err, "parse "+label+" package")
+	entries, err := os.ReadDir(dir)
+	NoError(t, err, "read "+label+" package dir")
 	if err != nil {
 		return
 	}
+	fset := token.NewFileSet()
 	checked := 0
-	for _, pkg := range pkgs {
-		for name, file := range pkg.Files {
-			checked++
-			for _, imp := range file.Imports {
-				for _, b := range banned {
-					False(t, strings.Contains(imp.Path.Value, b),
-						label+" file "+name+" must not import "+b)
-				}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		NoError(t, err, "parse "+label+" file "+entry.Name())
+		if err != nil {
+			return
+		}
+		checked++
+		for _, imp := range file.Imports {
+			for _, b := range banned {
+				False(t, strings.Contains(imp.Path.Value, b),
+					label+" file "+entry.Name()+" must not import "+b)
 			}
 		}
 	}
