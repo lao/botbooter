@@ -161,19 +161,15 @@ func (a *adapter) resolveSelf(ctx context.Context) (int64, string, error) {
 	if err != nil {
 		return 0, "", fmt.Errorf("github: build app transport: %w", err)
 	}
-	appClient, err := gogithub.NewClient(gogithub.WithHTTPClient(
+	opts := []gogithub.ClientOptionsFunc{gogithub.WithHTTPClient(
 		&http.Client{Transport: atr, Timeout: a.cfg.HTTPClient.Timeout},
-	))
+	)}
+	if a.baseURL != "" { // test hook: point the one-shot client at a fake API
+		opts = append(opts, gogithub.WithURLs(gogithub.Ptr(a.baseURL+"/"), gogithub.Ptr(a.baseURL+"/")))
+	}
+	appClient, err := gogithub.NewClient(opts...)
 	if err != nil {
 		return 0, "", fmt.Errorf("github: build app client: %w", err)
-	}
-	if a.baseURL != "" { // test hook: point the one-shot client at a fake API
-		appClient, err = gogithub.NewClient(gogithub.WithHTTPClient(
-			&http.Client{Transport: atr, Timeout: a.cfg.HTTPClient.Timeout},
-		), gogithub.WithURLs(gogithub.Ptr(a.baseURL+"/"), gogithub.Ptr(a.baseURL+"/")))
-		if err != nil {
-			return 0, "", fmt.Errorf("github: build app client: %w", err)
-		}
 	}
 
 	app, _, err := appClient.Apps.Get(ctx, "")

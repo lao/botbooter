@@ -50,6 +50,9 @@ func TestParseChannelID(t *testing.T) {
 	}{
 		{"lao/botbooter#42", "lao", "botbooter", 42, false},
 		{"a/b#12", "a", "b", 12, false},
+		// Splits on the LAST '#': repo absorbs the earlier "#10" literally and
+		// the trailing "#20" is the number. Pinning this as valid, not fixing it.
+		{"owner/repo#10#20", "owner", "repo#10", 20, false},
 		{"owner/repo", "", "", 0, true},   // no #number
 		{"owner#1", "", "", 0, true},      // no /repo
 		{"owner/repo#0", "", "", 0, true}, // non-positive number

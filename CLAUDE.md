@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-botbooter is a Go library (module `github.com/lao/botbooter`, Go 1.23+) for writing a chat bot once and running it on Slack (Socket Mode), Discord (Gateway), Telegram (Bot API), WhatsApp (Cloud API webhook), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook, replying as issue comments on both issues and PR conversations; built on `google/go-github` + `bradleyfalzon/ghinstallation` for App-mode auth) or a local CLI. Consumers register regex-matched `Command` handlers plus optional `Middleware` and call `Run(ctx)`; the platform is hidden behind a single `Bot` type.
+botbooter is a Go library (module `github.com/lao/botbooter`, Go 1.25+) for writing a chat bot once and running it on Slack (Socket Mode), Discord (Gateway), Telegram (Bot API), WhatsApp (Cloud API webhook), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook, replying as issue comments on both issues and PR conversations; built on `google/go-github` + `bradleyfalzon/ghinstallation` for App-mode auth) or a local CLI. Consumers register regex-matched `Command` handlers plus optional `Middleware` and call `Run(ctx)`; the platform is hidden behind a single `Bot` type.
 
 ## Commands
 
