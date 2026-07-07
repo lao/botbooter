@@ -140,6 +140,7 @@ func TestNew_Defaults(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter should succeed")
 	asserts.True(t, a.cfg.DialTimeout > 0, "DialTimeout should default")
+	asserts.True(t, a.cfg.SendTimeout > 0, "SendTimeout should default")
 }
 
 func TestConnect_DialError(t *testing.T) {
@@ -226,6 +227,43 @@ func TestReceive_SkipsMalformedLine(t *testing.T) {
 	asserts.Equal(t, len(got), 1, "malformed lines should be skipped, not fatal")
 }
 
+// sourceOnlyReceive has no sourceNumber, so the adapter must fall back to the
+// envelope's source field for the sender identity.
+const sourceOnlyReceive = `{"jsonrpc":"2.0","method":"receive","params":{"account":"+15550001","envelope":{"source":"uuid-9","sourceName":"Bob","timestamp":1700000003000,"dataMessage":{"timestamp":1700000003000,"message":"via uuid"}}}}`
+
+func TestReceive_FallsBackToSource(t *testing.T) {
+	addr, conns := startDaemon(t)
+	a, _ := newAdapter(validConfig())
+	var got []*core.Message
+	done := make(chan struct{}, 4)
+	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
+
+	writeLine(t, daemon, sourceOnlyReceive)
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, got[0].UserID, "uuid-9", "UserID should fall back to envelope source")
+}
+
+// TestReceive_SelfDropFallsBackToDaemonAccount pins that with no configured
+// Account, the daemon-reported account still filters the bot's own messages.
+func TestReceive_SelfDropFallsBackToDaemonAccount(t *testing.T) {
+	addr, conns := startDaemon(t)
+	cfg := validConfig()
+	cfg.Account = ""
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "newAdapter")
+	var got []*core.Message
+	done := make(chan struct{}, 4)
+	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
+
+	writeLine(t, daemon, ownReceive) // source == the notification's account
+	writeLine(t, daemon, directReceive)
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, len(got), 1, "own message should be dropped via the daemon-reported account")
+	asserts.Equal(t, got[0].Content, "hello bot", "the surviving message is the real one")
+}
+
 func TestSend_Direct(t *testing.T) {
 	addr, conns := startDaemon(t)
 	a, _ := newAdapter(validConfig())
@@ -301,6 +339,73 @@ func TestSend_ContextCanceled(t *testing.T) {
 	readRequest(t, r) // request went out; never answer it
 	cancel()
 	asserts.ErrorIs(t, <-sendErr, context.Canceled, "Send should honor ctx cancellation")
+}
+
+// TestSend_TimesOutWithoutResponse pins the independent round-trip bound:
+// even with a background (never-canceled) context, a request the daemon
+// accepts but never answers must fail after SendTimeout instead of blocking
+// the caller forever.
+func TestSend_TimesOutWithoutResponse(t *testing.T) {
+	addr, conns := startDaemon(t)
+	cfg := validConfig()
+	cfg.SendTimeout = 100 * time.Millisecond
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "newAdapter")
+	daemon := connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
+	r := bufio.NewReader(daemon)
+
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi") }()
+
+	readRequest(t, r) // request went out; never answer it
+	select {
+	case err := <-sendErr:
+		asserts.ErrorIs(t, err, context.DeadlineExceeded, "Send should time out on a silent daemon")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not time out")
+	}
+}
+
+// TestSend_AfterReadLoopExit pins the late-registration guard: a Send issued
+// after the read loop already died (and ran failPending) must fail promptly
+// instead of waiting on a channel nothing can ever settle.
+func TestSend_AfterReadLoopExit(t *testing.T) {
+	addr, conns := startDaemon(t)
+	a, _ := newAdapter(validConfig())
+	loopErr := make(chan error, 1)
+	daemon := connectAdapter(t, a, captureDeps(nil, nil, loopErr), addr, conns)
+
+	_ = daemon.Close()
+	select {
+	case <-loopErr: // read loop has exited; failPending already ran
+	case <-time.After(2 * time.Second):
+		t.Fatal("read loop never reported the remote close")
+	}
+
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi") }()
+	select {
+	case err := <-sendErr:
+		asserts.Error(t, err, "Send on a dead connection must fail")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send hung on a connection whose read loop already exited")
+	}
+}
+
+// TestSend_WriteError covers the write failure path: the local socket is
+// closed underneath the adapter, so the frame write itself errors.
+func TestSend_WriteError(t *testing.T) {
+	addr, conns := startDaemon(t)
+	a, _ := newAdapter(validConfig())
+	connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
+
+	c := a.currentConn()
+	asserts.NoError(t, c.net.Close(), "close local socket")
+
+	err := a.Send(context.Background(), "+15550002", "hi")
+	asserts.Error(t, err, "Send on a locally closed socket should fail")
+	asserts.True(t, strings.Contains(err.Error(), "send write failed") ||
+		strings.Contains(err.Error(), "connection closed"), "error should name the write or closed conn: "+err.Error())
 }
 
 func TestSend_NotConnected(t *testing.T) {
@@ -394,6 +499,38 @@ func TestDisconnect_DrainsInflightDispatch(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Disconnect returned without draining the in-flight dispatch")
 	}
+}
+
+// TestDisconnect_DrainTimeout covers the drain-deadline branch: a handler
+// stuck past the (test-shrunk) drain budget makes Disconnect return an error
+// instead of blocking forever.
+func TestDisconnect_DrainTimeout(t *testing.T) {
+	old := drainTimeout
+	drainTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { drainTimeout = old })
+
+	addr, conns := startDaemon(t)
+	a, _ := newAdapter(validConfig())
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	deps := core.AdapterDeps{
+		Dispatch: func(_ context.Context, _ *core.Message) {
+			entered <- struct{}{}
+			<-release
+		},
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	}
+	daemon := connectAdapter(t, a, deps, addr, conns)
+	t.Cleanup(func() { close(release) })
+
+	writeLine(t, daemon, directReceive)
+	<-entered
+
+	err := a.Disconnect()
+	asserts.Error(t, err, "Disconnect should surface a drain timeout")
+	asserts.True(t, strings.Contains(err.Error(), "drain timed out"), "error should name the drain timeout: "+err.Error())
 }
 
 // TestDisconnect_WaitsForReadLoopExit pins the drain's happens-before edge:

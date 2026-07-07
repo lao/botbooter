@@ -31,8 +31,16 @@ import (
 // phone number. Inbound group messages carry it and Send strips it back off.
 const groupChannelPrefix = "group:"
 
+// Shutdown budgets: how long Disconnect waits for the read loop to exit and
+// for in-flight dispatches to drain. Package variables so tests can shrink them.
+var (
+	loopExitTimeout = 5 * time.Second
+	drainTimeout    = 5 * time.Second
+)
+
 const (
 	defaultDialTimeout = 10 * time.Second
+	defaultSendTimeout = 30 * time.Second
 
 	// maxLineBytes caps a single JSON-RPC frame from the daemon. Envelopes are
 	// small (attachments arrive as ids, not inline bytes); the cap only bounds a
@@ -59,6 +67,9 @@ type Config struct {
 	Account string
 	// DialTimeout bounds the Connect dial; defaults to 10s when zero.
 	DialTimeout time.Duration
+	// SendTimeout bounds each Send's request/response round-trip regardless of
+	// the caller's context; defaults to 30s when zero.
+	SendTimeout time.Duration
 }
 
 // Message is the parsed payload of a signal-cli receive envelope. Raw holds
@@ -147,6 +158,9 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = defaultDialTimeout
 	}
+	if cfg.SendTimeout <= 0 {
+		cfg.SendTimeout = defaultSendTimeout
+	}
 	return &adapter{cfg: cfg}, nil
 }
 
@@ -211,7 +225,7 @@ func (a *adapter) readLoop(c *rpcConn, dispatchCtx context.Context, deps core.Ad
 		case frame.ID != nil:
 			c.settle(*frame.ID, rpcResult{result: frame.Result, err: frame.Error})
 		case frame.Method == "receive":
-			a.handleReceive(dispatchCtx, frame.Params, deps)
+			a.handleReceive(c, dispatchCtx, frame.Params, deps)
 		}
 	}
 
@@ -254,7 +268,7 @@ type receiveParams struct {
 	} `json:"envelope"`
 }
 
-func (a *adapter) handleReceive(dispatchCtx context.Context, params json.RawMessage, deps core.AdapterDeps) {
+func (a *adapter) handleReceive(c *rpcConn, dispatchCtx context.Context, params json.RawMessage, deps core.AdapterDeps) {
 	var p receiveParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		log.Printf("signal: skipping unparseable receive params: %v", err)
@@ -284,7 +298,9 @@ func (a *adapter) handleReceive(dispatchCtx context.Context, params json.RawMess
 		SourceName: p.Envelope.SourceName,
 		Timestamp:  time.UnixMilli(p.Envelope.Timestamp).UTC(),
 		Text:       dm.Message,
-		Raw:        append(json.RawMessage(nil), params...),
+		// params was copied out of the scanner buffer by RawMessage.UnmarshalJSON,
+		// so it is already private to this frame.
+		Raw: params,
 	}
 	if dm.GroupInfo != nil {
 		m.GroupID = dm.GroupInfo.GroupID
@@ -295,13 +311,12 @@ func (a *adapter) handleReceive(dispatchCtx context.Context, params json.RawMess
 
 	// Dispatch off the read loop so a slow handler cannot stall the socket; the
 	// counter lets Disconnect drain in-flight messages instead of dropping them.
-	conn := a.currentConn()
-	if conn == nil {
-		return
-	}
-	conn.inflight.Add(1)
+	// Account on the loop's own connection, not a.conn: a reconnect can install
+	// a newer connection while this loop still flushes buffered frames, and its
+	// drain must not be charged for work it never spawned.
+	c.inflight.Add(1)
 	go func() {
-		defer conn.inflight.Add(-1)
+		defer c.inflight.Add(-1)
 		deps.Dispatch(dispatchCtx, toCoreMessage(m))
 	}()
 }
@@ -329,13 +344,20 @@ func (a *adapter) currentConn() *rpcConn {
 }
 
 // Send delivers text over the daemon as a JSON-RPC "send" request and waits
-// for the matching response. channelID is a recipient number, or a group id
-// carrying the "group:" prefix as produced on inbound group messages.
+// for the matching response, bounded by cfg.SendTimeout. channelID is a
+// recipient number, or a group id carrying the "group:" prefix as produced on
+// inbound group messages.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	c := a.currentConn()
 	if c == nil {
 		return ErrNotConnected
 	}
+
+	// Bound the round-trip independently of the caller: Bot.SendMessage passes
+	// a background context, and a request the daemon accepts but never answers
+	// would otherwise block that caller forever.
+	ctx, cancel := context.WithTimeout(ctx, a.cfg.SendTimeout)
+	defer cancel()
 
 	params := map[string]any{"message": text}
 	if groupID, ok := strings.CutPrefix(channelID, groupChannelPrefix); ok {
@@ -376,18 +398,35 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 		return fmt.Errorf("signal: send write failed: %w", err)
 	}
 
+	// loopDone guards the registration race: a Send that registered its pending
+	// entry after the dying read loop already ran failPending would otherwise
+	// wait on a channel nothing can ever settle. loopDone closes strictly after
+	// failPending, so one of the first two cases always fires on a dead conn.
 	select {
 	case res, ok := <-ch:
-		if !ok {
+		return sendOutcome(res, ok)
+	case <-c.loopDone:
+		// The loop may have settled the response just before exiting; prefer it.
+		select {
+		case res, ok := <-ch:
+			return sendOutcome(res, ok)
+		default:
 			return errors.New("signal: connection closed before send response")
 		}
-		if res.err != nil {
-			return fmt.Errorf("signal: send failed: %s (code %d)", res.err.Message, res.err.Code)
-		}
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// sendOutcome maps a settled (or failed-pending) response to Send's error.
+func sendOutcome(res rpcResult, ok bool) error {
+	if !ok {
+		return errors.New("signal: connection closed before send response")
+	}
+	if res.err != nil {
+		return fmt.Errorf("signal: send failed: %s (code %d)", res.err.Message, res.err.Code)
+	}
+	return nil
 }
 
 // settle delivers the daemon's response for request id to its waiting Send.
@@ -431,11 +470,11 @@ func (a *adapter) Disconnect() error {
 	// hang — reads fail after Close and handleReceive never blocks.
 	select {
 	case <-c.loopDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(loopExitTimeout):
 		log.Print("signal: read loop did not exit within the shutdown budget")
 	}
 
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer drainCancel()
 	c.drainDispatch(drainCtx)
 
