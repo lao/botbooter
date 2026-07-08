@@ -171,8 +171,10 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	}
 
 	// One detached, cancelable context per connection parents all dispatch:
-	// WithoutCancel lets an acked reply finish during the shutdown drain, and
-	// WithCancel lets Disconnect abort stragglers after it.
+	// WithoutCancel lets in-flight handler processing finish during the
+	// shutdown drain, and WithCancel lets Disconnect abort stragglers after
+	// it. Note replies sent during the drain fail: Disconnect closes the
+	// socket before draining, so the drain preserves processing, not replies.
 	dispatchCtx, cancelDispatch := context.WithCancel(context.WithoutCancel(ctx))
 	c := &rpcConn{
 		net:            netConn,
@@ -222,7 +224,9 @@ func (a *adapter) readLoop(c *rpcConn, dispatchCtx context.Context, deps core.Ad
 			continue
 		}
 		switch {
-		case frame.ID != nil:
+		case frame.ID != nil && frame.Method == "":
+			// id + no method = a response; an id-bearing request from the
+			// daemon must not settle a pending Send.
 			c.settle(*frame.ID, rpcResult{result: frame.Result, err: frame.Error})
 		case frame.Method == "receive":
 			a.handleReceive(c, dispatchCtx, frame.Params, deps)
@@ -498,7 +502,10 @@ func (a *adapter) Disconnect() error {
 }
 
 // drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so a
-// received message is processed rather than dropped at shutdown. It polls an
+// received message finishes processing rather than being dropped at shutdown.
+// Only processing is preserved: the socket is already closed by the time the
+// drain runs, so a handler that replies during the drain gets a write error.
+// It polls an
 // atomic counter rather than a WaitGroup: an Add racing Wait would risk a
 // misuse panic.
 func (c *rpcConn) drainDispatch(ctx context.Context) {
