@@ -173,6 +173,20 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	return err
 }
 
+// SendThreaded posts text into m's thread. The thread root is m.ReplyToID (the
+// inbound ThreadTimeStamp) when set, else m.ID (m is itself the root). Passing
+// thread_ts is what keeps the reply inside the thread rather than the channel.
+func (a *adapter) SendThreaded(ctx context.Context, m *core.Message, text string) error {
+	threadTS := m.ReplyToID
+	if threadTS == "" {
+		threadTS = m.ID
+	}
+	_, _, err := a.client.PostMessageContext(ctx, m.ChannelID,
+		slackapi.MsgOptionText(text, false),
+		slackapi.MsgOptionTS(threadTS))
+	return err
+}
+
 // Attachments returns the files attached to the message's Slack event.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	msg, _ := RawEvent(m)

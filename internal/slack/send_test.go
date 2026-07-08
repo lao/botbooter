@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
 	slackapi "github.com/slack-go/slack"
+
+	"github.com/lao/botbooter/internal/core"
 
 	"github.com/lao/botbooter/internal/asserts"
 )
@@ -47,4 +50,52 @@ func TestSend_SurfacesError(t *testing.T) {
 	err := a.Send(context.Background(), "C123", "hello")
 
 	asserts.Error(t, err, "Send should surface the Slack API error")
+}
+
+// capturingRoundTripper records the form values of the last request so a test
+// can assert what was posted to the Web API.
+type capturingRoundTripper struct {
+	form url.Values
+}
+
+func (c *capturingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	c.form, _ = url.ParseQuery(string(body))
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Request:    req,
+	}, nil
+}
+
+// TestSendThreaded_PassesThreadTS verifies the reply carries thread_ts, anchored
+// on ReplyToID when set and on the message ID otherwise.
+func TestSendThreaded_PassesThreadTS(t *testing.T) {
+	t.Run("AnchorsOnReplyToID", func(t *testing.T) {
+		cap := &capturingRoundTripper{}
+		client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(&http.Client{Transport: cap}))
+		a := &adapter{client: client}
+
+		err := a.SendThreaded(context.Background(),
+			&core.Message{ChannelID: "C1", ID: "200.2", ReplyToID: "100.1"}, "hi")
+
+		asserts.NoError(t, err, "SendThreaded")
+		asserts.Equal(t, cap.form.Get("thread_ts"), "100.1", "thread_ts should be the thread root")
+		asserts.Equal(t, cap.form.Get("channel"), "C1", "channel")
+	})
+
+	t.Run("AnchorsOnIDWhenNoReplyToID", func(t *testing.T) {
+		cap := &capturingRoundTripper{}
+		client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(&http.Client{Transport: cap}))
+		a := &adapter{client: client}
+
+		err := a.SendThreaded(context.Background(),
+			&core.Message{ChannelID: "C1", ID: "200.2"}, "hi")
+
+		asserts.NoError(t, err, "SendThreaded")
+		asserts.Equal(t, cap.form.Get("thread_ts"), "200.2", "thread_ts should fall back to the message ID")
+	})
 }
