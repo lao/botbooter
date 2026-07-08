@@ -27,6 +27,20 @@ func TestNewAmbiguousAuth(t *testing.T) {
 	asserts.ErrorIs(t, err, ErrAmbiguousAuth, "both auth modes")
 }
 
+func TestClient(t *testing.T) {
+	bot, err := New(Config{Token: "ghp_x", WebhookSecret: "s", Addr: "127.0.0.1:0"})
+
+	asserts.NoError(t, err, "new GitHub bot")
+	asserts.NotNil(t, Client(bot), "client for a GitHub bot")
+}
+
+func TestAddr(t *testing.T) {
+	bot, err := New(Config{Token: "ghp_x", WebhookSecret: "s", Addr: "127.0.0.1:0"})
+
+	asserts.NoError(t, err, "new GitHub bot")
+	asserts.Equal(t, Addr(bot), "", "Addr is empty before Connect")
+}
+
 func TestRawEvent(t *testing.T) {
 	want := &Message{}
 	got, ok := RawEvent(&botbooter.Message{Raw: want})

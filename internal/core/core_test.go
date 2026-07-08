@@ -236,6 +236,17 @@ func TestBot_GetAttachments_UnknownBotType(t *testing.T) {
 	asserts.Equal(t, len(attachments), 0, "Attachments should be empty for unknown bot type")
 }
 
+// teardown's adapter-nil branch is defensive (Connect never installs a
+// connection without an adapter), so exercise it directly.
+func TestConnection_TeardownNilAdapter(t *testing.T) {
+	_, cancel := context.WithCancel(context.Background())
+	c := &connection{cancel: cancel, runDone: make(chan struct{})}
+
+	err := c.teardown(true)
+
+	asserts.ErrorIs(t, err, ErrUnknownBotType, "teardown with no adapter")
+}
+
 // stubAdapter is a minimal core.Adapter used to exercise AdapterAs.
 type stubAdapter struct{ name string }
 

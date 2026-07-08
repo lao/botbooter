@@ -220,6 +220,41 @@ func connectedAdapter(t *testing.T, deps core.AdapterDeps) (*adapter, *httptest.
 	return a, srv, cancel
 }
 
+// GitHub webhooks are always POST; anything else is rejected before the
+// signature check ever runs.
+func TestConnect_NonPostMethodRejected(t *testing.T) {
+	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
+		Dispatch:   func(context.Context, *core.Message) {},
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	})
+	defer srv.Close()
+	defer cancel()
+	defer func() { _ = a.Disconnect() }()
+
+	a.mu.Lock()
+	addr := a.boundAddr
+	a.mu.Unlock()
+	resp, err := http.Get("http://" + addr + "/webhook")
+	asserts.NoError(t, err, "GET webhook")
+	_ = resp.Body.Close()
+	asserts.Equal(t, resp.StatusCode, http.StatusMethodNotAllowed, "non-POST is 405")
+}
+
+func TestConnect_ListenError(t *testing.T) {
+	// Occupy a port so Connect's Listen fails.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	asserts.NoError(t, err, "occupy port")
+	defer func() { _ = ln.Close() }()
+
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	a.cfg.Addr = ln.Addr().String()
+
+	err = a.Connect(context.Background(), core.AdapterDeps{})
+	asserts.Error(t, err, "Connect must fail when the address is taken")
+}
+
 func TestConnect_ResolvesSelfAndBinds(t *testing.T) {
 	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
 		Dispatch:   func(context.Context, *core.Message) {},

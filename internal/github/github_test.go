@@ -94,8 +94,29 @@ func TestNew_BotType(t *testing.T) {
 	asserts.Equal(t, bot.BotType, core.GitHubBotType, "bot type should be GitHub")
 }
 
+func TestNew_InvalidConfig(t *testing.T) {
+	_, err := New(Config{})
+
+	asserts.ErrorIs(t, err, ErrMissingConfig, "New surfaces newAdapter's error")
+}
+
 func TestAddr_NotConnected(t *testing.T) {
 	bot, err := New(patConfig())
 	asserts.NoError(t, err, "new GitHub bot")
 	asserts.Equal(t, Addr(bot), "", "Addr is empty before Connect")
+}
+
+func TestAddr_NotGitHubBot(t *testing.T) {
+	asserts.Equal(t, Addr(core.New(core.CLIBotType, nil)), "", "Addr on a non-GitHub bot")
+}
+
+func TestClient_GitHubBot(t *testing.T) {
+	bot, err := New(patConfig())
+
+	asserts.NoError(t, err, "new GitHub bot")
+	asserts.NotNil(t, Client(bot), "client for a GitHub bot")
+}
+
+func TestClient_NotGitHubBot(t *testing.T) {
+	asserts.True(t, Client(core.New(core.CLIBotType, nil)) == nil, "no client for a non-GitHub bot")
 }
