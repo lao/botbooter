@@ -56,6 +56,46 @@ func TestSend(t *testing.T) {
 	})
 }
 
+// capturingRoundTripper records the last request body so a test can assert the
+// reply reference discordgo posted.
+type capturingRoundTripper struct {
+	body string
+}
+
+func (c *capturingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		c.body = string(b)
+	}
+	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+}
+
+func TestSendThreaded(t *testing.T) {
+	t.Run("ReferencesMessageID", func(t *testing.T) {
+		a := newTestAdapter(t)
+		cap := &capturingRoundTripper{}
+		a.session.Client = &http.Client{Transport: cap}
+
+		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "C1", ID: "M9"}, "hi")
+
+		asserts.NoError(t, err, "SendThreaded")
+		asserts.True(t, strings.Contains(cap.body, `"message_reference"`), "reply carries a message_reference")
+		asserts.True(t, strings.Contains(cap.body, `"message_id":"M9"`), "reference points at the message ID")
+	})
+
+	t.Run("EmptyIDFallsBackToPlainSend", func(t *testing.T) {
+		a := newTestAdapter(t)
+		cap := &capturingRoundTripper{}
+		a.session.Client = &http.Client{Transport: cap}
+
+		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "C1"}, "hi")
+
+		asserts.NoError(t, err, "SendThreaded with empty ID")
+		asserts.True(t, !strings.Contains(cap.body, "message_reference"), "no reference when there is no message ID")
+	})
+}
+
 func TestAttachments(t *testing.T) {
 	a := newTestAdapter(t)
 

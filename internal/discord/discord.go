@@ -111,6 +111,18 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	return err
 }
 
+// SendThreaded posts text as an inline reply referencing m. With no message id
+// to reference it degrades to a plain channel send, since an empty
+// MessageReference is an invalid Discord API request.
+func (a *adapter) SendThreaded(ctx context.Context, m *core.Message, text string) error {
+	if m.ID == "" {
+		return a.Send(ctx, m.ChannelID, text)
+	}
+	ref := &discordgo.MessageReference{MessageID: m.ID, ChannelID: m.ChannelID}
+	_, err := a.session.ChannelMessageSendReply(m.ChannelID, text, ref, discordgo.WithContext(ctx))
+	return err
+}
+
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	mc, ok := RawEvent(m)
 	if !ok {
