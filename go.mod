@@ -2,6 +2,10 @@ module github.com/lao/botbooter
 
 go 1.25.0
 
+// Pinned to the latest 1.25 patch release so CI (setup-go reads this file) and
+// govulncheck run against a stdlib with all published fixes applied.
+toolchain go1.25.11
+
 require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/bwmarrin/discordgo v0.27.1
