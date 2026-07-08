@@ -13,10 +13,12 @@ import (
 // ErrBadChannelID is returned by Send when channelID is not "owner/repo#number".
 var ErrBadChannelID = errors.New(`github: channel ID must be "owner/repo#number"`)
 
-// parseChannelID splits "owner/repo#number" on the last '#'. The number must be
-// a positive integer and both owner and repo must be non-empty.
+// parseChannelID splits "owner/repo#number" on the first '#' — owners and
+// repos cannot contain '#', so a second one is malformed and fails the number
+// parse rather than being silently absorbed into repo. The number must be a
+// positive integer and both owner and repo must be non-empty.
 func parseChannelID(channelID string) (owner, repo string, number int, err error) {
-	hash := strings.LastIndex(channelID, "#")
+	hash := strings.Index(channelID, "#")
 	if hash < 0 {
 		return "", "", 0, fmt.Errorf("%w: %q", ErrBadChannelID, channelID)
 	}
