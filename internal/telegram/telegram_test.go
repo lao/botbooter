@@ -498,6 +498,37 @@ func TestSend(t *testing.T) {
 	asserts.Equal(t, gotText, "hi there", "text forwarded to the API")
 }
 
+func TestSendThreaded(t *testing.T) {
+	// The Bot API encodes reply_parameters as a JSON form field.
+	t.Run("RepliesToMessageID", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseMultipartForm(1 << 20)
+			gotReply = r.FormValue("reply_parameters")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":555,"type":"private"}}}`))
+		})
+
+		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "555", ID: "42"}, "hi")
+
+		asserts.NoError(t, err, "SendThreaded")
+		asserts.True(t, strings.Contains(gotReply, `"message_id":42`), "reply_parameters carries the message id")
+	})
+
+	t.Run("NonNumericIDFallsBackToPlainSend", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseMultipartForm(1 << 20)
+			gotReply = r.FormValue("reply_parameters")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":555,"type":"private"}}}`))
+		})
+
+		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "555", ID: "not-a-number"}, "hi")
+
+		asserts.NoError(t, err, "SendThreaded with non-numeric ID")
+		asserts.Equal(t, gotReply, "", "no reply_parameters when the message id is non-numeric")
+	})
+}
+
 func TestSend_SurfacesError(t *testing.T) {
 	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`))

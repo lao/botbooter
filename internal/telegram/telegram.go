@@ -97,6 +97,20 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	return err
 }
 
+// SendThreaded replies to m via reply_to_message_id. It anchors on m.ID (the
+// received message) by design, NOT m.ReplyToID — anchoring the immediate message
+// is the intended reply-quote semantics; do not "fix" this to chase the chain
+// root. A non-numeric m.ID (never expected from Telegram) falls back to a plain
+// send.
+func (a *adapter) SendThreaded(ctx context.Context, m *core.Message, text string) error {
+	params := &bot.SendMessageParams{ChatID: chatID(m.ChannelID), Text: text}
+	if id, err := strconv.Atoi(m.ID); err == nil {
+		params.ReplyParameters = &models.ReplyParameters{MessageID: id}
+	}
+	_, err := a.currentClient().SendMessage(ctx, params)
+	return err
+}
+
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	u, ok := RawUpdate(m)
 	if !ok {
