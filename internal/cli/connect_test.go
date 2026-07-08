@@ -80,7 +80,7 @@ func TestSend_WritesLine(t *testing.T) {
 	var buf bytes.Buffer
 	a := newAdapter(nil, &buf)
 
-	asserts.NoError(t, a.Send(context.Background(), "", "hi"), "send")
+	asserts.NoError(t, a.Send(context.Background(), "", "hi", core.SendOptions{}), "send")
 	asserts.Equal(t, buf.String(), "hi\n", "written line")
 }
 
@@ -93,7 +93,7 @@ func (errWriter) Write([]byte) (int, error) { return 0, errFailedWrite }
 func TestSend_WriterError(t *testing.T) {
 	a := newAdapter(nil, errWriter{})
 
-	err := a.Send(context.Background(), "", "hi")
+	err := a.Send(context.Background(), "", "hi", core.SendOptions{})
 	asserts.ErrorIs(t, err, errFailedWrite, "send surfaces writer error")
 }
 

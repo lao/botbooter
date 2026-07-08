@@ -238,17 +238,17 @@ func TestBot_GetAttachments_UnknownBotType(t *testing.T) {
 // stubAdapter is a minimal core.Adapter used to exercise AdapterAs.
 type stubAdapter struct{ name string }
 
-func (s *stubAdapter) Connect(context.Context, AdapterDeps) error { return nil }
-func (s *stubAdapter) Disconnect() error                          { return nil }
-func (s *stubAdapter) Send(context.Context, string, string) error { return nil }
-func (s *stubAdapter) Attachments(*Message) ([]Attachment, error) { return nil, nil }
+func (s *stubAdapter) Connect(context.Context, AdapterDeps) error              { return nil }
+func (s *stubAdapter) Disconnect() error                                       { return nil }
+func (s *stubAdapter) Send(context.Context, string, string, SendOptions) error { return nil }
+func (s *stubAdapter) Attachments(*Message) ([]Attachment, error)              { return nil, nil }
 
 type adapterMismatch struct{}
 
-func (a *adapterMismatch) Connect(context.Context, AdapterDeps) error { return nil }
-func (a *adapterMismatch) Disconnect() error                          { return nil }
-func (a *adapterMismatch) Send(context.Context, string, string) error { return nil }
-func (a *adapterMismatch) Attachments(*Message) ([]Attachment, error) { return nil, nil }
+func (a *adapterMismatch) Connect(context.Context, AdapterDeps) error              { return nil }
+func (a *adapterMismatch) Disconnect() error                                       { return nil }
+func (a *adapterMismatch) Send(context.Context, string, string, SendOptions) error { return nil }
+func (a *adapterMismatch) Attachments(*Message) ([]Attachment, error)              { return nil, nil }
 
 func TestAdapterAs(t *testing.T) {
 	stub := &stubAdapter{name: "x"}
@@ -278,57 +278,62 @@ func (r *resolverStub) ResolveAttachmentURL(ctx context.Context, _ Attachment) (
 	return r.url, r.err
 }
 
-// threadedStub is a stubAdapter that also implements ThreadedSender, recording
-// the message and text handed to SendThreaded and whether the plain Send path
-// ran instead.
-type threadedStub struct {
+// recordingStub is a stubAdapter that records what its Send received, so a test
+// can assert the resolved SendOptions the Bot forwarded to the adapter.
+type recordingStub struct {
 	stubAdapter
-	err        error
-	threadedM  *Message
-	threadedTx string
-	sent       []string
+	gotChannel string
+	gotText    string
+	gotOpts    SendOptions
+	calls      int
 }
 
-func (t *threadedStub) SendThreaded(_ context.Context, m *Message, text string) error {
-	t.threadedM = m
-	t.threadedTx = text
-	return t.err
-}
-
-func (t *threadedStub) Send(_ context.Context, _, text string) error {
-	t.sent = append(t.sent, text)
+func (r *recordingStub) Send(_ context.Context, channelID, text string, opts SendOptions) error {
+	r.gotChannel = channelID
+	r.gotText = text
+	r.gotOpts = opts
+	r.calls++
 	return nil
 }
 
-func TestBot_Reply_RoutesToThreadedSender(t *testing.T) {
-	stub := &threadedStub{}
-	bot := New(SlackBotType, stub)
+func TestResolveSendOptions_PrecedenceAndNilSkip(t *testing.T) {
+	m := &Message{ID: "1.0", ReplyToID: "0.9"}
 
-	m := &Message{ChannelID: "C1", ID: "1.0", ReplyToID: "0.9"}
-	asserts.NoError(t, bot.Reply(context.Background(), m, "hi"), "Reply routes to SendThreaded")
-	asserts.Equal(t, stub.threadedM, m, "SendThreaded received the message")
-	asserts.Equal(t, stub.threadedTx, "hi", "SendThreaded received the text")
-	asserts.Equal(t, len(stub.sent), 0, "plain Send must not run for a threaded reply")
+	// WithThreadID wins over InReplyTo; a nil option is skipped without panicking.
+	got := resolveSendOptions(InReplyTo(m), nil, WithThreadID("RAW"))
+	asserts.Equal(t, got.ThreadID, "RAW", "explicit ThreadID wins over the derived anchor")
+	asserts.Equal(t, got.ReplyTo, m, "ReplyTo is still carried alongside ThreadID")
+
+	// Order-independent: last write wins per field, and no options is the zero value.
+	asserts.Equal(t, resolveSendOptions().ThreadID, "", "no options yields the zero SendOptions")
+	asserts.True(t, resolveSendOptions(nil).ReplyTo == nil, "a lone nil option is a no-op")
 }
 
-func TestBot_Reply_FallsBackWhenNotThreadedSender(t *testing.T) {
-	fake := &fakeAdapter{}
-	bot := New(SlackBotType, fake)
-
+func TestBot_SendMessageContext_ForwardsResolvedOptions(t *testing.T) {
+	stub := &recordingStub{}
+	bot := New(SlackBotType, stub)
 	m := &Message{ChannelID: "C1", ID: "1.0", ReplyToID: "0.9"}
-	asserts.NoError(t, bot.Reply(context.Background(), m, "hi"), "Reply falls back to Send")
-	asserts.Equal(t, len(fake.sent), 1, "plain Send ran")
-	asserts.Equal(t, fake.sent[0], "hi", "Send received the text")
+
+	asserts.NoError(t, bot.SendMessageContext(context.Background(), "C1", "hi", InReplyTo(m)),
+		"SendMessageContext with an option")
+	asserts.Equal(t, stub.gotOpts.ReplyTo, m, "adapter received the ReplyTo anchor")
+	asserts.Equal(t, stub.gotText, "hi", "adapter received the text")
+
+	// No options → zero SendOptions reaches the adapter (plain send).
+	stub.gotOpts = SendOptions{ReplyTo: m}
+	asserts.NoError(t, bot.SendMessageContext(context.Background(), "C1", "plain"), "plain send")
+	asserts.True(t, stub.gotOpts.ReplyTo == nil, "a plain send forwards the zero SendOptions")
 }
 
-func TestBot_Reply_FallsBackWhenNoAnchor(t *testing.T) {
-	stub := &threadedStub{}
+func TestBot_Reply_ForwardsInReplyTo(t *testing.T) {
+	stub := &recordingStub{}
 	bot := New(SlackBotType, stub)
+	m := &Message{ChannelID: "C1", ID: "1.0", ReplyToID: "0.9"}
 
-	m := &Message{ChannelID: "C1"} // no ReplyToID, no ID
-	asserts.NoError(t, bot.Reply(context.Background(), m, "hi"), "Reply with no anchor")
-	asserts.True(t, stub.threadedM == nil, "SendThreaded must not run without an anchor")
-	asserts.Equal(t, len(stub.sent), 1, "plain Send ran for an anchorless message")
+	asserts.NoError(t, bot.Reply(context.Background(), m, "hi"), "Reply")
+	asserts.Equal(t, stub.gotChannel, "C1", "Reply sends to the message's channel")
+	asserts.Equal(t, stub.gotOpts.ReplyTo, m, "Reply forwards InReplyTo(m)")
+	asserts.Equal(t, stub.calls, 1, "Reply sends exactly once")
 }
 
 func TestBot_Reply_NilAdapter(t *testing.T) {
@@ -339,7 +344,7 @@ func TestBot_Reply_NilAdapter(t *testing.T) {
 }
 
 func TestBot_Reply_NilMessage(t *testing.T) {
-	bot := New(SlackBotType, &threadedStub{})
+	bot := New(SlackBotType, &recordingStub{})
 
 	err := bot.Reply(context.Background(), nil, "hi")
 	asserts.ErrorIs(t, err, ErrUnknownBotType, "Reply with a nil message must not panic")

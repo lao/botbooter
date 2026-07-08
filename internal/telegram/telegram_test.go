@@ -20,11 +20,6 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
-// The adapter must satisfy the optional ThreadedSender so (*core.Bot).Reply
-// routes to SendThreaded rather than the plain-Send fallback (guards the
-// pointer-receiver method-set trap).
-var _ core.ThreadedSender = (*adapter)(nil)
-
 func captureDeps(got **core.Message) core.AdapterDeps {
 	return core.AdapterDeps{
 		Dispatch: func(_ context.Context, m *core.Message) { *got = m },
@@ -496,41 +491,61 @@ func TestSend(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":555,"type":"private"}}}`))
 	})
 
-	err := a.Send(context.Background(), "555", "hi there")
+	err := a.Send(context.Background(), "555", "hi there", core.SendOptions{})
 
 	asserts.NoError(t, err, "Send should succeed against a 200 OK API reply")
 	asserts.Equal(t, gotChatID, "555", "numeric channel id sent as chat_id")
 	asserts.Equal(t, gotText, "hi there", "text forwarded to the API")
 }
 
-func TestSendThreaded(t *testing.T) {
+func TestSend_Threading(t *testing.T) {
 	// The Bot API encodes reply_parameters as a JSON form field.
-	t.Run("RepliesToMessageID", func(t *testing.T) {
-		var gotReply string
-		a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+	replyCapture := func(got *string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) {
 			_ = r.ParseMultipartForm(1 << 20)
-			gotReply = r.FormValue("reply_parameters")
+			*got = r.FormValue("reply_parameters")
 			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":555,"type":"private"}}}`))
-		})
+		}
+	}
 
-		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "555", ID: "42"}, "hi")
+	t.Run("InReplyToRepliesToMessageID", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, replyCapture(&gotReply))
 
-		asserts.NoError(t, err, "SendThreaded")
+		err := a.Send(context.Background(), "555", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "555", ID: "42"}})
+
+		asserts.NoError(t, err, "Send")
 		asserts.True(t, strings.Contains(gotReply, `"message_id":42`), "reply_parameters carries the message id")
 	})
 
-	t.Run("NonNumericIDFallsBackToPlainSend", func(t *testing.T) {
+	t.Run("WithThreadIDRepliesToRawID", func(t *testing.T) {
 		var gotReply string
-		a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
-			_ = r.ParseMultipartForm(1 << 20)
-			gotReply = r.FormValue("reply_parameters")
-			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":555,"type":"private"}}}`))
-		})
+		a := newStubAdapter(t, 0, replyCapture(&gotReply))
 
-		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "555", ID: "not-a-number"}, "hi")
+		err := a.Send(context.Background(), "555", "hi", core.SendOptions{ThreadID: "42"})
 
-		asserts.NoError(t, err, "SendThreaded with non-numeric ID")
-		asserts.Equal(t, gotReply, "", "no reply_parameters when the message id is non-numeric")
+		asserts.NoError(t, err, "Send")
+		asserts.True(t, strings.Contains(gotReply, `"message_id":42`), "reply_parameters carries the raw ThreadID")
+	})
+
+	t.Run("NonNumericReplyToDegradesToPlainSend", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, replyCapture(&gotReply))
+
+		err := a.Send(context.Background(), "555", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "555", ID: "not-a-number"}})
+
+		asserts.NoError(t, err, "a non-numeric derived id degrades to a plain send")
+		asserts.Equal(t, gotReply, "", "no reply_parameters when the derived id is non-numeric")
+	})
+
+	t.Run("NonNumericWithThreadIDErrors", func(t *testing.T) {
+		a := newStubAdapter(t, 0, replyCapture(new(string)))
+
+		err := a.Send(context.Background(), "555", "hi", core.SendOptions{ThreadID: "not-a-number"})
+
+		asserts.Error(t, err, "an explicit non-numeric ThreadID must fail loudly, not drop silently")
 	})
 }
 
@@ -539,7 +554,7 @@ func TestSend_SurfacesError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`))
 	})
 
-	err := a.Send(context.Background(), "555", "hi")
+	err := a.Send(context.Background(), "555", "hi", core.SendOptions{})
 
 	asserts.ErrorIs(t, err, bot.ErrorForbidden, "Send should surface the Telegram Forbidden error")
 }

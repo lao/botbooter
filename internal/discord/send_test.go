@@ -30,25 +30,20 @@ func (rt stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}, nil
 }
 
-// The adapter must satisfy the optional ThreadedSender so (*core.Bot).Reply
-// routes to SendThreaded rather than the plain-Send fallback (guards the
-// pointer-receiver method-set trap).
-var _ core.ThreadedSender = (*adapter)(nil)
-
 // nonDiscordAdapter is a minimal core.Adapter that is not discord's *adapter.
 type nonDiscordAdapter struct{}
 
-func (nonDiscordAdapter) Connect(context.Context, core.AdapterDeps) error      { return nil }
-func (nonDiscordAdapter) Disconnect() error                                    { return nil }
-func (nonDiscordAdapter) Send(context.Context, string, string) error           { return nil }
-func (nonDiscordAdapter) Attachments(*core.Message) ([]core.Attachment, error) { return nil, nil }
+func (nonDiscordAdapter) Connect(context.Context, core.AdapterDeps) error              { return nil }
+func (nonDiscordAdapter) Disconnect() error                                            { return nil }
+func (nonDiscordAdapter) Send(context.Context, string, string, core.SendOptions) error { return nil }
+func (nonDiscordAdapter) Attachments(*core.Message) ([]core.Attachment, error)         { return nil, nil }
 
 func TestSend(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		a := newTestAdapter(t)
 		a.session.Client = &http.Client{Transport: stubRoundTripper{status: 200, body: "{}"}}
 
-		asserts.NoError(t, a.Send(context.Background(), "C1", "hi"), "Send should succeed on 200")
+		asserts.NoError(t, a.Send(context.Background(), "C1", "hi", core.SendOptions{}), "Send should succeed on 200")
 	})
 
 	t.Run("Error", func(t *testing.T) {
@@ -57,7 +52,7 @@ func TestSend(t *testing.T) {
 			Transport: stubRoundTripper{status: 401, body: `{"code":0,"message":"401: Unauthorized"}`},
 		}
 
-		asserts.Error(t, a.Send(context.Background(), "C1", "hi"), "Send should fail on 401")
+		asserts.Error(t, a.Send(context.Background(), "C1", "hi", core.SendOptions{}), "Send should fail on 401")
 	})
 }
 
@@ -76,28 +71,40 @@ func (c *capturingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 }
 
-func TestSendThreaded(t *testing.T) {
-	t.Run("ReferencesMessageID", func(t *testing.T) {
+func TestSend_Threading(t *testing.T) {
+	t.Run("InReplyToReferencesMessageID", func(t *testing.T) {
 		a := newTestAdapter(t)
 		rt := &capturingRoundTripper{}
 		a.session.Client = &http.Client{Transport: rt}
 
-		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "C1", ID: "M9"}, "hi")
+		err := a.Send(context.Background(), "C1", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "C1", ID: "M9"}})
 
-		asserts.NoError(t, err, "SendThreaded")
+		asserts.NoError(t, err, "Send")
 		asserts.True(t, strings.Contains(rt.body, `"message_reference"`), "reply carries a message_reference")
 		asserts.True(t, strings.Contains(rt.body, `"message_id":"M9"`), "reference points at the message ID")
 	})
 
-	t.Run("EmptyIDFallsBackToPlainSend", func(t *testing.T) {
+	t.Run("WithThreadIDReferencesRawID", func(t *testing.T) {
 		a := newTestAdapter(t)
 		rt := &capturingRoundTripper{}
 		a.session.Client = &http.Client{Transport: rt}
 
-		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "C1"}, "hi")
+		err := a.Send(context.Background(), "C1", "hi", core.SendOptions{ThreadID: "RAW7"})
 
-		asserts.NoError(t, err, "SendThreaded with empty ID")
-		asserts.True(t, !strings.Contains(rt.body, "message_reference"), "no reference when there is no message ID")
+		asserts.NoError(t, err, "Send")
+		asserts.True(t, strings.Contains(rt.body, `"message_id":"RAW7"`), "reference points at the raw ThreadID")
+	})
+
+	t.Run("NoAnchorSendsPlain", func(t *testing.T) {
+		a := newTestAdapter(t)
+		rt := &capturingRoundTripper{}
+		a.session.Client = &http.Client{Transport: rt}
+
+		err := a.Send(context.Background(), "C1", "hi", core.SendOptions{})
+
+		asserts.NoError(t, err, "Send with no anchor")
+		asserts.True(t, !strings.Contains(rt.body, "message_reference"), "no reference when there is no anchor")
 	})
 }
 
