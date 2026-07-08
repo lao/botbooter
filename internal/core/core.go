@@ -159,20 +159,23 @@ type connection struct {
 // adapter's Disconnect only when disconnectAdapter is true; a superseded
 // connection passes false so it can never disconnect the shared adapter a newer
 // connection now owns.
+//
+// The adapter call sits OUTSIDE the once: c.cancel wakes adapter ctx-watchers
+// whose deps.Disconnect arrives as a superseded (false) teardown, and if that
+// consumed the once first it would swallow the true caller's adapter
+// Disconnect entirely. Exactly-once is guaranteed instead by the callers:
+// Disconnect and disconnectConn both uninstall b.conn under b.mu, so at most
+// one caller per connection ever passes true.
 func (c *connection) teardown(disconnectAdapter bool) error {
 	c.cancel()
-	var err error
-	c.once.Do(func() {
-		close(c.runDone)
-		if disconnectAdapter {
-			if c.adapter == nil {
-				err = ErrUnknownBotType
-				return
-			}
-			err = c.adapter.Disconnect()
-		}
-	})
-	return err
+	c.once.Do(func() { close(c.runDone) })
+	if !disconnectAdapter {
+		return nil
+	}
+	if c.adapter == nil {
+		return ErrUnknownBotType
+	}
+	return c.adapter.Disconnect()
 }
 
 // New creates a Bot of the given type backed by adapter.

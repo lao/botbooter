@@ -114,6 +114,22 @@ func TestLifecycle_StaleWatcherDoesNotCancelSuccessor(t *testing.T) {
 	asserts.Equal(t, a.disconnectCount(), 2, "adapter Disconnect called once per real connection")
 }
 
+// A superseded (disconnectAdapter=false) teardown that wins the race must not
+// swallow the true caller's adapter Disconnect. This is the deterministic form
+// of the flake where Bot.Disconnect's cancel woke a ctx-watcher whose
+// deps.Disconnect consumed the sync.Once before the true teardown ran, leaving
+// the adapter connected forever.
+func TestConnection_SupersededTeardownDoesNotSwallowAdapterDisconnect(t *testing.T) {
+	a := &watcherAdapter{}
+	_, cancel := context.WithCancel(context.Background())
+	c := &connection{cancel: cancel, done: make(chan error, 1), runDone: make(chan struct{}), adapter: a}
+
+	asserts.NoError(t, c.teardown(false), "superseded teardown first")
+	asserts.NoError(t, c.teardown(true), "true teardown second")
+
+	asserts.Equal(t, a.disconnectCount(), 1, "adapter disconnected exactly once despite losing the once race")
+}
+
 // blockingAdapter blocks inside Connect until released, modeling an adapter
 // whose Connect performs a slow (network) dial — e.g. discordgo's Session.Open.
 type blockingAdapter struct {
