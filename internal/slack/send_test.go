@@ -71,10 +71,11 @@ func (c *capturingRoundTripper) RoundTrip(req *http.Request) (*http.Response, er
 	}, nil
 }
 
-// TestSendThreaded_PassesThreadTS verifies the reply carries thread_ts, anchored
-// on ReplyToID when set and on the message ID otherwise.
+// TestSendThreaded_PassesThreadTS verifies a threaded message replies inside its
+// thread (thread_ts = ReplyToID), while a top-level message replies in the
+// channel with no thread_ts.
 func TestSendThreaded_PassesThreadTS(t *testing.T) {
-	t.Run("AnchorsOnReplyToID", func(t *testing.T) {
+	t.Run("ThreadedMessageRepliesInThread", func(t *testing.T) {
 		cap := &capturingRoundTripper{}
 		client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(&http.Client{Transport: cap}))
 		a := &adapter{client: client}
@@ -87,7 +88,7 @@ func TestSendThreaded_PassesThreadTS(t *testing.T) {
 		asserts.Equal(t, cap.form.Get("channel"), "C1", "channel")
 	})
 
-	t.Run("AnchorsOnIDWhenNoReplyToID", func(t *testing.T) {
+	t.Run("TopLevelMessageRepliesInChannel", func(t *testing.T) {
 		cap := &capturingRoundTripper{}
 		client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(&http.Client{Transport: cap}))
 		a := &adapter{client: client}
@@ -96,6 +97,6 @@ func TestSendThreaded_PassesThreadTS(t *testing.T) {
 			&core.Message{ChannelID: "C1", ID: "200.2"}, "hi")
 
 		asserts.NoError(t, err, "SendThreaded")
-		asserts.Equal(t, cap.form.Get("thread_ts"), "200.2", "thread_ts should fall back to the message ID")
+		asserts.Equal(t, cap.form.Get("thread_ts"), "", "a top-level message must not start a thread")
 	})
 }

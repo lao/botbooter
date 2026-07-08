@@ -173,17 +173,17 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	return err
 }
 
-// SendThreaded posts text into m's thread. The thread root is m.ReplyToID (the
-// inbound ThreadTimeStamp) when set, else m.ID (m is itself the root). Passing
-// thread_ts is what keeps the reply inside the thread rather than the channel.
+// SendThreaded replies inside m's thread when m is already threaded
+// (thread_ts = m.ReplyToID, the inbound ThreadTimeStamp). A top-level channel
+// message has no ReplyToID and gets a plain top-level reply — m.ID is not used
+// as a thread_ts, since that would start a new sub-thread hanging off it.
 func (a *adapter) SendThreaded(ctx context.Context, m *core.Message, text string) error {
-	threadTS := m.ReplyToID
-	if threadTS == "" {
-		threadTS = m.ID
+	if m.ReplyToID == "" {
+		return a.Send(ctx, m.ChannelID, text)
 	}
 	_, _, err := a.client.PostMessageContext(ctx, m.ChannelID,
 		slackapi.MsgOptionText(text, false),
-		slackapi.MsgOptionTS(threadTS))
+		slackapi.MsgOptionTS(m.ReplyToID))
 	return err
 }
 

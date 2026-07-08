@@ -366,7 +366,8 @@ func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) er
 // Send. It returns ErrUnknownBotType if the Bot has no adapter or m is nil.
 //
 // The thread anchor is platform-specific — each adapter's SendThreaded owns it:
-//   - Slack: thread_ts = m.ReplyToID (the thread root) when set, else m.ID.
+//   - Slack: replies inside m's thread (thread_ts = m.ReplyToID) when m is
+//     threaded; a top-level channel message gets a plain top-level reply.
 //   - Discord: an inline reply referencing m.ID.
 //   - Telegram: reply_to_message_id = m.ID (the received message).
 //   - WhatsApp: context.message_id = m.ID (a quoted reply).
