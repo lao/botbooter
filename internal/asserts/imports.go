@@ -27,9 +27,9 @@ func CheckBannedImports(t TestingT, dir string, banned []string, label string) {
 			continue
 		}
 		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ImportsOnly)
-		NoError(t, err, "parse "+label+" file "+name)
+		NoError(t, err, "parse "+label+"/"+name)
 		if err != nil {
-			return
+			return // a parse error aborts the scan, matching the prior ParseDir behavior
 		}
 		checked++
 		for _, imp := range file.Imports {
