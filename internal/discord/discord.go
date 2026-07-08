@@ -112,6 +112,11 @@ func (a *adapter) Disconnect() error {
 // since an empty MessageReference is an invalid Discord API request. The
 // reference is built against channelID, so an anchor only works when sending to
 // the message's own channel.
+//
+// Discord defaults message references to fail_if_not_exists=true and discordgo
+// v0.27.1's MessageReference exposes no field to override it, so replying to a
+// since-deleted message fails the whole send rather than degrading to a plain
+// message. Lifting that needs a discordgo bump.
 func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
 	refID := opts.ThreadID
 	if refID == "" && opts.ReplyTo != nil {
