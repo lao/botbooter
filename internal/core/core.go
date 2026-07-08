@@ -118,6 +118,15 @@ type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
 }
 
+// ThreadedSender is an optional capability an Adapter may implement to post a
+// reply into the thread or reply-chain of an inbound message. Adapters that do
+// not implement it fall back to a plain channel Send in [Bot.Reply]. The reply
+// anchor is platform-specific, so SendThreaded receives the whole Message and
+// each adapter derives its own anchor from it.
+type ThreadedSender interface {
+	SendThreaded(ctx context.Context, m *Message, text string) error
+}
+
 // AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
 type AdapterDeps struct {
 	Dispatch   func(ctx context.Context, m *Message)
@@ -349,6 +358,27 @@ func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) er
 		return ErrUnknownBotType
 	}
 	return b.adapter.Send(ctx, channelID, text)
+}
+
+// Reply posts text into the thread or reply-chain of the inbound message m. When
+// the adapter implements [ThreadedSender] and m carries an anchor (ReplyToID or
+// ID), the threaded path is used; otherwise it falls back to a plain channel
+// Send. It returns ErrUnknownBotType if the Bot has no adapter or m is nil.
+//
+// The thread anchor is platform-specific — each adapter's SendThreaded owns it:
+//   - Slack: thread_ts = m.ReplyToID (the thread root) when set, else m.ID.
+//   - Discord: an inline reply referencing m.ID.
+//   - Telegram: reply_to_message_id = m.ID (the received message).
+//   - WhatsApp: context.message_id = m.ID (a quoted reply).
+//   - Teams, CLI: no ThreadedSender, so Reply is a plain channel Send.
+func (b *Bot) Reply(ctx context.Context, m *Message, text string) error {
+	if b.adapter == nil || m == nil {
+		return ErrUnknownBotType
+	}
+	if ts, ok := b.adapter.(ThreadedSender); ok && (m.ReplyToID != "" || m.ID != "") {
+		return ts.SendThreaded(ctx, m, text)
+	}
+	return b.adapter.Send(ctx, m.ChannelID, text)
 }
 
 // GetAttachments returns the platform-agnostic attachments of message.

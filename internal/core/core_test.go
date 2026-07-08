@@ -278,6 +278,73 @@ func (r *resolverStub) ResolveAttachmentURL(ctx context.Context, _ Attachment) (
 	return r.url, r.err
 }
 
+// threadedStub is a stubAdapter that also implements ThreadedSender, recording
+// the message and text handed to SendThreaded and whether the plain Send path
+// ran instead.
+type threadedStub struct {
+	stubAdapter
+	err        error
+	threadedM  *Message
+	threadedTx string
+	sent       []string
+}
+
+func (t *threadedStub) SendThreaded(_ context.Context, m *Message, text string) error {
+	t.threadedM = m
+	t.threadedTx = text
+	return t.err
+}
+
+func (t *threadedStub) Send(_ context.Context, _, text string) error {
+	t.sent = append(t.sent, text)
+	return nil
+}
+
+func TestBot_Reply_RoutesToThreadedSender(t *testing.T) {
+	stub := &threadedStub{}
+	bot := New(SlackBotType, stub)
+
+	m := &Message{ChannelID: "C1", ID: "1.0", ReplyToID: "0.9"}
+	asserts.NoError(t, bot.Reply(context.Background(), m, "hi"), "Reply routes to SendThreaded")
+	asserts.Equal(t, stub.threadedM, m, "SendThreaded received the message")
+	asserts.Equal(t, stub.threadedTx, "hi", "SendThreaded received the text")
+	asserts.Equal(t, len(stub.sent), 0, "plain Send must not run for a threaded reply")
+}
+
+func TestBot_Reply_FallsBackWhenNotThreadedSender(t *testing.T) {
+	fake := &fakeAdapter{}
+	bot := New(SlackBotType, fake)
+
+	m := &Message{ChannelID: "C1", ID: "1.0", ReplyToID: "0.9"}
+	asserts.NoError(t, bot.Reply(context.Background(), m, "hi"), "Reply falls back to Send")
+	asserts.Equal(t, len(fake.sent), 1, "plain Send ran")
+	asserts.Equal(t, fake.sent[0], "hi", "Send received the text")
+}
+
+func TestBot_Reply_FallsBackWhenNoAnchor(t *testing.T) {
+	stub := &threadedStub{}
+	bot := New(SlackBotType, stub)
+
+	m := &Message{ChannelID: "C1"} // no ReplyToID, no ID
+	asserts.NoError(t, bot.Reply(context.Background(), m, "hi"), "Reply with no anchor")
+	asserts.True(t, stub.threadedM == nil, "SendThreaded must not run without an anchor")
+	asserts.Equal(t, len(stub.sent), 1, "plain Send ran for an anchorless message")
+}
+
+func TestBot_Reply_NilAdapter(t *testing.T) {
+	bot := &Bot{BotType: BotType(999)}
+
+	err := bot.Reply(context.Background(), &Message{ID: "1"}, "hi")
+	asserts.ErrorIs(t, err, ErrUnknownBotType, "Reply with no adapter")
+}
+
+func TestBot_Reply_NilMessage(t *testing.T) {
+	bot := New(SlackBotType, &threadedStub{})
+
+	err := bot.Reply(context.Background(), nil, "hi")
+	asserts.ErrorIs(t, err, ErrUnknownBotType, "Reply with a nil message must not panic")
+}
+
 func TestBot_ResolveAttachmentURL_NilAdapter(t *testing.T) {
 	bot := &Bot{BotType: BotType(999)}
 
