@@ -8,9 +8,9 @@
 [![Releases](https://img.shields.io/github/v/release/lao/botbooter.svg?include_prereleases&color=blue)](https://github.com/lao/botbooter/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
-Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, Microsoft Teams, or stdin.
+Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, Microsoft Teams, a GitHub issue or PR comment, or stdin.
 
 > ⚠️ **Not production ready.** botbooter is pre-1.0 and under active development. The
 > public API may change without notice, and it has not been hardened or battle-tested for
@@ -19,7 +19,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (Cloud API webhook), Microsoft Teams (Azure Bot Framework webhook), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (Cloud API webhook), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
@@ -88,6 +88,7 @@ Import `botbooter` for the shared types plus the one `botbooter/<platform>` pack
 | `telegram.New(token string)` | `(*Bot, error)` | Long polling via `getUpdates`; BotFather token. |
 | `whatsapp.New(cfg whatsapp.Config)` | `(*Bot, error)` | Meta Cloud API; runs an inbound webhook HTTP server. |
 | `teams.New(cfg teams.Config)` | `(*Bot, error)` | Azure Bot Framework; runs an inbound webhook HTTP server. |
+| `github.New(cfg github.Config)` | `(*Bot, error)` | Issue/PR comments via `issue_comment` webhook; PAT or GitHub App auth. |
 
 ### Handlers, commands and middleware
 
@@ -126,7 +127,7 @@ for _, a := range attachments {
 }
 ```
 
-`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram).
+`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram). GitHub comments carry markdown rather than an upload channel, so `GetAttachments` returns none there.
 
 A terminal has no real upload channel, so the **CLI adapter treats any local file path in the message as an attachment** — "uploading" means referencing the path. Image files are detected by content sniffing:
 
@@ -161,12 +162,13 @@ if ev, ok := slack.RawEvent(m); ok {
 	_ = ev.ThreadTimeStamp // anything on the raw *slackevents.MessageEvent
 }
 
-// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, whatsapp.RawMessage, teams.RawMessage, cli.RawData.
+// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, whatsapp.RawMessage, teams.RawMessage, github.RawEvent, cli.RawData.
 // Underlying client per platform (WhatsApp and Teams have none — they speak REST over plain HTTP):
 client := slack.Client(bot)        // *slack.Client (nil if not a Slack bot)
 sock := slack.SocketClient(bot)    // *socketmode.Client (nil if not a Slack bot)
 session := discord.Session(bot)    // *discordgo.Session
 tg := telegram.Client(bot)         // *bot.Bot
+gh := github.Client(bot)           // *go-github Client — labels, reactions, checks, anything beyond replies
 ```
 
 ### Lifecycle
@@ -197,6 +199,7 @@ documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 | Telegram | BotFather bot token | [_docs/platforms.md](_docs/platforms.md#telegram) |
 | WhatsApp | Cloud API token + phone-number id + app secret + verify token + bind addr | [_docs/platforms.md](_docs/platforms.md#whatsapp) |
 | Microsoft Teams | Azure Bot app id + password (+ optional tenant id) + bind addr | [_docs/platforms.md](_docs/platforms.md#microsoft-teams) |
+| GitHub | PAT **or** App (id + installation id + private key) + webhook secret + bind addr | [_docs/platforms.md](_docs/platforms.md#github) |
 | CLI | nothing (local stdin/stdout) | [_docs/platforms.md](_docs/platforms.md#cli) |
 
 ## Development
@@ -232,7 +235,7 @@ Alternatives:
 
 ## Roadmap
 
-- [x] Slack, Discord, Telegram, WhatsApp, Microsoft Teams and CLI adapters
+- [x] Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub and CLI adapters
 - [x] Middleware and attachment abstraction
 - [x] Unify attachment URL retrieval for all implementations
 - [ ] WeChat, Mastodon adapters

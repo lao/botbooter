@@ -1,9 +1,9 @@
 # Platform setup
 
 How to provision credentials for each platform botbooter supports. Slack,
-Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
-and Microsoft Teams need cloud credentials plus a public HTTPS webhook; the CLI
-needs nothing.
+Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp,
+Microsoft Teams and GitHub need cloud credentials plus a public HTTPS webhook;
+the CLI needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/_docs/platforms.md), pkg.go.dev renders the README but not this file.
 
@@ -14,6 +14,7 @@ needs nothing.
 - Telegram, [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api)
 - WhatsApp, [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks getting started](https://developers.facebook.com/docs/graph-api/webhooks/getting-started)
 - Microsoft Teams, [Azure Bot resource](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication)
+- GitHub, [Webhooks](https://docs.github.com/webhooks) · [Creating a GitHub App](https://docs.github.com/apps/creating-github-apps) · [Personal access tokens](https://docs.github.com/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 - CLI, [`_examples/v1`](../_examples/v1) and the [README Quickstart](../README.md#quickstart)
 
 ---
@@ -344,6 +345,122 @@ not supported.
   `https://…/api/messages` and reach `Addr` through the proxy.
 
 **Official docs:** [Create a bot for Teams](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/create-a-bot-for-teams) · [Azure Bot quickstart](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework dashboard](https://dev.botframework.com/bots) · [Connector authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication) · [Send & receive messages](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-create-messages) · [ngrok](https://ngrok.com/download)
+
+---
+
+## GitHub
+
+botbooter listens for **`issue_comment` webhook events** — comments on issues
+*and* on pull-request conversations — and replies by creating issue comments
+through the REST API ([go-github](https://github.com/google/go-github)). Like
+WhatsApp and Teams, the adapter runs its own webhook server: it binds a local
+`Addr`, and you put a **TLS-terminating reverse proxy** (or ngrok while
+developing) in front and register the public HTTPS URL as the repository or App
+webhook URL.
+
+Two auth modes, configured through the same `github.Config` — set exactly one:
+
+- **PAT mode** — a [personal access token](https://docs.github.com/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+  (classic or fine-grained) with *Issues: read & write* on the target
+  repositories. The bot comments as the token's user. Quickest to set up; good
+  for personal repos and experiments.
+- **App mode** — a [GitHub App](https://docs.github.com/apps/creating-github-apps)
+  (`AppID` + `InstallationID` + PEM `PrivateKey`). The bot comments as
+  `your-app[bot]`, gets its own identity and rate limits, and is the right
+  choice for orgs. Tokens are minted and refreshed automatically
+  ([ghinstallation](https://github.com/bradleyfalzon/ghinstallation)).
+
+#### Step 1, Create the webhook
+
+On the repository (*Settings → Webhooks → Add webhook*) or on the GitHub App
+(*Permissions & events*):
+
+- **Payload URL**: your public `https://…/webhook` endpoint (from ngrok or your
+  proxy; you can create the webhook after step 3 if you don't have it yet).
+- **Content type**: `application/json`.
+- **Secret**: a random string; the adapter **requires** it and rejects requests
+  whose `X-Hub-Signature-256` HMAC does not match.
+- **Events**: *Issue comments* only (other subscribed events are acked and
+  ignored).
+
+For App mode also grant the **Issues: read & write** permission, install the
+App on the target repositories, and note the **installation id** (visible in
+the installation page URL and in webhook payloads).
+
+#### Step 2, Run the bot
+
+```go
+import "github.com/lao/botbooter/github"
+
+// PAT mode:
+bot, err := github.New(github.Config{
+	Token:         os.Getenv("GITHUB_TOKEN"),          // ghp_… or github_pat_…
+	WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+	Addr:          ":8080",                            // a bare "8080" is accepted
+})
+
+// App mode:
+bot, err := github.New(github.Config{
+	AppID:          appID,                              // int64, from the App settings page
+	InstallationID: installationID,                     // int64, from the installation
+	PrivateKey:     pemBytes,                           // the App's PEM private key
+	WebhookSecret:  os.Getenv("GITHUB_WEBHOOK_SECRET"),
+	Addr:           ":8080",
+})
+```
+
+Optional `github.Config` fields: `Path` (webhook route, default `/webhook`) and
+`HTTPClient` (the outbound API client; defaults to a 30-second timeout).
+
+#### Step 3, Expose the local server
+
+```bash
+ngrok http 8080
+```
+
+Point the webhook's payload URL at `https://…/webhook`, then comment on any
+issue or PR in a watched repository. Comment from a **human** account: the bot
+ignores its own comments and all other bots' (any `Bot`-typed author), so two
+bots can never reply-loop each other.
+
+`Message.ChannelID` is `owner/repo#number`, so replies land on the same issue
+or PR; `github.RawEvent(m)` returns the full `*github.IssueCommentEvent`
+(check `.Event.GetIssue().IsPullRequest()` to tell PRs from issues), and
+`github.Client(bot)` exposes the authenticated go-github client for anything
+beyond commenting — labels, reactions, checks. `github.Addr(bot)` reports the
+bound address when you bind `:0`.
+
+Only the `created` action is dispatched (edits and deletions are acked and
+dropped), and every delivery is acked `200` *before* dispatch so slow handlers
+cannot make GitHub mark the hook as failing. Attachments are not supported —
+comment bodies are markdown.
+
+**Environment variables** (suggested names; the config is plain Go):
+
+| Variable | Value |
+|---|---|
+| `GITHUB_TOKEN` | PAT for PAT mode (mutually exclusive with the App triple) |
+| `GITHUB_APP_ID` / `GITHUB_INSTALLATION_ID` / `GITHUB_PRIVATE_KEY` | App-mode credentials |
+| `GITHUB_WEBHOOK_SECRET` | webhook secret; required |
+| `GITHUB_ADDR` | local bind address, e.g. `:8080` (a bare port is accepted) |
+| `GITHUB_PATH` | optional webhook route; defaults to `/webhook` |
+
+#### No response?
+
+- **`403` on every delivery** (webhook *Recent Deliveries* tab): the webhook
+  secret does not match `WebhookSecret`.
+- **`200` but no reply**: the comment author is a bot (ignored by design), the
+  action was an edit, or no registered pattern matched. In PAT mode also check
+  the startup log — if the token cannot resolve `GET /user` the bot shuts down
+  (a bot that cannot recognize itself would reply-loop).
+- **Replies fail / `Send` errors**: the PAT lacks *Issues: write* on that repo,
+  or the App is not installed on it. go-github's typed errors (e.g.
+  `*github.RateLimitError`) unwrap with `errors.As`.
+- **Endpoint never hit**: the payload URL must be your public
+  `https://…/webhook` and reach `Addr` through the proxy; only `POST` is
+  accepted on the route.
+
+**Official docs:** [Webhooks](https://docs.github.com/webhooks) · [`issue_comment` event](https://docs.github.com/webhooks/webhook-events-and-payloads#issue_comment) · [Securing webhooks](https://docs.github.com/webhooks/using-webhooks/validating-webhook-deliveries) · [Creating a GitHub App](https://docs.github.com/apps/creating-github-apps) · [Issue comments API](https://docs.github.com/rest/issues/comments) · [ngrok](https://ngrok.com/download)
 
 ---
 
