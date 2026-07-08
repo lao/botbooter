@@ -20,6 +20,11 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
+// The adapter must satisfy the optional ThreadedSender so (*core.Bot).Reply
+// routes to SendThreaded rather than the plain-Send fallback (guards the
+// pointer-receiver method-set trap).
+var _ core.ThreadedSender = (*adapter)(nil)
+
 func captureDeps(got **core.Message) core.AdapterDeps {
 	return core.AdapterDeps{
 		Dispatch: func(_ context.Context, m *core.Message) { *got = m },

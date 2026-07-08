@@ -367,4 +367,62 @@ in the README. **Use it with trusted local input only.**
 
 ---
 
+## Threaded replies
+
+`b.Reply(ctx, m, text)` posts into the thread or reply-chain of the inbound
+message `m` instead of the channel root (which is what
+`b.SendMessageContext` does). "Thread" is not one concept across platforms, so
+`Reply` hands the whole `Message` to each adapter and the adapter picks its own
+anchor. You never compute a thread id yourself.
+
+The two anchors it can use come straight off the inbound `Message`:
+
+- **`m.ReplyToID`** — the thread root / replied-to id the platform delivered
+  (`""` when the message is top-level in a channel).
+- **`m.ID`** — the message's own id.
+
+### Per-platform anchor
+
+| Platform | Anchor used | On the wire | When there's no anchor |
+|---|---|---|---|
+| **Slack** | `m.ReplyToID` (the thread root, `ThreadTimeStamp`) | `thread_ts` on `chat.postMessage` | top-level message ⇒ plain top-level reply (does **not** open a new thread off `m.ID`) |
+| **Discord** | `m.ID` | inline reply via `message_reference.message_id` | empty `m.ID` ⇒ plain channel send |
+| **Telegram** | `m.ID` | `reply_parameters.message_id` | non-numeric/empty `m.ID` ⇒ plain send |
+| **WhatsApp** | `m.ID` | `context.message_id` (a quoted reply) | empty `m.ID` ⇒ plain send (no `context`) |
+| **Teams** | — | — | no `ThreadedSender`; always a plain channel send |
+| **CLI** | — | — | no `ThreadedSender`; always a plain channel send |
+
+### Why the anchor differs
+
+`ReplyToID` means different things per platform: on Slack it's the **thread
+root**, so replying with it keeps the answer in the same thread; on
+Discord/Telegram it's the specific **replied-to message**, and the natural reply
+target is the *received* message itself (`m.ID`), not the chain root. A single
+core-computed anchor would mis-anchor half the platforms, so each adapter owns
+the choice.
+
+### The two scenarios
+
+- **The triggering message is already inside a thread.** `Reply` continues that
+  same thread — Slack anchors on the thread root (`m.ReplyToID`);
+  Discord/Telegram/WhatsApp reference/quote `m.ID`.
+- **The triggering message is a top-level channel comment.** `Reply` answers
+  that comment directly, anchored on it (Discord inline reply, Telegram
+  `reply_to_message_id`, WhatsApp quote). On Slack a top-level message has no
+  thread root, so the reply is a plain top-level message in the channel — Slack
+  intentionally does **not** start a fresh thread off it.
+
+### Fallback & errors
+
+`Reply` degrades to a plain channel `Send` when the adapter implements no
+`ThreadedSender` (Teams, CLI) **or** `m` carries no usable anchor — it never
+fails just because a message can't be threaded. It returns an error only when
+the bot has no adapter or `m` is `nil`.
+
+To reach beyond these normalized semantics (custom `thread_ts`, forcing a new
+thread, etc.), drop to the raw SDK client via the per-platform accessors — see
+[Raw platform access](../README.md#raw-platform-access).
+
+---
+
 [← Back to the README](../README.md)
