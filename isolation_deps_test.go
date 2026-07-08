@@ -51,7 +51,8 @@ func TestIsolationDeps(t *testing.T) {
 		// jwtv4 is what ghinstallation (v2.19.0) actually pulls in — confirmed via
 		// `go mod graph` — not jwtv5. It is a different major than Teams' jwtv5
 		// and the two must never be confused: the github row expects jwtv4 present
-		// and jwtv5 absent.
+		// and jwtv5 absent, and every other row asserts jwtv4 absent so a direct
+		// jwt/v4 import cannot sneak into a non-github closure.
 		jwtv4 = "github.com/golang-jwt/jwt/v4"
 	)
 	// The SDK checks above miss a cross-import of a marker-less internal package
@@ -66,13 +67,13 @@ func TestIsolationDeps(t *testing.T) {
 		present     []string
 		internalOwn string // the one internal/<platform> its closure may contain ("" = none)
 	}{
-		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall}, nil, ""},
-		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall}, nil, "cli"},
-		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5, gogithubSDK, ghinstall}, []string{slackgo}, "slack"},
-		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall}, []string{discordgo}, "discord"},
-		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5, gogithubSDK, ghinstall}, []string{gotelegram}, "telegram"},
-		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall}, nil, "whatsapp"},
-		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram, gogithubSDK, ghinstall}, []string{jwtv5}, "teams"},
+		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4}, nil, ""},
+		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4}, nil, "cli"},
+		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4}, []string{slackgo}, "slack"},
+		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4}, []string{discordgo}, "discord"},
+		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5, gogithubSDK, ghinstall, jwtv4}, []string{gotelegram}, "telegram"},
+		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4}, nil, "whatsapp"},
+		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram, gogithubSDK, ghinstall, jwtv4}, []string{jwtv5}, "teams"},
 		// The github row's closure legitimately contains jwtv4 (pulled in by
 		// ghinstallation) but must not contain jwtv5, which is Teams' own major.
 		{"github.com/lao/botbooter/github", []string{discordgo, slackgo, gotelegram, jwtv5}, []string{gogithubSDK, ghinstall, jwtv4}, "github"},

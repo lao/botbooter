@@ -13,5 +13,5 @@ import (
 // isolation deps test.
 func TestWhatsAppImportsNoPlatformSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "google/go-github"}, "whatsapp")
+		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "google/go-github", "bradleyfalzon/ghinstallation"}, "whatsapp")
 }
