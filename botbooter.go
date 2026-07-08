@@ -47,4 +47,14 @@ type (
 	CommandHandler = core.CommandHandler
 	// Middleware wraps message dispatch. See [core.Middleware].
 	Middleware = core.Middleware
+	// SendOption modifies a send. See [core.SendOption].
+	SendOption = core.SendOption
 )
+
+// InReplyTo anchors a send on m so the adapter posts into m's thread or
+// reply-chain, deriving the correct per-platform anchor. See [core.InReplyTo].
+func InReplyTo(m *Message) SendOption { return core.InReplyTo(m) }
+
+// WithThreadID anchors a send on a raw native id the adapter uses verbatim; it
+// takes precedence over [InReplyTo]. See [core.WithThreadID].
+func WithThreadID(id string) SendOption { return core.WithThreadID(id) }

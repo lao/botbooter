@@ -84,7 +84,9 @@ func (a *adapter) Disconnect() error {
 	return nil
 }
 
-func (a *adapter) Send(_ context.Context, _, text string) error {
+// Send writes text to the CLI's output. The CLI has no threading, so SendOptions
+// is ignored.
+func (a *adapter) Send(_ context.Context, _, text string, _ core.SendOptions) error {
 	_, err := fmt.Fprintln(a.out, text)
 	return err
 }

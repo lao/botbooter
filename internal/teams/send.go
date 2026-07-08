@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/lao/botbooter/internal/core"
 )
 
 const (
@@ -44,8 +46,9 @@ type outboundActivity struct {
 
 // Send posts a text reply to the conversation channelID. The serviceUrl and bot
 // account come from the map populated on inbound Activities, so Send fails if no
-// Activity has been seen for channelID yet.
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
+// Activity has been seen for channelID yet. Teams has no thread anchor here, so
+// SendOptions is ignored — a reply already lands in the originating conversation.
+func (a *adapter) Send(ctx context.Context, channelID, text string, _ core.SendOptions) error {
 	a.mu.Lock()
 	conv, ok := a.convs[channelID]
 	a.mu.Unlock()

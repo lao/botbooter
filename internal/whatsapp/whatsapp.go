@@ -336,19 +336,20 @@ func (a *adapter) drainDispatch(ctx context.Context) {
 	}
 }
 
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	return a.sendPayload(ctx, channelID, text, "")
-}
-
-// SendThreaded posts text as a reply quoting the message quoteID via the Cloud
-// API context.message_id. It anchors on m.ID, the received message.
-func (a *adapter) SendThreaded(ctx context.Context, m *core.Message, text string) error {
-	return a.sendPayload(ctx, m.ChannelID, text, m.ID)
+// Send posts text to channelID. With a threading option it quotes a message via
+// the Cloud API context.message_id: the resolved quote id is opts.ThreadID when
+// set, else the inbound message's ID. An empty id sends a plain message.
+func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
+	quoteID := opts.ThreadID
+	if quoteID == "" && opts.ReplyTo != nil {
+		quoteID = opts.ReplyTo.ID
+	}
+	return a.sendPayload(ctx, channelID, text, quoteID)
 }
 
 // sendPayload POSTs a text message to the recipient. When quoteID is non-empty
 // it attaches a "context" so the message quotes the referenced message. The
-// status-code check and success-body drain are shared by Send and SendThreaded.
+// status-code check and success-body drain are shared by every send path.
 func (a *adapter) sendPayload(ctx context.Context, to, text, quoteID string) error {
 	payload := map[string]any{
 		"messaging_product": "whatsapp",

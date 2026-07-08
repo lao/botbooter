@@ -107,7 +107,7 @@ type Attachment struct {
 type Adapter interface {
 	Connect(ctx context.Context, deps AdapterDeps) error
 	Disconnect() error
-	Send(ctx context.Context, channelID, text string) error
+	Send(ctx context.Context, channelID, text string, opts SendOptions) error
 	Attachments(m *Message) ([]Attachment, error)
 }
 
@@ -118,13 +118,43 @@ type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
 }
 
-// ThreadedSender is an optional capability an Adapter may implement to post a
-// reply into the thread or reply-chain of an inbound message. Adapters that do
-// not implement it fall back to a plain channel Send in [Bot.Reply]. The reply
-// anchor is platform-specific, so SendThreaded receives the whole Message and
-// each adapter derives its own anchor from it.
-type ThreadedSender interface {
-	SendThreaded(ctx context.Context, m *Message, text string) error
+// SendOptions is the resolved set of per-send modifiers an Adapter reads off a
+// Send call. Its zero value means "a plain channel message". A threading anchor
+// is platform-specific, so each adapter derives its own from these fields:
+//   - ReplyTo: reply anchored on this whole message; the adapter picks the
+//     correct native anchor (Slack thread_ts from ReplyToID; Discord/Telegram/
+//     WhatsApp the replied-to/quoted message id).
+//   - ThreadID: a raw native anchor supplied by the caller, used verbatim. It
+//     wins over ReplyTo when both are set. On Slack it is a thread_ts; on
+//     Discord/Telegram/WhatsApp a reply/quote message id (NOT a Discord
+//     thread-channel id).
+type SendOptions struct {
+	ReplyTo  *Message
+	ThreadID string
+}
+
+// SendOption modifies a SendOptions. Construct them with [InReplyTo] /
+// [WithThreadID] and pass them to [Bot.SendMessageContext] / [Bot.SendMessage].
+type SendOption func(*SendOptions)
+
+// InReplyTo anchors the send on m so the adapter posts into m's thread or
+// reply-chain, deriving the correct per-platform anchor itself.
+func InReplyTo(m *Message) SendOption { return func(o *SendOptions) { o.ReplyTo = m } }
+
+// WithThreadID anchors the send on a raw native id the adapter uses verbatim.
+// It takes precedence over [InReplyTo]. The caller owns platform-correctness.
+func WithThreadID(id string) SendOption { return func(o *SendOptions) { o.ThreadID = id } }
+
+// resolveSendOptions folds opts into a single SendOptions, skipping nil options
+// so a conditionally-built option slice can carry a nil entry without panicking.
+func resolveSendOptions(opts ...SendOption) SendOptions {
+	var o SendOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	return o
 }
 
 // AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
@@ -348,38 +378,30 @@ func (b *Bot) Start() error {
 // SendMessage sends text to channelID using a background context. Prefer
 // SendMessageContext from within a handler so the send honors shutdown and
 // cancellation; SendMessage's background context outlives Run's teardown.
-func (b *Bot) SendMessage(channelID, text string) error {
-	return b.SendMessageContext(context.Background(), channelID, text)
+func (b *Bot) SendMessage(channelID, text string, opts ...SendOption) error {
+	return b.SendMessageContext(context.Background(), channelID, text, opts...)
 }
 
 // SendMessageContext sends text to channelID, honoring ctx for cancellation.
-func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) error {
+// Pass [InReplyTo] or [WithThreadID] to thread the message onto an inbound one;
+// with no options it is a plain channel message.
+func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string, opts ...SendOption) error {
 	if b.adapter == nil {
 		return ErrUnknownBotType
 	}
-	return b.adapter.Send(ctx, channelID, text)
+	return b.adapter.Send(ctx, channelID, text, resolveSendOptions(opts...))
 }
 
-// Reply posts text into the thread or reply-chain of the inbound message m. When
-// the adapter implements [ThreadedSender] and m carries an anchor (ReplyToID or
-// ID), the threaded path is used; otherwise it falls back to a plain channel
-// Send. It returns ErrUnknownBotType if the Bot has no adapter or m is nil.
-//
-// The thread anchor is platform-specific — each adapter's SendThreaded owns it:
-//   - Slack: replies inside m's thread (thread_ts = m.ReplyToID) when m is
-//     threaded; a top-level channel message gets a plain top-level reply.
-//   - Discord: an inline reply referencing m.ID.
-//   - Telegram: reply_to_message_id = m.ID (the received message).
-//   - WhatsApp: context.message_id = m.ID (a quoted reply).
-//   - Teams, CLI: no ThreadedSender, so Reply is a plain channel Send.
+// Reply is convenience sugar for replying into the thread or reply-chain of the
+// inbound message m — it is exactly SendMessageContext(ctx, m.ChannelID, text,
+// InReplyTo(m)). Each adapter derives its own platform-specific anchor; see
+// [SendOptions]. It returns ErrUnknownBotType if the Bot has no adapter or m is
+// nil.
 func (b *Bot) Reply(ctx context.Context, m *Message, text string) error {
 	if b.adapter == nil || m == nil {
 		return ErrUnknownBotType
 	}
-	if ts, ok := b.adapter.(ThreadedSender); ok && (m.ReplyToID != "" || m.ID != "") {
-		return ts.SendThreaded(ctx, m, text)
-	}
-	return b.adapter.Send(ctx, m.ChannelID, text)
+	return b.SendMessageContext(ctx, m.ChannelID, text, InReplyTo(m))
 }
 
 // GetAttachments returns the platform-agnostic attachments of message.

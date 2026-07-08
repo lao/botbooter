@@ -106,20 +106,23 @@ func (a *adapter) Disconnect() error {
 	return a.session.Close()
 }
 
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	_, err := a.session.ChannelMessageSend(channelID, text, discordgo.WithContext(ctx))
-	return err
-}
-
-// SendThreaded posts text as an inline reply referencing m. With no message id
-// to reference it degrades to a plain channel send, since an empty
-// MessageReference is an invalid Discord API request.
-func (a *adapter) SendThreaded(ctx context.Context, m *core.Message, text string) error {
-	if m.ID == "" {
-		return a.Send(ctx, m.ChannelID, text)
+// Send posts text to channelID. With a threading option it posts an inline reply
+// referencing the resolved message id (opts.ThreadID when set, else the inbound
+// message's ID). With no id to reference it degrades to a plain channel send,
+// since an empty MessageReference is an invalid Discord API request. The
+// reference is built against channelID, so an anchor only works when sending to
+// the message's own channel.
+func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
+	refID := opts.ThreadID
+	if refID == "" && opts.ReplyTo != nil {
+		refID = opts.ReplyTo.ID
 	}
-	ref := &discordgo.MessageReference{MessageID: m.ID, ChannelID: m.ChannelID}
-	_, err := a.session.ChannelMessageSendReply(m.ChannelID, text, ref, discordgo.WithContext(ctx))
+	if refID == "" {
+		_, err := a.session.ChannelMessageSend(channelID, text, discordgo.WithContext(ctx))
+		return err
+	}
+	ref := &discordgo.MessageReference{MessageID: refID, ChannelID: channelID}
+	_, err := a.session.ChannelMessageSendReply(channelID, text, ref, discordgo.WithContext(ctx))
 	return err
 }
 

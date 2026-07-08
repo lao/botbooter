@@ -89,22 +89,19 @@ func (a *adapter) Disconnect() error {
 	return nil
 }
 
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	_, err := a.currentClient().SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatID(channelID),
-		Text:   text,
-	})
-	return err
-}
-
-// SendThreaded replies to m via reply_to_message_id. It anchors on m.ID (the
-// received message) by design, NOT m.ReplyToID — anchoring the immediate message
-// is the intended reply-quote semantics; do not "fix" this to chase the chain
-// root. A non-numeric m.ID (never expected from Telegram) falls back to a plain
-// send.
-func (a *adapter) SendThreaded(ctx context.Context, m *core.Message, text string) error {
-	params := &bot.SendMessageParams{ChatID: chatID(m.ChannelID), Text: text}
-	if id, err := strconv.Atoi(m.ID); err == nil {
+// Send posts text to channelID. With a threading option it sets
+// reply_to_message_id from the resolved anchor: opts.ThreadID when set, else the
+// inbound message's ID (the received message — the intended reply-quote
+// semantics, NOT ReplyToID). A non-numeric anchor — never expected from
+// Telegram's own ids, but possible via a caller-supplied WithThreadID — silently
+// degrades to a plain send.
+func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
+	idStr := opts.ThreadID
+	if idStr == "" && opts.ReplyTo != nil {
+		idStr = opts.ReplyTo.ID
+	}
+	params := &bot.SendMessageParams{ChatID: chatID(channelID), Text: text}
+	if id, err := strconv.Atoi(idStr); err == nil {
 		params.ReplyParameters = &models.ReplyParameters{MessageID: id}
 	}
 	_, err := a.currentClient().SendMessage(ctx, params)
