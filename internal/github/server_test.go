@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -183,17 +184,29 @@ func TestHandleWebhook_Rejections(t *testing.T) {
 func selfIdentityServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/user":
+		if r.URL.Path == "/user" {
 			_, _ = w.Write([]byte(`{"id": 777, "login": "bot-account"}`))
-		case r.URL.Path == "/app":
-			_, _ = w.Write([]byte(`{"id": 7, "slug": "my-app"}`))
-		case strings.Contains(r.URL.Path, "/users/my-app"):
-			_, _ = w.Write([]byte(`{"id": 555, "login": "my-app[bot]"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
+			return
 		}
+		w.WriteHeader(http.StatusNotFound)
 	}))
+}
+
+// waitForSelfID polls until the serve goroutine has resolved the adapter's
+// self identity; resolution is asynchronous by design (Connect is non-blocking).
+func waitForSelfID(t *testing.T, a *adapter, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		id := a.selfID
+		a.mu.Unlock()
+		if id == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("self identity not resolved to %d in time", want)
 }
 
 func connectedAdapter(t *testing.T, deps core.AdapterDeps) (*adapter, *httptest.Server, context.CancelFunc) {
@@ -218,12 +231,15 @@ func TestConnect_ResolvesSelfAndBinds(t *testing.T) {
 	defer func() { _ = a.Disconnect() }()
 
 	a.mu.Lock()
-	selfID, boundAddr := a.selfID, a.boundAddr
+	boundAddr := a.boundAddr
 	a.mu.Unlock()
-	asserts.Equal(t, selfID, int64(777), "PAT self-identity resolved via /user")
 	asserts.True(t, boundAddr != "", "listener bound, addr recoverable")
+	waitForSelfID(t, a, 777) // resolved asynchronously via /user before serving
 }
 
+// A bot that cannot recognize itself is a reply-loop hazard: an identity
+// failure must surface fatally via deps.Done (Connect itself stays
+// non-blocking, so it cannot return the error synchronously).
 func TestConnect_SelfIdentityFailureIsFatal(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -233,21 +249,62 @@ func TestConnect_SelfIdentityFailureIsFatal(t *testing.T) {
 	asserts.NoError(t, err, "new adapter")
 	a.client = testClient(t, srv)
 
-	err = a.Connect(context.Background(), core.AdapterDeps{})
+	failed := make(chan error, 1)
+	asserts.NoError(t, a.Connect(context.Background(), core.AdapterDeps{
+		Done:       func(err error) { failed <- err },
+		Disconnect: func() error { return nil },
+	}), "Connect is non-blocking; the failure arrives via Done")
+	defer func() { _ = a.Disconnect() }()
 
-	asserts.Error(t, err, "a bot that cannot recognize itself must not start")
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	asserts.True(t, a.srv == nil, "no server installed on failure")
+	select {
+	case err := <-failed:
+		asserts.Error(t, err, "a bot that cannot recognize itself must not serve")
+	case <-time.After(2 * time.Second):
+		t.Fatal("identity failure never surfaced via deps.Done")
+	}
 }
 
-func TestConnect_AppModeResolvesBotUser(t *testing.T) {
-	srv := selfIdentityServer(t)
+// Connect must return before the self-identity round-trip completes: core
+// holds the bot lock across adapter.Connect and documents it as non-blocking,
+// so a slow GitHub API must not stall Connect or a concurrent Disconnect.
+func TestConnect_DoesNotBlockOnSelfResolution(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release // hold /user until the test releases it
+		_, _ = w.Write([]byte(`{"id": 777, "login": "bot-account"}`))
+	}))
 	defer srv.Close()
+	defer unblock()
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	a.client = testClient(t, srv)
+
+	connected := make(chan error, 1)
+	go func() {
+		connected <- a.Connect(context.Background(), core.AdapterDeps{
+			Done: func(error) {}, Disconnect: func() error { return nil },
+		})
+	}()
+	select {
+	case err := <-connected:
+		asserts.NoError(t, err, "connect")
+	case <-time.After(time.Second):
+		t.Fatal("Connect blocked on the self-identity round-trip")
+	}
+	defer func() { _ = a.Disconnect() }()
+
+	unblock()
+	waitForSelfID(t, a, 777)
+}
+
+// App mode needs no self-identity lookup: every App-authored comment arrives
+// with user type "Bot" and is dropped wholesale, so Connect must bind and
+// serve without a single GitHub API round-trip.
+func TestConnect_AppModeSkipsSelfResolution(t *testing.T) {
 	a, err := newAdapter(appConfig(t))
 	asserts.NoError(t, err, "new App adapter")
-	a.client = testClient(t, srv)
-	a.baseURL = srv.URL // one-shot App-JWT client also hits the fake
 
 	asserts.NoError(t, a.Connect(context.Background(), core.AdapterDeps{
 		Done: func(error) {}, Disconnect: func() error { return nil },
@@ -256,7 +313,8 @@ func TestConnect_AppModeResolvesBotUser(t *testing.T) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	asserts.Equal(t, a.selfID, int64(555), "App self-identity resolved via /app then /users/{slug}[bot]")
+	asserts.Equal(t, a.selfID, int64(0), "App mode relies on the Bot-type filter, not selfID")
+	asserts.True(t, a.boundAddr != "", "listener bound without any API round-trip")
 }
 
 func TestDisconnect_IdempotentAndClears(t *testing.T) {
@@ -266,6 +324,7 @@ func TestDisconnect_IdempotentAndClears(t *testing.T) {
 	defer srv.Close()
 	defer cancel()
 
+	waitForSelfID(t, a, 777) // settle async resolution before tearing down
 	asserts.NoError(t, a.Disconnect(), "first disconnect")
 	a.mu.Lock()
 	cleared := a.srv == nil && a.boundAddr == "" && a.detachedCancel == nil
@@ -394,7 +453,7 @@ func TestHandleWebhook_AckedButDropped(t *testing.T) {
 		{"BotAuthor", "issue_comment", botAuthoredComment, nil},
 		{"SelfAuthor", "issue_comment", selfAuthoredComment, func(a *adapter) {
 			a.mu.Lock()
-			a.selfID, a.selfLogin = 777, "bot-account"
+			a.selfID = 777
 			a.mu.Unlock()
 		}},
 		{"UnknownEvent", "workflow_run", `{"action": "completed"}`, nil},

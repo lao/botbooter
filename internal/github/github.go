@@ -81,18 +81,16 @@ type Config struct {
 type adapter struct {
 	cfg    Config
 	client *gogithub.Client
-	// baseTransport is the normalized inner RoundTripper (never nil); Connect
-	// reuses it for the one-shot App-JWT client during self-identity resolution.
-	baseTransport http.RoundTripper
 
 	mu sync.Mutex
-	// selfID/selfLogin identify the bot's own account for reply-loop
-	// prevention. Written by Connect under mu (same critical section as srv),
-	// read by the handler under mu; re-resolved on every Connect, never
-	// cleared on Disconnect (stale values are harmless with no server up).
-	selfID    int64
-	selfLogin string
-	srv       *http.Server
+	// selfID identifies the bot's own account for reply-loop prevention in
+	// PAT mode. Written under mu by the serve goroutine before the first
+	// request is handled, read by the handler under mu; re-resolved on every
+	// PAT-mode Connect, never cleared on Disconnect (stale values are
+	// harmless with no server up). Zero in App mode, where the Bot-type
+	// filter in isSelfOrBot does the job.
+	selfID int64
+	srv    *http.Server
 	// boundAddr is the listener's resolved address, so a cfg.Addr of ":0" is
 	// recoverable via Addr. Set with srv, cleared with it.
 	boundAddr string
@@ -103,10 +101,6 @@ type adapter struct {
 	// only when a reconnect has not already installed a newer connection.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
-
-	// baseURL overrides the API base for the one-shot self-identity client in
-	// App mode; tests point it at an httptest server. Empty in production.
-	baseURL string
 }
 
 // New creates a GitHub bot. It returns ErrMissingConfig if a required field is
@@ -178,7 +172,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 		baseTransport = http.DefaultTransport
 	}
 
-	a := &adapter{cfg: cfg, baseTransport: baseTransport}
+	a := &adapter{cfg: cfg}
 	if patMode {
 		client, err := gogithub.NewClient(
 			gogithub.WithHTTPClient(cfg.HTTPClient),

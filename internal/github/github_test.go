@@ -5,7 +5,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
-	"net/http"
 	"testing"
 
 	"github.com/lao/botbooter/internal/asserts"
@@ -71,14 +70,13 @@ func TestNewAdapter_DefaultPath(t *testing.T) {
 }
 
 // Guards the ghinstallation nil-RoundTripper panic: App mode with the default
-// (nil-Transport) HTTPClient must normalize to http.DefaultTransport.
+// (nil-Transport) HTTPClient must normalize to http.DefaultTransport before
+// handing the transport to ghinstallation.
 func TestNewAdapter_AppModeDefaultTransport(t *testing.T) {
 	a, err := newAdapter(appConfig(t))
 
 	asserts.NoError(t, err, "App mode with default HTTPClient")
-	asserts.NotNil(t, a.client, "client built")
-	asserts.NotNil(t, a.baseTransport, "normalized inner transport stored")
-	asserts.True(t, a.baseTransport == http.DefaultTransport, "nil Transport normalizes to http.DefaultTransport")
+	asserts.NotNil(t, a.client, "client built without panicking on a nil Transport")
 }
 
 func TestNewAdapter_AppModeBadKey(t *testing.T) {

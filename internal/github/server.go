@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/bradleyfalzon/ghinstallation/v2"
 	gogithub "github.com/google/go-github/v88/github"
 	"github.com/lao/botbooter/internal/core"
 )
@@ -85,14 +84,6 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	// WithCancel lets Disconnect abort stragglers after it.
 	detachedCtx, detachedCancel := context.WithCancel(context.WithoutCancel(ctx))
 
-	// A bot that cannot recognize itself is a reply-loop hazard: fail loudly
-	// at startup, in either auth mode, rather than silently at dispatch.
-	selfID, selfLogin, err := a.resolveSelf(ctx)
-	if err != nil {
-		detachedCancel()
-		return err
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc(a.cfg.Path, func(w http.ResponseWriter, r *http.Request) {
 		// GitHub webhooks are always POST; there is no GET handshake.
@@ -118,13 +109,33 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	}
 
 	a.mu.Lock()
-	a.selfID, a.selfLogin = selfID, selfLogin
 	a.srv = srv
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
 	a.mu.Unlock()
 
 	go func() {
+		// Self-identity resolves here, off the Connect path: adapter.Connect
+		// is non-blocking by contract (core holds the bot lock across it), so
+		// it must not wait on a GitHub round-trip. Resolving before Serve
+		// means no request is handled before the bot can recognize itself. A
+		// bot that cannot recognize itself is a reply-loop hazard, so failure
+		// is fatal via deps.Done rather than silent at dispatch. Only PAT
+		// mode needs the lookup: App comments arrive as type "Bot" and
+		// isSelfOrBot drops them wholesale.
+		if a.cfg.Token != "" {
+			selfID, err := a.resolveSelf(ctx)
+			if err != nil {
+				_ = ln.Close()        // Serve never runs, so nothing else closes it
+				if ctx.Err() == nil { // a canceled startup is a shutdown, not a failure
+					deps.Done(err)
+				}
+				return
+			}
+			a.mu.Lock()
+			a.selfID = selfID
+			a.mu.Unlock()
+		}
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			deps.Done(err)
 		}
@@ -145,42 +156,16 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// resolveSelf resolves the bot's own account for loop prevention. PAT mode is
-// one call; App mode cannot call GET /user with an installation token, so it
-// asks GET /app (App JWT) for the slug, then resolves "<slug>[bot]" to an id.
-func (a *adapter) resolveSelf(ctx context.Context) (int64, string, error) {
-	if a.cfg.Token != "" {
-		user, _, err := a.client.Users.Get(ctx, "")
-		if err != nil {
-			return 0, "", fmt.Errorf("github: resolve self identity: %w", err)
-		}
-		return user.GetID(), user.GetLogin(), nil
-	}
-
-	atr, err := ghinstallation.NewAppsTransport(a.baseTransport, a.cfg.AppID, a.cfg.PrivateKey)
+// resolveSelf resolves the bot's own account for reply-loop prevention in PAT
+// mode, where its comments arrive as a plain User. App mode needs no lookup:
+// its comments carry user type "Bot", which isSelfOrBot drops without ever
+// consulting selfID.
+func (a *adapter) resolveSelf(ctx context.Context) (int64, error) {
+	user, _, err := a.client.Users.Get(ctx, "")
 	if err != nil {
-		return 0, "", fmt.Errorf("github: build app transport: %w", err)
+		return 0, fmt.Errorf("github: resolve self identity: %w", err)
 	}
-	opts := []gogithub.ClientOptionsFunc{gogithub.WithHTTPClient(
-		&http.Client{Transport: atr, Timeout: a.cfg.HTTPClient.Timeout},
-	)}
-	if a.baseURL != "" { // test hook: point the one-shot client at a fake API
-		opts = append(opts, gogithub.WithURLs(gogithub.Ptr(a.baseURL+"/"), gogithub.Ptr(a.baseURL+"/")))
-	}
-	appClient, err := gogithub.NewClient(opts...)
-	if err != nil {
-		return 0, "", fmt.Errorf("github: build app client: %w", err)
-	}
-
-	app, _, err := appClient.Apps.Get(ctx, "")
-	if err != nil {
-		return 0, "", fmt.Errorf("github: resolve app slug: %w", err)
-	}
-	user, _, err := a.client.Users.Get(ctx, app.GetSlug()+"[bot]")
-	if err != nil {
-		return 0, "", fmt.Errorf("github: resolve bot user %s[bot]: %w", app.GetSlug(), err)
-	}
-	return user.GetID(), user.GetLogin(), nil
+	return user.GetID(), nil
 }
 
 func (a *adapter) Disconnect() error {
@@ -211,8 +196,8 @@ func (a *adapter) Disconnect() error {
 	// Clear the shared fields only if a reconnect has not installed a newer
 	// connection (identity-compare on srv). Either way, cancel THIS
 	// connection's detached context after the drain so a stuck handler cannot
-	// leak past shutdown. selfID/selfLogin persist: they are re-resolved on
-	// the next Connect and harmless while no server is up.
+	// leak past shutdown. selfID persists: it is re-resolved on the next
+	// PAT-mode Connect and harmless while no server is up.
 	a.mu.Lock()
 	if a.srv == srv {
 		a.srv = nil
