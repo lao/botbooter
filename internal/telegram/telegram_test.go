@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -365,17 +366,17 @@ func TestAttachmentsFromMessage(t *testing.T) {
 var _ core.AttachmentResolver = (*adapter)(nil)
 
 func TestFileIDOf(t *testing.T) {
-	asserts.Equal(t, fileIDOf(models.PhotoSize{FileID: "p"}), "p", "photo size value yields its FileID")
-	asserts.Equal(t, fileIDOf(&models.PhotoSize{FileID: "pp"}), "pp", "photo size pointer also yields its FileID")
-	asserts.Equal(t, fileIDOf(&models.Document{FileID: "d"}), "d", "document pointer yields its FileID")
-	asserts.Equal(t, fileIDOf((*models.Document)(nil)), "", "nil document pointer is guarded")
-	asserts.Equal(t, fileIDOf(nil), "", "nil ExtraData yields no FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), models.PhotoSize{FileID: "p"}), "p", "photo size value yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), &models.PhotoSize{FileID: "pp"}), "pp", "photo size pointer also yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), &models.Document{FileID: "d"}), "d", "document pointer yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), (*models.Document)(nil)), "", "nil document pointer is guarded")
+	asserts.Equal(t, fileIDOf(slog.Default(), nil), "", "nil ExtraData yields no FileID")
 }
 
 func TestFileIDOf_UnhandledTypeWarns(t *testing.T) {
 	logs := captureLog(t)
 
-	got := fileIDOf(models.Video{FileID: "v"})
+	got := fileIDOf(slog.Default(), models.Video{FileID: "v"})
 
 	asserts.Equal(t, got, "", "an unhandled media type yields no file id")
 	asserts.True(t, strings.Contains(logs.String(), "unexpected type"),
@@ -467,6 +468,25 @@ func TestResolveAttachmentURL_WarnsTokenInURL(t *testing.T) {
 	asserts.NoError(t, resolvePhoto(t), "getFile succeeds against the stub server")
 	asserts.True(t, strings.Contains(logs.String(), "embeds the bot token"),
 		"a successful resolve warns that the URL carries the token")
+}
+
+// TestResolveAttachmentURL_RoutesWarningToInjectedLogger proves the logger
+// stored at Connect (here set directly) carries the resolve warning, rather
+// than always falling back to slog.Default.
+func TestResolveAttachmentURL_RoutesWarningToInjectedLogger(t *testing.T) {
+	t.Setenv(EnvSuppressURLWarning, "")
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"file_id":"f","file_path":"photos/file_1.jpg"}}`))
+	})
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	_, err := a.ResolveAttachmentURL(context.Background(),
+		core.Attachment{ExtraData: models.PhotoSize{FileID: "f"}})
+
+	asserts.NoError(t, err, "getFile succeeds against the stub server")
+	asserts.True(t, strings.Contains(buf.String(), "embeds the bot token"),
+		"the injected logger receives the token-in-URL warning")
 }
 
 func TestResolveAttachmentURL_SuppressesWarning(t *testing.T) {

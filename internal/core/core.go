@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"regexp"
@@ -160,11 +160,13 @@ func resolveSendOptions(opts ...SendOption) SendOptions {
 	return o
 }
 
-// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
+// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot,
+// plus the Bot's logger so adapter diagnostics route through the same sink.
 type AdapterDeps struct {
 	Dispatch   func(ctx context.Context, m *Message)
 	Done       func(err error)
 	Disconnect func() error
+	Logger     *slog.Logger // always non-nil
 }
 
 // Bot is the platform-agnostic chat bot. Register handlers and middleware
@@ -178,6 +180,7 @@ type Bot struct {
 	commands              []Command
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
+	logger                *slog.Logger
 
 	mu   sync.Mutex
 	conn *connection
@@ -191,6 +194,7 @@ type connection struct {
 	done    chan error    // adapter reports event-loop termination here
 	runDone chan struct{} // closed exactly once when this connection tears down
 	once    sync.Once
+	discErr error // adapter.Disconnect result, recorded once and shared by all callers
 	adapter Adapter
 }
 
@@ -200,18 +204,17 @@ type connection struct {
 // connection now owns.
 func (c *connection) teardown(disconnectAdapter bool) error {
 	c.cancel()
-	var err error
 	c.once.Do(func() {
 		close(c.runDone)
 		if disconnectAdapter {
 			if c.adapter == nil {
-				err = ErrUnknownBotType
+				c.discErr = ErrUnknownBotType
 				return
 			}
-			err = c.adapter.Disconnect()
+			c.discErr = c.adapter.Disconnect()
 		}
 	})
-	return err
+	return c.discErr
 }
 
 // New creates a Bot of the given type backed by adapter.
@@ -254,6 +257,21 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }
 
+// SetLogger routes the Bot's and its adapter's diagnostics (panic recovery,
+// shutdown warnings, webhook rejections) through logger instead of
+// [slog.Default]. Like handler registration, call it before Connect.
+func (b *Bot) SetLogger(logger *slog.Logger) {
+	b.logger = logger
+}
+
+// log returns the configured logger, falling back to slog.Default().
+func (b *Bot) log() *slog.Logger {
+	if b.logger != nil {
+		return b.logger
+	}
+	return slog.Default()
+}
+
 // Connect starts the adapter's event loop and returns without blocking. It
 // returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
 // if the Bot has no adapter, or any error from the adapter's own Connect.
@@ -281,6 +299,7 @@ func (b *Bot) Connect(ctx context.Context) error {
 		Dispatch:   b.dispatch,
 		Done:       func(err error) { c.done <- err },
 		Disconnect: func() error { return b.disconnectConn(c) },
+		Logger:     b.log(),
 	}
 
 	// adapter.Connect is non-blocking by contract. Holding b.mu across it — and
@@ -298,14 +317,27 @@ func (b *Bot) Connect(ctx context.Context) error {
 // connection the adapter is disconnected; if c has been superseded by a
 // reconnect, only c's own runCtx/runDone are settled and the adapter — now
 // owned by the newer connection — is left untouched.
+//
+// b.conn is cleared only AFTER teardown returns, so a Connect racing a
+// slow adapter Disconnect (drains can take seconds) gets ErrAlreadyConnected
+// instead of starting a second live session on the shared adapter. Concurrent
+// teardowns of the same connection serialize on its sync.Once: the losers
+// block inside teardown until the winner's adapter Disconnect finishes.
 func (b *Bot) disconnectConn(c *connection) error {
 	b.mu.Lock()
 	current := b.conn == c
-	if current {
-		b.conn = nil
-	}
 	b.mu.Unlock()
-	return c.teardown(current)
+
+	err := c.teardown(current)
+
+	if current {
+		b.mu.Lock()
+		if b.conn == c {
+			b.conn = nil
+		}
+		b.mu.Unlock()
+	}
+	return err
 }
 
 // Disconnect tears down the active connection: it cancels the run context and
@@ -314,17 +346,15 @@ func (b *Bot) disconnectConn(c *connection) error {
 func (b *Bot) Disconnect() error {
 	b.mu.Lock()
 	c := b.conn
-	b.conn = nil
 	b.mu.Unlock()
 
-	if c != nil {
-		return c.teardown(true)
+	if c == nil {
+		if b.adapter == nil {
+			return ErrUnknownBotType
+		}
+		return nil
 	}
-
-	if b.adapter == nil {
-		return ErrUnknownBotType
-	}
-	return nil
+	return b.disconnectConn(c)
 }
 
 // Run connects the Bot and blocks until ctx is canceled, the event loop ends,
@@ -363,7 +393,7 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	if disconnectErr != nil {
 		if ctx.Err() != nil {
-			log.Printf("botbooter: error disconnecting during shutdown: %v", disconnectErr)
+			b.log().Error("botbooter: error disconnecting during shutdown", "error", disconnectErr)
 		} else if loopErr == nil {
 			loopErr = disconnectErr
 		}
@@ -455,7 +485,7 @@ func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string,
 func (b *Bot) dispatch(ctx context.Context, message *Message) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("botbooter: recovered from panic while handling message: %v", r)
+			b.log().Error("botbooter: recovered from panic while handling message", "panic", r)
 		}
 	}()
 

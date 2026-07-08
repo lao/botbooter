@@ -6,7 +6,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -24,7 +24,19 @@ type adapter struct {
 	selfID    int64
 
 	mu     sync.Mutex
-	client *bot.Bot // the client running the active poll loop; guarded by mu
+	client *bot.Bot     // the client running the active poll loop; guarded by mu
+	logger *slog.Logger // set from AdapterDeps at Connect; guarded by mu
+}
+
+// log returns the Bot's logger handed over at Connect, or slog.Default()
+// before the first Connect.
+func (a *adapter) log() *slog.Logger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 func (a *adapter) currentClient() *bot.Bot {
@@ -74,6 +86,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	// actually receives updates — a RegisterHandler on it now fires.
 	a.mu.Lock()
 	a.client = tg
+	a.logger = deps.Logger
 	a.mu.Unlock()
 
 	go func() {
@@ -148,7 +161,7 @@ const EnvSuppressURLWarning = "BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING"
 // it. Each successful resolve warns to that effect unless [EnvSuppressURLWarning]
 // is set.
 func (a *adapter) ResolveAttachmentURL(ctx context.Context, att core.Attachment) (string, error) {
-	id := fileIDOf(att.ExtraData)
+	id := fileIDOf(a.log(), att.ExtraData)
 	if id == "" {
 		return "", nil
 	}
@@ -157,23 +170,23 @@ func (a *adapter) ResolveAttachmentURL(ctx context.Context, att core.Attachment)
 	if err != nil {
 		return "", fmt.Errorf("resolve telegram file %s: %w", id, err)
 	}
-	warnTokenInURL()
+	warnTokenInURL(a.log())
 	return client.FileDownloadLink(f), nil
 }
 
-func warnTokenInURL() {
+func warnTokenInURL(logger *slog.Logger) {
 	if os.Getenv(EnvSuppressURLWarning) != "" {
 		return
 	}
-	log.Printf("botbooter: telegram download URL embeds the bot token in plaintext; "+
-		"treat it as a secret and do not log it (set %s to silence)", EnvSuppressURLWarning)
+	logger.Warn("botbooter: telegram download URL embeds the bot token in plaintext; "+
+		"treat it as a secret and do not log it", "suppress_env", EnvSuppressURLWarning)
 }
 
 // fileIDOf extracts a Telegram FileID from an attachment's ExtraData. Only the
 // PhotoSize and Document kinds attachmentsFromMessage emits are recognized; a nil
 // ExtraData is a no-op, but any other non-nil type is logged rather than silently
 // dropped, so a newly-surfaced media kind cannot fail to resolve unnoticed.
-func fileIDOf(extra any) string {
+func fileIDOf(logger *slog.Logger, extra any) string {
 	switch v := extra.(type) {
 	case models.PhotoSize:
 		return v.FileID
@@ -190,8 +203,9 @@ func fileIDOf(extra any) string {
 	case nil:
 		return ""
 	default:
-		log.Printf("botbooter: telegram attachment ExtraData has unexpected type %T; "+
-			"no file id resolved (only photo and document attachments are supported)", extra)
+		logger.Warn("botbooter: telegram attachment ExtraData has unexpected type; "+
+			"no file id resolved (only photo and document attachments are supported)",
+			"type", fmt.Sprintf("%T", extra))
 		return ""
 	}
 }

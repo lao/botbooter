@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -249,6 +250,26 @@ func TestHandleWebhook_BadSignature(t *testing.T) {
 	asserts.Equal(t, len(got), 0, "no message should be dispatched")
 }
 
+// TestHandleWebhook_RoutesWarningToInjectedLogger proves the logger stored at
+// Connect (here set directly) actually carries adapter diagnostics: a signed but
+// unparseable body must warn through a.log(), not slog.Default.
+func TestHandleWebhook_RoutesWarningToInjectedLogger(t *testing.T) {
+	a := testAdapter()
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	body := []byte("{ not json")
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(string(body)))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, r, captureDeps(&[]*core.Message{}, nil))
+
+	asserts.Equal(t, w.Code, http.StatusOK, "an unparseable body is still acked 200")
+	asserts.True(t, strings.Contains(buf.String(), "unparseable body"),
+		"the injected logger receives the parse-failure warning")
+}
+
 func TestHandleWebhook_StatusOnlyIgnored(t *testing.T) {
 	a := testAdapter()
 	var got []*core.Message
@@ -294,7 +315,7 @@ func TestHandleWebhook_UnparseableBody(t *testing.T) {
 }
 
 func TestParseWebhook_Image(t *testing.T) {
-	messages := parseWebhook([]byte(imageWebhook))
+	messages := parseWebhook(slog.Default(), []byte(imageWebhook))
 
 	asserts.Equal(t, len(messages), 1, "one message expected")
 	m := messages[0]
@@ -306,7 +327,7 @@ func TestParseWebhook_Image(t *testing.T) {
 }
 
 func TestParseWebhook_SkipsUnparseable(t *testing.T) {
-	messages := parseWebhook([]byte(mixedBatchWebhook))
+	messages := parseWebhook(slog.Default(), []byte(mixedBatchWebhook))
 
 	asserts.Equal(t, len(messages), 1, "the valid message survives; the bad one is skipped")
 	asserts.Equal(t, messages[0].From, "123", "the surviving message is the valid one")

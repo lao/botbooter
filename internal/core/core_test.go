@@ -1,7 +1,10 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/lao/botbooter/internal/asserts"
@@ -197,6 +200,36 @@ func TestBot_dispatch_RecoversFromPanic(t *testing.T) {
 	// dispatch must recover; the call should return normally rather than
 	// propagating the panic and crashing the event loop.
 	bot.dispatch(context.Background(), &Message{Content: "boom"})
+}
+
+// log falls back to slog.Default when no logger is injected, and returns the
+// injected logger once SetLogger is called.
+func TestBot_log_FallbackAndInjected(t *testing.T) {
+	bot := &Bot{}
+	asserts.Equal(t, bot.log(), slog.Default(), "unset logger falls back to slog.Default")
+
+	custom := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	bot.SetLogger(custom)
+	asserts.Equal(t, bot.log(), custom, "SetLogger makes log return the injected logger")
+}
+
+// SetLogger routes dispatch's panic-recovery diagnostic to the injected logger
+// rather than slog.Default, proving the logger is actually threaded into
+// dispatch and not just stored.
+func TestBot_SetLogger_RoutesPanicRecovery(t *testing.T) {
+	var buf bytes.Buffer
+	bot := &Bot{}
+	bot.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	mustAddHandler(t, bot, "^boom$", func(ctx context.Context, b *Bot, m *Message) {
+		panic("handler exploded")
+	})
+
+	bot.dispatch(context.Background(), &Message{Content: "boom"})
+
+	asserts.True(t, strings.Contains(buf.String(), "recovered from panic"),
+		"injected logger captures the panic-recovery diagnostic")
+	asserts.True(t, strings.Contains(buf.String(), "handler exploded"),
+		"the panic value is included in the diagnostic")
 }
 
 // An unknown bot type has no adapter, so every lifecycle method reports

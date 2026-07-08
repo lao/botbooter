@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -124,6 +124,18 @@ type adapter struct {
 	// when a reconnect has not already installed a newer connection.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
+	logger         *slog.Logger // set from AdapterDeps at Connect; guarded by mu
+}
+
+// log returns the Bot's logger handed over at Connect, or slog.Default()
+// before the first Connect.
+func (a *adapter) log() *slog.Logger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 // Addr returns the address the bot's webhook listener is bound to (host:port),
@@ -210,6 +222,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.srv = srv
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
+	a.logger = deps.Logger
 	a.mu.Unlock()
 
 	go func() {
@@ -238,7 +251,9 @@ func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if q.Get("hub.mode") == "subscribe" && tokenOK {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, q.Get("hub.challenge"))
+		// Echoing hub.challenge is Meta's verification protocol; the explicit
+		// text/plain Content-Type above prevents HTML interpretation.
+		_, _ = io.WriteString(w, q.Get("hub.challenge")) //nolint:gosec // plain-text echo, not HTML output
 		return
 	}
 	w.WriteHeader(http.StatusForbidden)
@@ -255,7 +270,7 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 		return
 	}
 
-	messages := parseWebhook(body)
+	messages := parseWebhook(a.log(), body)
 	w.WriteHeader(http.StatusOK)
 	if len(messages) == 0 {
 		return
@@ -297,7 +312,7 @@ func (a *adapter) Disconnect() error {
 	// already-acked messages, which is operationally significant.
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
-		log.Printf("whatsapp: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		a.log().Warn("whatsapp: drain deadline reached; canceling in-flight dispatches", "inflight", n)
 		drainErr = fmt.Errorf("whatsapp: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 
@@ -512,10 +527,10 @@ func (in inboundMessage) media() *mediaObject {
 // parseWebhook extracts inbound user messages from a Cloud API webhook payload.
 // A message that fails to parse is logged and skipped so one bad entry never
 // drops its valid siblings.
-func parseWebhook(body []byte) []*Message {
+func parseWebhook(logger *slog.Logger, body []byte) []*Message {
 	var env webhookEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		log.Printf("whatsapp: discarding webhook with unparseable body: %v", err)
+		logger.Warn("whatsapp: discarding webhook with unparseable body", "error", err)
 		return nil
 	}
 
@@ -529,7 +544,7 @@ func parseWebhook(body []byte) []*Message {
 			for _, raw := range change.Value.Messages {
 				m, err := parseMessage(raw)
 				if err != nil {
-					log.Printf("whatsapp: skipping unparseable message: %v", err)
+					logger.Warn("whatsapp: skipping unparseable message", "error", err)
 					continue
 				}
 				m.AuthorName = names[m.From]
