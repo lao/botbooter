@@ -336,13 +336,23 @@ func (a *adapter) drainDispatch(ctx context.Context) {
 	}
 }
 
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
+// Send POSTs text to channelID. With a threading option it quotes a message via
+// the Cloud API context.message_id: the resolved quote id is opts.ThreadID when
+// set, else the inbound message's ID; an empty id sends a plain message.
+func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
+	quoteID := opts.ThreadID
+	if quoteID == "" && opts.ReplyTo != nil {
+		quoteID = opts.ReplyTo.ID
+	}
 	payload := map[string]any{
 		"messaging_product": "whatsapp",
 		"recipient_type":    "individual",
 		"to":                channelID,
 		"type":              "text",
 		"text":              map[string]any{"preview_url": false, "body": text},
+	}
+	if quoteID != "" {
+		payload["context"] = map[string]any{"message_id": quoteID}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

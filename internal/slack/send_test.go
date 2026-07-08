@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
 	slackapi "github.com/slack-go/slack"
+
+	"github.com/lao/botbooter/internal/core"
 
 	"github.com/lao/botbooter/internal/asserts"
 )
@@ -44,7 +47,98 @@ func TestSend_SurfacesError(t *testing.T) {
 	client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(httpStub))
 	a := &adapter{client: client}
 
-	err := a.Send(context.Background(), "C123", "hello")
+	err := a.Send(context.Background(), "C123", "hello", core.SendOptions{})
 
 	asserts.Error(t, err, "Send should surface the Slack API error")
+}
+
+// capturingRoundTripper records the form values of the last request so a test
+// can assert what was posted to the Web API.
+type capturingRoundTripper struct {
+	form url.Values
+}
+
+func (c *capturingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	c.form, _ = url.ParseQuery(string(body))
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Request:    req,
+	}, nil
+}
+
+// TestSend_Threading verifies the resolved SendOptions map to thread_ts: an
+// InReplyTo threaded message replies inside its thread (thread_ts = ReplyToID),
+// a top-level message replies in the channel with no thread_ts, and a raw
+// WithThreadID is used verbatim.
+func TestSend_Threading(t *testing.T) {
+	newAdapter := func(rt *capturingRoundTripper) *adapter {
+		client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(&http.Client{Transport: rt}))
+		return &adapter{client: client}
+	}
+
+	t.Run("InReplyToThreadedMessageRepliesInThread", func(t *testing.T) {
+		rt := &capturingRoundTripper{}
+		a := newAdapter(rt)
+
+		err := a.Send(context.Background(), "C1", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "C1", ID: "200.2", ReplyToID: "100.1"}})
+
+		asserts.NoError(t, err, "Send")
+		asserts.Equal(t, rt.form.Get("thread_ts"), "100.1", "thread_ts should be the thread root")
+		asserts.Equal(t, rt.form.Get("channel"), "C1", "channel")
+	})
+
+	t.Run("InReplyToTopLevelMessageRepliesInChannel", func(t *testing.T) {
+		rt := &capturingRoundTripper{}
+		a := newAdapter(rt)
+
+		err := a.Send(context.Background(), "C1", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "C1", ID: "200.2"}})
+
+		asserts.NoError(t, err, "Send")
+		asserts.Equal(t, rt.form.Get("thread_ts"), "", "a top-level message must not start a thread")
+	})
+
+	t.Run("WithThreadIDUsedVerbatim", func(t *testing.T) {
+		rt := &capturingRoundTripper{}
+		a := newAdapter(rt)
+
+		err := a.Send(context.Background(), "C1", "hi", core.SendOptions{ThreadID: "999.9"})
+
+		asserts.NoError(t, err, "Send")
+		asserts.Equal(t, rt.form.Get("thread_ts"), "999.9", "raw ThreadID becomes thread_ts")
+	})
+
+	t.Run("ThreadIDWinsOverReplyTo", func(t *testing.T) {
+		rt := &capturingRoundTripper{}
+		a := newAdapter(rt)
+
+		err := a.Send(context.Background(), "C1", "hi", core.SendOptions{
+			ThreadID: "999.9",
+			ReplyTo:  &core.Message{ChannelID: "C1", ID: "200.2", ReplyToID: "100.1"},
+		})
+
+		asserts.NoError(t, err, "Send")
+		asserts.Equal(t, rt.form.Get("thread_ts"), "999.9", "explicit ThreadID wins over the ReplyTo anchor")
+	})
+}
+
+// TestReply_RoutesThroughAdapter is the end-to-end guard: (*core.Bot).Reply on a
+// real Slack adapter must reach the threaded Send path (thread_ts set), not a
+// channel-root plain send.
+func TestReply_RoutesThroughAdapter(t *testing.T) {
+	rt := &capturingRoundTripper{}
+	client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(&http.Client{Transport: rt}))
+	bot := core.New(core.SlackBotType, &adapter{client: client})
+
+	err := bot.Reply(context.Background(),
+		&core.Message{ChannelID: "C1", ID: "200.2", ReplyToID: "100.1"}, "hi")
+
+	asserts.NoError(t, err, "Reply")
+	asserts.Equal(t, rt.form.Get("thread_ts"), "100.1", "Reply threaded the reply via Send options")
 }

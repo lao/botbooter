@@ -367,4 +367,77 @@ in the README. **Use it with trusted local input only.**
 
 ---
 
+## Threaded replies
+
+Threading is a **send option**, not a separate method. Pass one to
+`b.SendMessageContext` (or `b.SendMessage`); with no option a send is a plain
+channel message. `b.Reply(ctx, m, text)` is sugar for the common case —
+`SendMessageContext(ctx, m.ChannelID, text, InReplyTo(m))`.
+
+Two options carry the anchor:
+
+- **`botbooter.InReplyTo(m)`** — pass the whole inbound `Message`; each adapter
+  derives its own correct anchor from it. You never compute a thread id.
+- **`botbooter.WithThreadID(id)`** — a raw native anchor the adapter uses
+  verbatim. It **takes precedence** over `InReplyTo`. Its meaning is
+  platform-specific (see the table), so you own platform-correctness.
+
+`InReplyTo` derives from one of two fields off the `Message`:
+
+- **`m.ReplyToID`** — the thread root / replied-to id the platform delivered
+  (`""` when the message is top-level in a channel).
+- **`m.ID`** — the message's own id.
+
+### Per-platform anchor
+
+| Platform | `InReplyTo(m)` derives from | Raw `WithThreadID(id)` is | On the wire | When the anchor is empty |
+|---|---|---|---|---|
+| **Slack** | `m.ReplyToID` (the thread root, `ThreadTimeStamp`) | a `thread_ts` | `thread_ts` on `chat.postMessage` | top-level message ⇒ plain top-level reply (does **not** open a new thread off `m.ID`; a raw `WithThreadID` of a top-level ts *will* start one) |
+| **Discord** | `m.ID` | a **reply message id** (not a Discord thread-channel id) | inline reply via `message_reference.message_id` | plain channel send |
+| **Telegram** | `m.ID` | a **reply message id** | `reply_parameters.message_id` | plain send. A *derived* id that isn't a positive integer degrades to a plain send; an *explicit* `WithThreadID` that isn't returns an error |
+| **WhatsApp** | `m.ID` | a **quote message id** | `context.message_id` (a quoted reply) | plain send (no `context`) |
+| **Teams** | — (options ignored) | — | — | always a plain channel send |
+| **CLI** | — (options ignored) | — | — | always a plain channel send |
+
+The reply anchor assumes you send to the message's **own channel**; e.g. a
+cross-channel Discord `InReplyTo` builds a `message_reference` for another
+channel, which Discord rejects.
+
+### Why the anchor differs
+
+`ReplyToID` means different things per platform: on Slack it's the **thread
+root**, so replying with it keeps the answer in the same thread; on
+Discord/Telegram it's the specific **replied-to message**, and the natural reply
+target is the *received* message itself (`m.ID`), not the chain root. A single
+core-computed anchor would mis-anchor half the platforms, so each adapter owns
+the choice — which is why `InReplyTo` carries the whole `Message` rather than a
+pre-computed id.
+
+### The two scenarios
+
+- **The triggering message is already inside a thread.** `InReplyTo(m)` continues
+  that same thread — Slack anchors on the thread root (`m.ReplyToID`);
+  Discord/Telegram/WhatsApp reference/quote `m.ID`.
+- **The triggering message is a top-level channel comment.** `InReplyTo(m)`
+  answers that comment directly, anchored on it (Discord inline reply, Telegram
+  `reply_to_message_id`, WhatsApp quote). On Slack a top-level message has no
+  thread root, so the reply is a plain top-level message in the channel — the
+  `InReplyTo` path intentionally does **not** start a fresh thread off it (use a
+  raw `WithThreadID(m.ID)` if you deliberately want to open one).
+
+### Fallback & errors
+
+A send degrades to a plain channel message when the adapter ignores the options
+(Teams, CLI) **or** the anchor resolves to nothing — it never fails just because
+a message can't be threaded. The one loud exception is an explicit
+`WithThreadID` that a platform can't use (an id that isn't a positive message id
+on Telegram), which returns an error rather than silently dropping. `Reply` returns an error only
+when the bot has no adapter or `m` is `nil`.
+
+To reach beyond these normalized semantics (Slack broadcast replies, message
+edits, etc.), drop to the raw SDK client via the per-platform accessors — see
+[Raw platform access](../README.md#raw-platform-access).
+
+---
+
 [← Back to the README](../README.md)
