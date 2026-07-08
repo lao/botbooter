@@ -540,12 +540,24 @@ func TestSend_Threading(t *testing.T) {
 		asserts.Equal(t, gotReply, "", "no reply_parameters when the derived id is non-numeric")
 	})
 
-	t.Run("NonNumericWithThreadIDErrors", func(t *testing.T) {
+	t.Run("ThreadIDWinsOverReplyTo", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, replyCapture(&gotReply))
+
+		err := a.Send(context.Background(), "555", "hi",
+			core.SendOptions{ThreadID: "43", ReplyTo: &core.Message{ChannelID: "555", ID: "42"}})
+
+		asserts.NoError(t, err, "Send")
+		asserts.True(t, strings.Contains(gotReply, `"message_id":43`), "explicit ThreadID wins over ReplyTo.ID")
+	})
+
+	t.Run("ExplicitNonPositiveThreadIDErrors", func(t *testing.T) {
 		a := newStubAdapter(t, 0, replyCapture(new(string)))
 
-		err := a.Send(context.Background(), "555", "hi", core.SendOptions{ThreadID: "not-a-number"})
-
-		asserts.Error(t, err, "an explicit non-numeric ThreadID must fail loudly, not drop silently")
+		for _, id := range []string{"not-a-number", "0", "-1"} {
+			err := a.Send(context.Background(), "555", "hi", core.SendOptions{ThreadID: id})
+			asserts.Error(t, err, "an explicit ThreadID that is not a positive message id must fail loudly")
+		}
 	})
 }
 

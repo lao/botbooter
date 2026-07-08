@@ -432,6 +432,19 @@ func TestSend_Threading(t *testing.T) {
 		_, hasContext := payload["context"]
 		asserts.True(t, !hasContext, "no context key when there is no anchor")
 	})
+
+	t.Run("ThreadIDWinsOverReplyTo", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi",
+			core.SendOptions{ThreadID: "wamid.RAW", ReplyTo: &core.Message{ChannelID: "123", ID: "wamid.X"}})
+
+		asserts.NoError(t, err, "Send")
+		ctx, _ := payload["context"].(map[string]any)
+		asserts.Equal(t, ctx["message_id"], "wamid.RAW", "explicit ThreadID wins over ReplyTo.ID")
+	})
 }
 
 // The adapter must satisfy the optional AttachmentResolver so the unified

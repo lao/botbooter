@@ -299,12 +299,13 @@ func (r *recordingStub) Send(_ context.Context, channelID, text string, opts Sen
 func TestResolveSendOptions_PrecedenceAndNilSkip(t *testing.T) {
 	m := &Message{ID: "1.0", ReplyToID: "0.9"}
 
-	// WithThreadID wins over InReplyTo; a nil option is skipped without panicking.
+	// resolveSendOptions folds each option into its own field (the adapters apply
+	// ThreadID-over-ReplyTo precedence, tested per-adapter); a nil option is skipped.
 	got := resolveSendOptions(InReplyTo(m), nil, WithThreadID("RAW"))
-	asserts.Equal(t, got.ThreadID, "RAW", "explicit ThreadID wins over the derived anchor")
-	asserts.Equal(t, got.ReplyTo, m, "ReplyTo is still carried alongside ThreadID")
+	asserts.Equal(t, got.ThreadID, "RAW", "ThreadID field carried")
+	asserts.Equal(t, got.ReplyTo, m, "ReplyTo field carried alongside ThreadID")
 
-	// Order-independent: last write wins per field, and no options is the zero value.
+	// No options yields the zero value; a lone nil option is a no-op.
 	asserts.Equal(t, resolveSendOptions().ThreadID, "", "no options yields the zero SendOptions")
 	asserts.True(t, resolveSendOptions(nil).ReplyTo == nil, "a lone nil option is a no-op")
 }

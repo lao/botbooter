@@ -106,6 +106,21 @@ func TestSend_Threading(t *testing.T) {
 		asserts.NoError(t, err, "Send with no anchor")
 		asserts.True(t, !strings.Contains(rt.body, "message_reference"), "no reference when there is no anchor")
 	})
+
+	t.Run("ThreadIDWinsOverReplyTo", func(t *testing.T) {
+		a := newTestAdapter(t)
+		rt := &capturingRoundTripper{}
+		a.session.Client = &http.Client{Transport: rt}
+
+		err := a.Send(context.Background(), "C1", "hi", core.SendOptions{
+			ThreadID: "RAW7",
+			ReplyTo:  &core.Message{ChannelID: "C1", ID: "M9"},
+		})
+
+		asserts.NoError(t, err, "Send")
+		asserts.True(t, strings.Contains(rt.body, `"message_id":"RAW7"`), "explicit ThreadID wins over ReplyTo.ID")
+		asserts.True(t, !strings.Contains(rt.body, `"message_id":"M9"`), "the ReplyTo anchor is not used")
+	})
 }
 
 func TestAttachments(t *testing.T) {

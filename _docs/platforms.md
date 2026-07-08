@@ -394,7 +394,7 @@ Two options carry the anchor:
 |---|---|---|---|---|
 | **Slack** | `m.ReplyToID` (the thread root, `ThreadTimeStamp`) | a `thread_ts` | `thread_ts` on `chat.postMessage` | top-level message ⇒ plain top-level reply (does **not** open a new thread off `m.ID`; a raw `WithThreadID` of a top-level ts *will* start one) |
 | **Discord** | `m.ID` | a **reply message id** (not a Discord thread-channel id) | inline reply via `message_reference.message_id` | plain channel send |
-| **Telegram** | `m.ID` | a **reply message id** | `reply_parameters.message_id` | plain send. A non-numeric *derived* id degrades to a plain send; a non-numeric *explicit* `WithThreadID` returns an error |
+| **Telegram** | `m.ID` | a **reply message id** | `reply_parameters.message_id` | plain send. A *derived* id that isn't a positive integer degrades to a plain send; an *explicit* `WithThreadID` that isn't returns an error |
 | **WhatsApp** | `m.ID` | a **quote message id** | `context.message_id` (a quoted reply) | plain send (no `context`) |
 | **Teams** | — (options ignored) | — | — | always a plain channel send |
 | **CLI** | — (options ignored) | — | — | always a plain channel send |
@@ -430,8 +430,8 @@ pre-computed id.
 A send degrades to a plain channel message when the adapter ignores the options
 (Teams, CLI) **or** the anchor resolves to nothing — it never fails just because
 a message can't be threaded. The one loud exception is an explicit
-`WithThreadID` that a platform can't use (a non-numeric id on Telegram), which
-returns an error rather than silently dropping. `Reply` returns an error only
+`WithThreadID` that a platform can't use (an id that isn't a positive message id
+on Telegram), which returns an error rather than silently dropping. `Reply` returns an error only
 when the bot has no adapter or `m` is `nil`.
 
 To reach beyond these normalized semantics (Slack broadcast replies, message

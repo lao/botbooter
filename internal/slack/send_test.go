@@ -113,6 +113,19 @@ func TestSend_Threading(t *testing.T) {
 		asserts.NoError(t, err, "Send")
 		asserts.Equal(t, rt.form.Get("thread_ts"), "999.9", "raw ThreadID becomes thread_ts")
 	})
+
+	t.Run("ThreadIDWinsOverReplyTo", func(t *testing.T) {
+		rt := &capturingRoundTripper{}
+		a := newAdapter(rt)
+
+		err := a.Send(context.Background(), "C1", "hi", core.SendOptions{
+			ThreadID: "999.9",
+			ReplyTo:  &core.Message{ChannelID: "C1", ID: "200.2", ReplyToID: "100.1"},
+		})
+
+		asserts.NoError(t, err, "Send")
+		asserts.Equal(t, rt.form.Get("thread_ts"), "999.9", "explicit ThreadID wins over the ReplyTo anchor")
+	})
 }
 
 // TestReply_RoutesThroughAdapter is the end-to-end guard: (*core.Bot).Reply on a
