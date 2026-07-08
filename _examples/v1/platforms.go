@@ -8,6 +8,7 @@ import (
 	"github.com/lao/botbooter"
 	"github.com/lao/botbooter/cli"
 	"github.com/lao/botbooter/discord"
+	"github.com/lao/botbooter/signal"
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
@@ -46,10 +47,15 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Addr:        os.Getenv("TEAMS_ADDR"),
 			Path:        os.Getenv("TEAMS_PATH"), // optional; defaults to /api/messages
 		})
+	case "signal":
+		return signal.New(signal.Config{
+			Address: os.Getenv("SIGNAL_ADDR"),    // signal-cli daemon socket, e.g. "127.0.0.1:7583"
+			Account: os.Getenv("SIGNAL_ACCOUNT"), // optional; the bot's own E.164 number
+		})
 	case "cli":
 		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)
 		return cli.New(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, teams or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, teams, signal or cli)", botType)
 	}
 }
