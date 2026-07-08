@@ -372,7 +372,7 @@ func TestSend(t *testing.T) {
 	a.cfg.PhoneNumberID = "PNID"
 	a.cfg.Token = "tok"
 
-	err := a.Send(context.Background(), "123", "hi there")
+	err := a.Send(context.Background(), "123", "hi there", core.SendOptions{})
 
 	asserts.NoError(t, err, "Send should succeed on 200")
 	asserts.Equal(t, gotMethod, http.MethodPost, "Send should POST")
@@ -397,14 +397,79 @@ func TestSend_Error(t *testing.T) {
 	a.baseURL = srv.URL
 	a.http = srv.Client()
 
-	err := a.Send(context.Background(), "123", "hi")
+	err := a.Send(context.Background(), "123", "hi", core.SendOptions{})
 
 	asserts.Error(t, err, "non-2xx response should error")
 	asserts.True(t, strings.Contains(err.Error(), "24 hour"), "error should carry the response body")
 }
 
-// The adapter must satisfy the optional core capability so the unified
-// (*core.Bot).ResolveAttachmentURL routes to it rather than the att.URL
+func TestSend_Threading(t *testing.T) {
+	newSrv := func(payload *map[string]any) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(payload)
+			w.WriteHeader(http.StatusOK)
+		}))
+	}
+	newAdapter := func(srv *httptest.Server) *adapter {
+		a := testAdapter()
+		a.baseURL = srv.URL
+		a.http = srv.Client()
+		return a
+	}
+
+	t.Run("InReplyToQuotesMessageID", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "123", ID: "wamid.X"}})
+
+		asserts.NoError(t, err, "Send should succeed on 200")
+		ctx, _ := payload["context"].(map[string]any)
+		asserts.Equal(t, ctx["message_id"], "wamid.X", "context.message_id quotes the message")
+	})
+
+	t.Run("WithThreadIDQuotesRawID", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi", core.SendOptions{ThreadID: "wamid.RAW"})
+
+		asserts.NoError(t, err, "Send")
+		ctx, _ := payload["context"].(map[string]any)
+		asserts.Equal(t, ctx["message_id"], "wamid.RAW", "context.message_id quotes the raw ThreadID")
+	})
+
+	t.Run("NoAnchorOmitsContext", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi", core.SendOptions{})
+
+		asserts.NoError(t, err, "Send with no anchor")
+		_, hasContext := payload["context"]
+		asserts.True(t, !hasContext, "no context key when there is no anchor")
+	})
+
+	t.Run("ThreadIDWinsOverReplyTo", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi",
+			core.SendOptions{ThreadID: "wamid.RAW", ReplyTo: &core.Message{ChannelID: "123", ID: "wamid.X"}})
+
+		asserts.NoError(t, err, "Send")
+		ctx, _ := payload["context"].(map[string]any)
+		asserts.Equal(t, ctx["message_id"], "wamid.RAW", "explicit ThreadID wins over ReplyTo.ID")
+	})
+}
+
+// The adapter must satisfy the optional AttachmentResolver so the unified
+// (*core.Bot).ResolveAttachmentURL routes to it rather than the default
 // passthrough (guards the pointer-receiver method-set trap).
 var _ core.AttachmentResolver = (*adapter)(nil)
 

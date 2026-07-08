@@ -21,6 +21,9 @@ var ErrUnknownBotType = errors.New("botbooter: unknown bot type")
 // ErrAlreadyConnected is returned by Connect when the Bot is already connected.
 var ErrAlreadyConnected = errors.New("botbooter: already connected")
 
+// ErrNilMessage is returned by Bot methods handed a nil *Message argument.
+var ErrNilMessage = errors.New("botbooter: nil message")
+
 // BotType identifies the messaging platform a Bot is connected to.
 type BotType int
 
@@ -107,7 +110,7 @@ type Attachment struct {
 type Adapter interface {
 	Connect(ctx context.Context, deps AdapterDeps) error
 	Disconnect() error
-	Send(ctx context.Context, channelID, text string) error
+	Send(ctx context.Context, channelID, text string, opts SendOptions) error
 	Attachments(m *Message) ([]Attachment, error)
 }
 
@@ -116,6 +119,45 @@ type Adapter interface {
 // usable ride the passthrough in [Bot.ResolveAttachmentURL].
 type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
+}
+
+// SendOptions is the resolved set of per-send modifiers an Adapter reads off a
+// Send call. Its zero value means "a plain channel message". A threading anchor
+// is platform-specific, so each adapter derives its own from these fields:
+//   - ReplyTo: reply anchored on this whole message; the adapter picks the
+//     correct native anchor (Slack thread_ts from ReplyToID; Discord/Telegram/
+//     WhatsApp the replied-to/quoted message id).
+//   - ThreadID: a raw native anchor supplied by the caller, used verbatim. It
+//     wins over ReplyTo when both are set. On Slack it is a thread_ts; on
+//     Discord/Telegram/WhatsApp a reply/quote message id (NOT a Discord
+//     thread-channel id).
+type SendOptions struct {
+	ReplyTo  *Message
+	ThreadID string
+}
+
+// SendOption modifies a SendOptions. Construct them with [InReplyTo] /
+// [WithThreadID] and pass them to [Bot.SendMessageContext] / [Bot.SendMessage].
+type SendOption func(*SendOptions)
+
+// InReplyTo anchors the send on m so the adapter posts into m's thread or
+// reply-chain, deriving the correct per-platform anchor itself.
+func InReplyTo(m *Message) SendOption { return func(o *SendOptions) { o.ReplyTo = m } }
+
+// WithThreadID anchors the send on a raw native id the adapter uses verbatim.
+// It takes precedence over [InReplyTo]. The caller owns platform-correctness.
+func WithThreadID(id string) SendOption { return func(o *SendOptions) { o.ThreadID = id } }
+
+// resolveSendOptions folds opts into a single SendOptions, skipping nil options
+// so a conditionally-built option slice can carry a nil entry without panicking.
+func resolveSendOptions(opts ...SendOption) SendOptions {
+	var o SendOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	return o
 }
 
 // AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot,
@@ -369,20 +411,40 @@ func (b *Bot) Start() error {
 // SendMessage sends text to channelID using a background context. Prefer
 // SendMessageContext from within a handler so the send honors shutdown and
 // cancellation; SendMessage's background context outlives Run's teardown.
-func (b *Bot) SendMessage(channelID, text string) error {
-	return b.SendMessageContext(context.Background(), channelID, text)
+func (b *Bot) SendMessage(channelID, text string, opts ...SendOption) error {
+	return b.SendMessageContext(context.Background(), channelID, text, opts...)
 }
 
 // SendMessageContext sends text to channelID, honoring ctx for cancellation.
-func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) error {
+// Pass [InReplyTo] or [WithThreadID] to thread the message onto an inbound one;
+// with no options it is a plain channel message.
+func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string, opts ...SendOption) error {
 	if b.adapter == nil {
 		return ErrUnknownBotType
 	}
-	return b.adapter.Send(ctx, channelID, text)
+	return b.adapter.Send(ctx, channelID, text, resolveSendOptions(opts...))
 }
 
-// GetAttachments returns the platform-agnostic attachments of message.
+// Reply is convenience sugar for replying into the thread or reply-chain of the
+// inbound message m — it is exactly SendMessageContext(ctx, m.ChannelID, text,
+// InReplyTo(m)). Each adapter derives its own platform-specific anchor; see
+// [SendOptions]. It returns ErrNilMessage if m is nil, or ErrUnknownBotType if
+// the Bot has no adapter.
+func (b *Bot) Reply(ctx context.Context, m *Message, text string) error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	// A nil adapter is caught by the delegated SendMessageContext.
+	return b.SendMessageContext(ctx, m.ChannelID, text, InReplyTo(m))
+}
+
+// GetAttachments returns the platform-agnostic attachments of message. It
+// returns ErrNilMessage if message is nil, or ErrUnknownBotType if the Bot has
+// no adapter.
 func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
+	if message == nil {
+		return nil, ErrNilMessage
+	}
 	if b.adapter == nil {
 		return nil, ErrUnknownBotType
 	}

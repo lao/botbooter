@@ -167,9 +167,22 @@ func (a *adapter) Disconnect() error {
 	return err
 }
 
-// Send posts text to channelID via the Web API.
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	_, _, err := a.client.PostMessageContext(ctx, channelID, slackapi.MsgOptionText(text, false))
+// Send posts text to channelID via the Web API. With a threading option it posts
+// into a thread: the resolved thread_ts is opts.ThreadID when set, else the
+// inbound message's ReplyToID (its ThreadTimeStamp). A top-level channel message
+// has no ReplyToID, so InReplyTo yields no thread_ts and a plain top-level reply
+// — m.ID is deliberately not used as a thread_ts, which would start a stray
+// sub-thread. A caller can still force one via WithThreadID.
+func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
+	threadTS := opts.ThreadID
+	if threadTS == "" && opts.ReplyTo != nil {
+		threadTS = opts.ReplyTo.ReplyToID
+	}
+	msgOpts := []slackapi.MsgOption{slackapi.MsgOptionText(text, false)}
+	if threadTS != "" {
+		msgOpts = append(msgOpts, slackapi.MsgOptionTS(threadTS))
+	}
+	_, _, err := a.client.PostMessageContext(ctx, channelID, msgOpts...)
 	return err
 }
 

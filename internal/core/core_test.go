@@ -268,20 +268,29 @@ func TestBot_GetAttachments_UnknownBotType(t *testing.T) {
 	asserts.Equal(t, len(attachments), 0, "Attachments should be empty for unknown bot type")
 }
 
+func TestBot_GetAttachments_NilMessage(t *testing.T) {
+	bot := New(SlackBotType, &recordingStub{})
+
+	attachments, err := bot.GetAttachments(nil)
+
+	asserts.ErrorIs(t, err, ErrNilMessage, "GetAttachments with a nil message returns ErrNilMessage")
+	asserts.Equal(t, len(attachments), 0, "no attachments for a nil message")
+}
+
 // stubAdapter is a minimal core.Adapter used to exercise AdapterAs.
 type stubAdapter struct{ name string }
 
-func (s *stubAdapter) Connect(context.Context, AdapterDeps) error { return nil }
-func (s *stubAdapter) Disconnect() error                          { return nil }
-func (s *stubAdapter) Send(context.Context, string, string) error { return nil }
-func (s *stubAdapter) Attachments(*Message) ([]Attachment, error) { return nil, nil }
+func (s *stubAdapter) Connect(context.Context, AdapterDeps) error              { return nil }
+func (s *stubAdapter) Disconnect() error                                       { return nil }
+func (s *stubAdapter) Send(context.Context, string, string, SendOptions) error { return nil }
+func (s *stubAdapter) Attachments(*Message) ([]Attachment, error)              { return nil, nil }
 
 type adapterMismatch struct{}
 
-func (a *adapterMismatch) Connect(context.Context, AdapterDeps) error { return nil }
-func (a *adapterMismatch) Disconnect() error                          { return nil }
-func (a *adapterMismatch) Send(context.Context, string, string) error { return nil }
-func (a *adapterMismatch) Attachments(*Message) ([]Attachment, error) { return nil, nil }
+func (a *adapterMismatch) Connect(context.Context, AdapterDeps) error              { return nil }
+func (a *adapterMismatch) Disconnect() error                                       { return nil }
+func (a *adapterMismatch) Send(context.Context, string, string, SendOptions) error { return nil }
+func (a *adapterMismatch) Attachments(*Message) ([]Attachment, error)              { return nil, nil }
 
 func TestAdapterAs(t *testing.T) {
 	stub := &stubAdapter{name: "x"}
@@ -309,6 +318,79 @@ func (r *resolverStub) ResolveAttachmentURL(ctx context.Context, _ Attachment) (
 	r.called = true
 	r.gotCtx = ctx
 	return r.url, r.err
+}
+
+// recordingStub is a stubAdapter that records what its Send received, so a test
+// can assert the resolved SendOptions the Bot forwarded to the adapter.
+type recordingStub struct {
+	stubAdapter
+	gotChannel string
+	gotText    string
+	gotOpts    SendOptions
+	calls      int
+}
+
+func (r *recordingStub) Send(_ context.Context, channelID, text string, opts SendOptions) error {
+	r.gotChannel = channelID
+	r.gotText = text
+	r.gotOpts = opts
+	r.calls++
+	return nil
+}
+
+func TestResolveSendOptions_PrecedenceAndNilSkip(t *testing.T) {
+	m := &Message{ID: "1.0", ReplyToID: "0.9"}
+
+	// resolveSendOptions folds each option into its own field (the adapters apply
+	// ThreadID-over-ReplyTo precedence, tested per-adapter); a nil option is skipped.
+	got := resolveSendOptions(InReplyTo(m), nil, WithThreadID("RAW"))
+	asserts.Equal(t, got.ThreadID, "RAW", "ThreadID field carried")
+	asserts.Equal(t, got.ReplyTo, m, "ReplyTo field carried alongside ThreadID")
+
+	// No options yields the zero value; a lone nil option is a no-op.
+	asserts.Equal(t, resolveSendOptions().ThreadID, "", "no options yields the zero SendOptions")
+	asserts.True(t, resolveSendOptions(nil).ReplyTo == nil, "a lone nil option is a no-op")
+}
+
+func TestBot_SendMessageContext_ForwardsResolvedOptions(t *testing.T) {
+	stub := &recordingStub{}
+	bot := New(SlackBotType, stub)
+	m := &Message{ChannelID: "C1", ID: "1.0", ReplyToID: "0.9"}
+
+	asserts.NoError(t, bot.SendMessageContext(context.Background(), "C1", "hi", InReplyTo(m)),
+		"SendMessageContext with an option")
+	asserts.Equal(t, stub.gotOpts.ReplyTo, m, "adapter received the ReplyTo anchor")
+	asserts.Equal(t, stub.gotText, "hi", "adapter received the text")
+
+	// No options → zero SendOptions reaches the adapter (plain send).
+	stub.gotOpts = SendOptions{ReplyTo: m}
+	asserts.NoError(t, bot.SendMessageContext(context.Background(), "C1", "plain"), "plain send")
+	asserts.True(t, stub.gotOpts.ReplyTo == nil, "a plain send forwards the zero SendOptions")
+}
+
+func TestBot_Reply_ForwardsInReplyTo(t *testing.T) {
+	stub := &recordingStub{}
+	bot := New(SlackBotType, stub)
+	m := &Message{ChannelID: "C1", ID: "1.0", ReplyToID: "0.9"}
+
+	asserts.NoError(t, bot.Reply(context.Background(), m, "hi"), "Reply")
+	asserts.Equal(t, stub.gotChannel, "C1", "Reply sends to the message's channel")
+	asserts.Equal(t, stub.gotOpts.ReplyTo, m, "Reply forwards InReplyTo(m)")
+	asserts.Equal(t, stub.calls, 1, "Reply sends exactly once")
+}
+
+func TestBot_Reply_NilAdapter(t *testing.T) {
+	bot := &Bot{BotType: BotType(999)}
+
+	err := bot.Reply(context.Background(), &Message{ID: "1"}, "hi")
+	asserts.ErrorIs(t, err, ErrUnknownBotType, "Reply with no adapter")
+}
+
+func TestBot_Reply_NilMessage(t *testing.T) {
+	bot := New(SlackBotType, &recordingStub{})
+
+	err := bot.Reply(context.Background(), nil, "hi")
+	asserts.ErrorIs(t, err, ErrNilMessage, "Reply with a nil message returns ErrNilMessage, not a bot-type error")
 }
 
 func TestBot_ResolveAttachmentURL_NilAdapter(t *testing.T) {

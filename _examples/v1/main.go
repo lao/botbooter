@@ -57,7 +57,9 @@ func (b *ExampleBot) echo(ctx context.Context, _ *botbooter.Bot, message *botboo
 	log.Printf("echo command: %q", message.Content)
 
 	reply := "You said: " + strings.TrimPrefix(message.Content, "echo ")
-	if err := b.SendMessageContext(ctx, message.ChannelID, reply); err != nil {
+	// Reply threads the response into the triggering message (e.g. inside a Slack
+	// thread) instead of posting to the channel root as SendMessageContext would.
+	if err := b.Reply(ctx, message, reply); err != nil {
 		log.Println("failed to send message:", err)
 	}
 }

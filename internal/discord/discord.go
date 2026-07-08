@@ -106,8 +106,28 @@ func (a *adapter) Disconnect() error {
 	return a.session.Close()
 }
 
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	_, err := a.session.ChannelMessageSend(channelID, text, discordgo.WithContext(ctx))
+// Send posts text to channelID. With a threading option it posts an inline reply
+// referencing the resolved message id (opts.ThreadID when set, else the inbound
+// message's ID). With no id to reference it degrades to a plain channel send,
+// since an empty MessageReference is an invalid Discord API request. The
+// reference is built against channelID, so an anchor only works when sending to
+// the message's own channel.
+//
+// Discord defaults message references to fail_if_not_exists=true and discordgo
+// v0.27.1's MessageReference exposes no field to override it, so replying to a
+// since-deleted message fails the whole send rather than degrading to a plain
+// message. Lifting that needs a discordgo bump.
+func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
+	refID := opts.ThreadID
+	if refID == "" && opts.ReplyTo != nil {
+		refID = opts.ReplyTo.ID
+	}
+	if refID == "" {
+		_, err := a.session.ChannelMessageSend(channelID, text, discordgo.WithContext(ctx))
+		return err
+	}
+	ref := &discordgo.MessageReference{MessageID: refID, ChannelID: channelID}
+	_, err := a.session.ChannelMessageSendReply(channelID, text, ref, discordgo.WithContext(ctx))
 	return err
 }
 
