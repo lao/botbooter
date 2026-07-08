@@ -22,3 +22,6 @@ coverage.txt
 .plans/
 todo.md
 _docs/superpowers/
+
+# Working documents (plans/specs) — kept local, not part of the library
+docs/superpowers/
