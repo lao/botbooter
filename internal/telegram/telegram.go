@@ -92,17 +92,22 @@ func (a *adapter) Disconnect() error {
 // Send posts text to channelID. With a threading option it sets
 // reply_to_message_id from the resolved anchor: opts.ThreadID when set, else the
 // inbound message's ID (the received message — the intended reply-quote
-// semantics, NOT ReplyToID). A non-numeric anchor — never expected from
-// Telegram's own ids, but possible via a caller-supplied WithThreadID — silently
-// degrades to a plain send.
+// semantics, NOT ReplyToID). A ReplyTo-derived id that isn't a positive integer
+// (never expected from Telegram's own ids) degrades to a plain send; an explicit
+// WithThreadID that isn't returns an error, so a caller-supplied wrong-platform
+// or malformed id fails loudly instead of silently dropping the anchor.
 func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
 	idStr := opts.ThreadID
-	if idStr == "" && opts.ReplyTo != nil {
+	explicit := idStr != ""
+	if !explicit && opts.ReplyTo != nil {
 		idStr = opts.ReplyTo.ID
 	}
 	params := &bot.SendMessageParams{ChatID: chatID(channelID), Text: text}
-	if id, err := strconv.Atoi(idStr); err == nil {
+	switch id, err := strconv.Atoi(idStr); {
+	case err == nil && id > 0:
 		params.ReplyParameters = &models.ReplyParameters{MessageID: id}
+	case explicit:
+		return fmt.Errorf("telegram: thread id %q is not a positive message id", opts.ThreadID)
 	}
 	_, err := a.currentClient().SendMessage(ctx, params)
 	return err

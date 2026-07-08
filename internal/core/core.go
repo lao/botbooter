@@ -398,9 +398,10 @@ func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string, op
 // [SendOptions]. It returns ErrUnknownBotType if the Bot has no adapter or m is
 // nil.
 func (b *Bot) Reply(ctx context.Context, m *Message, text string) error {
-	if b.adapter == nil || m == nil {
+	if m == nil {
 		return ErrUnknownBotType
 	}
+	// A nil adapter is caught by the delegated SendMessageContext.
 	return b.SendMessageContext(ctx, m.ChannelID, text, InReplyTo(m))
 }
 
