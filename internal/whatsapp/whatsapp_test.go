@@ -382,10 +382,54 @@ func TestSend_Error(t *testing.T) {
 	asserts.True(t, strings.Contains(err.Error(), "24 hour"), "error should carry the response body")
 }
 
-// The adapter must satisfy the optional core capability so the unified
-// (*core.Bot).ResolveAttachmentURL routes to it rather than the att.URL
+func TestSendThreaded(t *testing.T) {
+	newSrv := func(payload *map[string]any) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(payload)
+			w.WriteHeader(http.StatusOK)
+		}))
+	}
+
+	t.Run("QuotesMessageID", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		a := testAdapter()
+		a.baseURL = srv.URL
+		a.http = srv.Client()
+
+		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "123", ID: "wamid.X"}, "hi")
+
+		asserts.NoError(t, err, "SendThreaded should succeed on 200")
+		ctx, _ := payload["context"].(map[string]any)
+		asserts.Equal(t, ctx["message_id"], "wamid.X", "context.message_id quotes the message")
+	})
+
+	t.Run("EmptyIDOmitsContext", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		a := testAdapter()
+		a.baseURL = srv.URL
+		a.http = srv.Client()
+
+		err := a.SendThreaded(context.Background(), &core.Message{ChannelID: "123"}, "hi")
+
+		asserts.NoError(t, err, "SendThreaded with empty ID")
+		_, hasContext := payload["context"]
+		asserts.True(t, !hasContext, "no context key when there is no message id")
+	})
+}
+
+// The adapter must satisfy the optional core capabilities so the unified
+// (*core.Bot).ResolveAttachmentURL / Reply route to it rather than the default
 // passthrough (guards the pointer-receiver method-set trap).
-var _ core.AttachmentResolver = (*adapter)(nil)
+var (
+	_ core.AttachmentResolver = (*adapter)(nil)
+	_ core.ThreadedSender     = (*adapter)(nil)
+)
 
 func TestResolveAttachmentURL(t *testing.T) {
 	var gotMethod, gotPath, gotAuth string
