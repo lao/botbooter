@@ -17,6 +17,7 @@ import "github.com/lao/botbooter/internal/core"
 var (
 	ErrUnknownBotType   = core.ErrUnknownBotType
 	ErrAlreadyConnected = core.ErrAlreadyConnected
+	ErrNilMessage       = core.ErrNilMessage
 )
 
 // BotType identifies the messaging platform a [Bot] is connected to.

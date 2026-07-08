@@ -21,6 +21,9 @@ var ErrUnknownBotType = errors.New("botbooter: unknown bot type")
 // ErrAlreadyConnected is returned by Connect when the Bot is already connected.
 var ErrAlreadyConnected = errors.New("botbooter: already connected")
 
+// ErrNilMessage is returned by Bot methods handed a nil *Message argument.
+var ErrNilMessage = errors.New("botbooter: nil message")
+
 // BotType identifies the messaging platform a Bot is connected to.
 type BotType int
 
@@ -395,18 +398,23 @@ func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string, op
 // Reply is convenience sugar for replying into the thread or reply-chain of the
 // inbound message m — it is exactly SendMessageContext(ctx, m.ChannelID, text,
 // InReplyTo(m)). Each adapter derives its own platform-specific anchor; see
-// [SendOptions]. It returns ErrUnknownBotType if the Bot has no adapter or m is
-// nil.
+// [SendOptions]. It returns ErrNilMessage if m is nil, or ErrUnknownBotType if
+// the Bot has no adapter.
 func (b *Bot) Reply(ctx context.Context, m *Message, text string) error {
 	if m == nil {
-		return ErrUnknownBotType
+		return ErrNilMessage
 	}
 	// A nil adapter is caught by the delegated SendMessageContext.
 	return b.SendMessageContext(ctx, m.ChannelID, text, InReplyTo(m))
 }
 
-// GetAttachments returns the platform-agnostic attachments of message.
+// GetAttachments returns the platform-agnostic attachments of message. It
+// returns ErrNilMessage if message is nil, or ErrUnknownBotType if the Bot has
+// no adapter.
 func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
+	if message == nil {
+		return nil, ErrNilMessage
+	}
 	if b.adapter == nil {
 		return nil, ErrUnknownBotType
 	}

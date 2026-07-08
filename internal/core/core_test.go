@@ -235,6 +235,15 @@ func TestBot_GetAttachments_UnknownBotType(t *testing.T) {
 	asserts.Equal(t, len(attachments), 0, "Attachments should be empty for unknown bot type")
 }
 
+func TestBot_GetAttachments_NilMessage(t *testing.T) {
+	bot := New(SlackBotType, &recordingStub{})
+
+	attachments, err := bot.GetAttachments(nil)
+
+	asserts.ErrorIs(t, err, ErrNilMessage, "GetAttachments with a nil message returns ErrNilMessage")
+	asserts.Equal(t, len(attachments), 0, "no attachments for a nil message")
+}
+
 // stubAdapter is a minimal core.Adapter used to exercise AdapterAs.
 type stubAdapter struct{ name string }
 
@@ -348,7 +357,7 @@ func TestBot_Reply_NilMessage(t *testing.T) {
 	bot := New(SlackBotType, &recordingStub{})
 
 	err := bot.Reply(context.Background(), nil, "hi")
-	asserts.ErrorIs(t, err, ErrUnknownBotType, "Reply with a nil message must not panic")
+	asserts.ErrorIs(t, err, ErrNilMessage, "Reply with a nil message returns ErrNilMessage, not a bot-type error")
 }
 
 func TestBot_ResolveAttachmentURL_NilAdapter(t *testing.T) {
