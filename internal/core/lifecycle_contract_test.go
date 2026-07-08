@@ -33,7 +33,9 @@ func (a *watcherAdapter) Disconnect() error {
 	return nil
 }
 
-func (a *watcherAdapter) Send(ctx context.Context, channelID, text string) error { return nil }
+func (a *watcherAdapter) Send(ctx context.Context, channelID, text string, opts SendOptions) error {
+	return nil
+}
 
 func (a *watcherAdapter) Attachments(m *Message) ([]Attachment, error) { return nil, nil }
 
@@ -134,7 +136,9 @@ func (a *blockingAdapter) Disconnect() error {
 	return nil
 }
 
-func (a *blockingAdapter) Send(ctx context.Context, channelID, text string) error { return nil }
+func (a *blockingAdapter) Send(ctx context.Context, channelID, text string, opts SendOptions) error {
+	return nil
+}
 
 func (a *blockingAdapter) Attachments(m *Message) ([]Attachment, error) { return nil, nil }
 

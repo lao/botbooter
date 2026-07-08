@@ -39,10 +39,10 @@ func TestAttachments_NonSlackRaw(t *testing.T) {
 // exercise the nil branches of the package accessors.
 type nonSlackAdapter struct{}
 
-func (nonSlackAdapter) Connect(context.Context, core.AdapterDeps) error      { return nil }
-func (nonSlackAdapter) Disconnect() error                                    { return nil }
-func (nonSlackAdapter) Send(context.Context, string, string) error           { return nil }
-func (nonSlackAdapter) Attachments(*core.Message) ([]core.Attachment, error) { return nil, nil }
+func (nonSlackAdapter) Connect(context.Context, core.AdapterDeps) error              { return nil }
+func (nonSlackAdapter) Disconnect() error                                            { return nil }
+func (nonSlackAdapter) Send(context.Context, string, string, core.SendOptions) error { return nil }
+func (nonSlackAdapter) Attachments(*core.Message) ([]core.Attachment, error)         { return nil, nil }
 
 func TestClientAccessors_NonSlackBot(t *testing.T) {
 	bot := core.New(core.DiscordBotType, nonSlackAdapter{})
