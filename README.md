@@ -119,10 +119,11 @@ bot.AddMiddleware(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Messa
 
 ### Replies and threads
 
-Two ways to answer a message:
+A send is plain by default and threads only when you pass a **send option**:
 
-- **`b.SendMessageContext(ctx, m.ChannelID, text)`** — posts to the **channel root**. It ignores where the triggering message lives, so a reply to a message inside a thread lands back in the channel, detached from the conversation.
-- **`b.Reply(ctx, m, text)`** — posts into the **thread or reply-chain of `m`**, so the answer stays attached to what triggered it. Prefer this in handlers.
+- **`b.SendMessageContext(ctx, m.ChannelID, text)`** — plain message in the **channel root**. It ignores where the triggering message lives, so a reply to a message inside a thread lands back in the channel, detached.
+- **`b.SendMessageContext(ctx, m.ChannelID, text, botbooter.InReplyTo(m))`** — posts into the **thread or reply-chain of `m`**. Each adapter derives its own correct anchor from `m` — you don't compute one.
+- **`b.Reply(ctx, m, text)`** — convenience sugar for exactly the `InReplyTo(m)` call above. Prefer it in handlers.
 
 ```go
 bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
@@ -131,14 +132,14 @@ bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botboote
 })
 ```
 
-`Reply` is one call, but "thread" means something different on each platform, so each adapter derives its own anchor from the `Message` — you don't compute one. Two scenarios spell out the behavior:
+"Thread" means something different on each platform, so `InReplyTo(m)` hands the whole `Message` to the adapter and it picks the anchor. Two scenarios spell out the behavior:
 
 - **A comment already inside a thread** → the reply continues **that same thread**. On Slack the reply is posted with `thread_ts = m.ReplyToID` (the thread root the inbound message carried); on Discord/Telegram/WhatsApp it quotes / references `m.ID`.
 - **A top-level comment in a channel** → the reply is a **direct reply to that comment**, anchored on it, *not* forced into the channel root. On Slack a top-level message has no thread root, so it gets a plain top-level reply (Slack does **not** open a brand-new thread off it — that would only bury the reply under an empty thread); on Discord it becomes an inline reply referencing the message, on Telegram a `reply_to_message_id`, and on WhatsApp a quoted reply.
 
-Per-platform anchor semantics, the fallback rules, and how `ReplyToID` vs `ID` are chosen are documented in [_docs/platforms.md](_docs/platforms.md#threaded-replies).
+For a raw, platform-specific anchor there's **`botbooter.WithThreadID(id)`** — the adapter uses the string verbatim (a Slack `thread_ts`, or a reply/quote message id elsewhere) and it wins over `InReplyTo`. You own platform-correctness with it. Per-platform anchor semantics, the precedence and fallback rules, and how `ReplyToID` vs `ID` are chosen are documented in [_docs/platforms.md](_docs/platforms.md#threaded-replies).
 
-Fallback is automatic and safe: if the adapter has no threading capability (**Teams**, **CLI**) or `m` carries no usable anchor, `Reply` degrades to a plain channel `Send` — it never errors just because a message can't be threaded. `Reply` returns an error only when the bot has no adapter or `m` is `nil`.
+Fallback is automatic and safe: **Teams** and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send — a send never fails just because a message can't be threaded. `Reply` returns an error only when the bot has no adapter or `m` is `nil`.
 
 ### Attachments
 
