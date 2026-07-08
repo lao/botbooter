@@ -19,7 +19,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (Cloud API webhook), Microsoft Teams (Azure Bot Framework webhook), Signal (signal-cli JSON-RPC daemon), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (Cloud API webhook), Microsoft Teams (Azure Bot Framework webhook), Signal (signal-cli-rest-api container), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
@@ -72,7 +72,7 @@ go run ./_examples/v1 discord    # uses DISCORD_BOT_TOKEN
 go run ./_examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
 go run ./_examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
 go run ./_examples/v1 teams      # uses TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (+ optional TEAMS_APP_TENANT_ID / TEAMS_PATH)
-go run ./_examples/v1 signal     # uses SIGNAL_ADDR (+ optional SIGNAL_ACCOUNT)
+go run ./_examples/v1 signal     # uses SIGNAL_API_URL / SIGNAL_NUMBER
 ```
 
 ## Concepts
@@ -89,7 +89,7 @@ Import `botbooter` for the shared types plus the one `botbooter/<platform>` pack
 | `telegram.New(token string)` | `(*Bot, error)` | Long polling via `getUpdates`; BotFather token. |
 | `whatsapp.New(cfg whatsapp.Config)` | `(*Bot, error)` | Meta Cloud API; runs an inbound webhook HTTP server. |
 | `teams.New(cfg teams.Config)` | `(*Bot, error)` | Azure Bot Framework; runs an inbound webhook HTTP server. |
-| `signal.New(cfg signal.Config)` | `(*Bot, error)` | JSON-RPC to a signal-cli daemon over plain TCP. |
+| `signal.New(cfg signal.Config)` | `(*Bot, error)` | REST + WebSocket to a signal-cli-rest-api container. |
 
 ### Handlers, commands and middleware
 
@@ -128,7 +128,7 @@ for _, a := range attachments {
 }
 ```
 
-`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp, Signal). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp resolve one on demand. Signal has no URL to resolve: signal-cli stores attachment bytes on disk, read them from its attachment directory (see [_docs/platforms.md](_docs/platforms.md#signal)). The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram).
+`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/Signal/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp resolve one on demand. Signal's URL points at the signal-cli-rest-api container's `/v1/attachments/{id}` endpoint, so it is only as reachable (and as private) as the container (see [_docs/platforms.md](_docs/platforms.md#signal)). The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram).
 
 A terminal has no real upload channel, so the **CLI adapter treats any local file path in the message as an attachment** — "uploading" means referencing the path. Image files are detected by content sniffing:
 
@@ -164,7 +164,7 @@ if ev, ok := slack.RawEvent(m); ok {
 }
 
 // Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, whatsapp.RawMessage, teams.RawMessage, signal.RawMessage, cli.RawData.
-// Underlying client per platform (WhatsApp, Teams and Signal have none — they speak REST or JSON-RPC over plain HTTP/TCP):
+// Underlying client per platform (WhatsApp, Teams and Signal have none — they speak plain REST, plus a receive WebSocket for Signal):
 client := slack.Client(bot)        // *slack.Client (nil if not a Slack bot)
 sock := slack.SocketClient(bot)    // *socketmode.Client (nil if not a Slack bot)
 session := discord.Session(bot)    // *discordgo.Session
@@ -199,7 +199,7 @@ documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 | Telegram | BotFather bot token | [_docs/platforms.md](_docs/platforms.md#telegram) |
 | WhatsApp | Cloud API token + phone-number id + app secret + verify token + bind addr | [_docs/platforms.md](_docs/platforms.md#whatsapp) |
 | Microsoft Teams | Azure Bot app id + password (+ optional tenant id) + bind addr | [_docs/platforms.md](_docs/platforms.md#microsoft-teams) |
-| Signal | no keys — a running signal-cli daemon (registered number) + its TCP address | [_docs/platforms.md](_docs/platforms.md#signal) |
+| Signal | no keys — a running signal-cli-rest-api container (registered number) + its URL | [_docs/platforms.md](_docs/platforms.md#signal) |
 | CLI | nothing (local stdin/stdout) | [_docs/platforms.md](_docs/platforms.md#cli) |
 
 ## Development

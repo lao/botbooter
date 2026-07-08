@@ -1,54 +1,93 @@
 package signal
 
 import (
-	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
-	"net"
-	"strconv"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/lao/botbooter/internal/asserts"
 	"github.com/lao/botbooter/internal/core"
 )
 
-// validConfig returns a Config with every required field populated. Address is
-// overwritten by tests that talk to a fake daemon.
+// validConfig returns a Config with every required field populated. BaseURL is
+// overwritten by tests that talk to a fake container.
 func validConfig() Config {
-	return Config{Address: "127.0.0.1:1", Account: "+15550001"}
+	return Config{BaseURL: "http://127.0.0.1:1", Number: "+15550001"}
 }
 
-// startDaemon starts a fake signal-cli JSON-RPC TCP daemon and returns its
-// address plus a channel yielding accepted connections.
-func startDaemon(t *testing.T) (string, <-chan net.Conn) {
+// fakeAPI is a fake signal-cli-rest-api container: it upgrades
+// /v1/receive/{number} to a WebSocket and records /v2/send requests.
+type fakeAPI struct {
+	ts       *httptest.Server
+	wsConns  chan *websocket.Conn
+	sendReqs chan map[string]any
+
+	// sendStatus/sendBody shape the /v2/send response; zero values mean 201.
+	sendStatus int
+	sendBody   string
+	// sendBlock, when non-nil, stalls /v2/send until closed (or the request
+	// context dies).
+	sendBlock chan struct{}
+}
+
+func startAPI(t *testing.T) *fakeAPI {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	asserts.NoError(t, err, "fake daemon listen")
-	t.Cleanup(func() { _ = ln.Close() })
-	conns := make(chan net.Conn, 4)
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
+	f := &fakeAPI{
+		wsConns:  make(chan *websocket.Conn, 4),
+		sendReqs: make(chan map[string]any, 4),
+	}
+	up := websocket.Upgrader{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/receive/", func(w http.ResponseWriter, r *http.Request) {
+		ws, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		f.wsConns <- ws
+	})
+	mux.HandleFunc("/v2/send", func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.sendReqs <- req
+		if f.sendBlock != nil {
+			select {
+			case <-f.sendBlock:
+			case <-r.Context().Done():
 				return
 			}
-			conns <- c
 		}
-	}()
-	return ln.Addr().String(), conns
+		status := f.sendStatus
+		if status == 0 {
+			status = http.StatusCreated
+		}
+		w.WriteHeader(status)
+		body := f.sendBody
+		if body == "" {
+			body = `{"timestamp":"1700000003000"}`
+		}
+		_, _ = w.Write([]byte(body))
+	})
+	f.ts = httptest.NewServer(mux)
+	t.Cleanup(f.ts.Close)
+	return f
 }
 
-// acceptConn waits for the daemon to accept the adapter's dial.
-func acceptConn(t *testing.T, conns <-chan net.Conn) net.Conn {
+// acceptWS waits for the adapter to dial the receive socket.
+func acceptWS(t *testing.T, f *fakeAPI) *websocket.Conn {
 	t.Helper()
 	select {
-	case c := <-conns:
-		t.Cleanup(func() { _ = c.Close() })
-		return c
+	case ws := <-f.wsConns:
+		t.Cleanup(func() { _ = ws.Close() })
+		return ws
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for adapter to dial")
+		t.Fatal("timed out waiting for adapter to dial the receive socket")
 		return nil
 	}
 }
@@ -72,33 +111,48 @@ func captureDeps(got *[]*core.Message, done chan<- struct{}, loopErr chan<- erro
 	}
 }
 
-// connectAdapter dials a via bot-independent Connect and returns the daemon's
-// side of the connection.
-func connectAdapter(t *testing.T, a *adapter, deps core.AdapterDeps, addr string, conns <-chan net.Conn) net.Conn {
+// connectAdapter points a at the fake container, connects, and returns the
+// server side of the receive socket.
+func connectAdapter(t *testing.T, a *adapter, deps core.AdapterDeps, f *fakeAPI) *websocket.Conn {
 	t.Helper()
-	a.cfg.Address = addr
+	reconfigure(t, a, f)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	asserts.NoError(t, a.Connect(ctx, deps), "Connect")
 	t.Cleanup(func() { _ = a.Disconnect() })
-	return acceptConn(t, conns)
+	return acceptWS(t, f)
 }
 
-// writeLine writes one newline-terminated JSON-RPC frame to the adapter.
-func writeLine(t *testing.T, c net.Conn, line string) {
+// reconfigure rebuilds a's derived state (wsURL, client) for the fake
+// container's BaseURL, keeping the rest of its config. Only called before the
+// adapter is connected, so the field copies race with nothing.
+func reconfigure(t *testing.T, a *adapter, f *fakeAPI) {
 	t.Helper()
-	_, err := c.Write([]byte(line + "\n"))
-	asserts.NoError(t, err, "daemon write")
+	cfg := a.cfg
+	cfg.BaseURL = f.ts.URL
+	fresh, err := newAdapter(cfg)
+	asserts.NoError(t, err, "newAdapter for fake container")
+	a.cfg = fresh.cfg
+	a.wsURL = fresh.wsURL
+	a.client = fresh.client
 }
 
-// readRequest reads one JSON-RPC request line sent by the adapter.
-func readRequest(t *testing.T, r *bufio.Reader) map[string]any {
+// writeEnvelope pushes one receive payload to the adapter over the socket.
+func writeEnvelope(t *testing.T, ws *websocket.Conn, payload string) {
 	t.Helper()
-	line, err := r.ReadString('\n')
-	asserts.NoError(t, err, "daemon read request")
-	var req map[string]any
-	asserts.NoError(t, json.Unmarshal([]byte(line), &req), "unmarshal request")
-	return req
+	asserts.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(payload)), "container write")
+}
+
+// awaitSend waits for the fake container to record one /v2/send request.
+func awaitSend(t *testing.T, f *fakeAPI) map[string]any {
+	t.Helper()
+	select {
+	case req := <-f.sendReqs:
+		return req
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for a /v2/send request")
+		return nil
+	}
 }
 
 func awaitDispatch(t *testing.T, done <-chan struct{}, n int) {
@@ -112,15 +166,15 @@ func awaitDispatch(t *testing.T, done <-chan struct{}, n int) {
 	}
 }
 
-const directReceive = `{"jsonrpc":"2.0","method":"receive","params":{"account":"+15550001","envelope":{"source":"+15550002","sourceNumber":"+15550002","sourceUuid":"uuid-2","sourceName":"Ada","timestamp":1700000000123,"dataMessage":{"timestamp":1700000000123,"message":"hello bot"}}}}`
+const directReceive = `{"account":"+15550001","envelope":{"source":"+15550002","sourceNumber":"+15550002","sourceUuid":"uuid-2","sourceName":"Ada","timestamp":1700000000123,"dataMessage":{"timestamp":1700000000123,"message":"hello bot"}}}`
 
-const groupReceive = `{"jsonrpc":"2.0","method":"receive","params":{"account":"+15550001","envelope":{"source":"+15550002","sourceNumber":"+15550002","sourceName":"Ada","timestamp":1700000000456,"dataMessage":{"timestamp":1700000000456,"message":"hi group","groupInfo":{"groupId":"grp==","type":"DELIVER"}}}}}`
+const groupReceive = `{"account":"+15550001","envelope":{"source":"+15550002","sourceNumber":"+15550002","sourceName":"Ada","timestamp":1700000000456,"dataMessage":{"timestamp":1700000000456,"message":"hi group","groupInfo":{"groupId":"grp==","type":"DELIVER"}}}}`
 
-const receiptReceive = `{"jsonrpc":"2.0","method":"receive","params":{"account":"+15550001","envelope":{"source":"+15550002","timestamp":1700000000789,"receiptMessage":{"when":1700000000789,"isDelivery":true}}}}`
+const receiptReceive = `{"account":"+15550001","envelope":{"source":"+15550002","timestamp":1700000000789,"receiptMessage":{"when":1700000000789,"isDelivery":true}}}`
 
-const ownReceive = `{"jsonrpc":"2.0","method":"receive","params":{"account":"+15550001","envelope":{"source":"+15550001","sourceNumber":"+15550001","timestamp":1700000001000,"dataMessage":{"timestamp":1700000001000,"message":"from myself"}}}}`
+const ownReceive = `{"account":"+15550001","envelope":{"source":"+15550001","sourceNumber":"+15550001","timestamp":1700000001000,"dataMessage":{"timestamp":1700000001000,"message":"from myself"}}}`
 
-const attachmentReceive = `{"jsonrpc":"2.0","method":"receive","params":{"account":"+15550001","envelope":{"source":"+15550002","sourceNumber":"+15550002","sourceName":"Ada","timestamp":1700000002000,"dataMessage":{"timestamp":1700000002000,"message":"a cat","attachments":[{"contentType":"image/jpeg","filename":"cat.jpg","id":"att-1","size":1234}]}}}}`
+const attachmentReceive = `{"account":"+15550001","envelope":{"source":"+15550002","sourceNumber":"+15550002","sourceName":"Ada","timestamp":1700000002000,"dataMessage":{"timestamp":1700000002000,"message":"a cat","attachments":[{"contentType":"image/jpeg","filename":"cat.jpg","id":"att-1","size":1234}]}}}`
 
 func TestNew(t *testing.T) {
 	bot, err := New(validConfig())
@@ -131,9 +185,19 @@ func TestNew(t *testing.T) {
 	asserts.Equal(t, bot.BotType.String(), "signal", "bot type string should be signal")
 }
 
-func TestNew_MissingAddress(t *testing.T) {
-	_, err := New(Config{Account: "+15550001"})
-	asserts.ErrorIs(t, err, ErrMissingConfig, "New without Address should fail")
+func TestNew_MissingBaseURL(t *testing.T) {
+	_, err := New(Config{Number: "+15550001"})
+	asserts.ErrorIs(t, err, ErrMissingConfig, "New without BaseURL should fail")
+}
+
+func TestNew_MissingNumber(t *testing.T) {
+	_, err := New(Config{BaseURL: "http://127.0.0.1:8080"})
+	asserts.ErrorIs(t, err, ErrMissingConfig, "New without Number should fail")
+}
+
+func TestNew_BadScheme(t *testing.T) {
+	_, err := New(Config{BaseURL: "ftp://127.0.0.1:8080", Number: "+15550001"})
+	asserts.Error(t, err, "New with a non-http BaseURL should fail")
 }
 
 func TestNew_Defaults(t *testing.T) {
@@ -141,6 +205,15 @@ func TestNew_Defaults(t *testing.T) {
 	asserts.NoError(t, err, "newAdapter should succeed")
 	asserts.True(t, a.cfg.DialTimeout > 0, "DialTimeout should default")
 	asserts.True(t, a.cfg.SendTimeout > 0, "SendTimeout should default")
+	asserts.NotNil(t, a.client, "HTTPClient should default")
+}
+
+func TestNew_DerivesReceiveSocketURL(t *testing.T) {
+	a, err := newAdapter(Config{BaseURL: "https://signal.example/api/", Number: "+15550001"})
+	asserts.NoError(t, err, "newAdapter")
+	asserts.Equal(t, a.wsURL, "wss://signal.example/api/v1/receive/+15550001",
+		"https becomes wss, trailing slash trimmed ('+' is valid in a path)")
+	asserts.Equal(t, a.cfg.BaseURL, "https://signal.example/api", "BaseURL trailing slash trimmed")
 }
 
 func TestConnect_DialError(t *testing.T) {
@@ -154,13 +227,13 @@ func TestConnect_DialError(t *testing.T) {
 }
 
 func TestReceive_DispatchesDirectMessage(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 	var got []*core.Message
 	done := make(chan struct{}, 4)
-	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
+	ws := connectAdapter(t, a, captureDeps(&got, done, nil), f)
 
-	writeLine(t, daemon, directReceive)
+	writeEnvelope(t, ws, directReceive)
 	awaitDispatch(t, done, 1)
 
 	m := got[0]
@@ -178,13 +251,13 @@ func TestReceive_DispatchesDirectMessage(t *testing.T) {
 }
 
 func TestReceive_DispatchesGroupMessage(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 	var got []*core.Message
 	done := make(chan struct{}, 4)
-	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
+	ws := connectAdapter(t, a, captureDeps(&got, done, nil), f)
 
-	writeLine(t, daemon, groupReceive)
+	writeEnvelope(t, ws, groupReceive)
 	awaitDispatch(t, done, 1)
 
 	asserts.Equal(t, got[0].ChannelID, "group:grp==", "group ChannelID should be prefixed")
@@ -194,253 +267,180 @@ func TestReceive_DispatchesGroupMessage(t *testing.T) {
 }
 
 func TestReceive_SkipsNonDataAndOwnMessages(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 	var got []*core.Message
 	done := make(chan struct{}, 4)
-	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
+	ws := connectAdapter(t, a, captureDeps(&got, done, nil), f)
 
 	// A receipt (no dataMessage), the bot's own message, then a real one. Only
 	// the real one dispatches — and its arrival proves the loop survived the
 	// first two.
-	writeLine(t, daemon, receiptReceive)
-	writeLine(t, daemon, ownReceive)
-	writeLine(t, daemon, directReceive)
+	writeEnvelope(t, ws, receiptReceive)
+	writeEnvelope(t, ws, ownReceive)
+	writeEnvelope(t, ws, directReceive)
 	awaitDispatch(t, done, 1)
 
 	asserts.Equal(t, len(got), 1, "only the real inbound message should dispatch")
 	asserts.Equal(t, got[0].Content, "hello bot", "the surviving message is the real one")
 }
 
-func TestReceive_SkipsMalformedLine(t *testing.T) {
-	addr, conns := startDaemon(t)
+func TestReceive_SkipsMalformedPayload(t *testing.T) {
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 	var got []*core.Message
 	done := make(chan struct{}, 4)
-	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
+	ws := connectAdapter(t, a, captureDeps(&got, done, nil), f)
 
-	writeLine(t, daemon, `{not json`)
-	writeLine(t, daemon, `{"jsonrpc":"2.0","method":"receive","params":"not an object"}`)
-	writeLine(t, daemon, directReceive)
+	writeEnvelope(t, ws, `{not json`)
+	writeEnvelope(t, ws, `"not an object"`)
+	writeEnvelope(t, ws, directReceive)
 	awaitDispatch(t, done, 1)
 
-	asserts.Equal(t, len(got), 1, "malformed lines should be skipped, not fatal")
+	asserts.Equal(t, len(got), 1, "malformed payloads should be skipped, not fatal")
 }
 
 // sourceOnlyReceive has no sourceNumber, so the adapter must fall back to the
 // envelope's source field for the sender identity.
-const sourceOnlyReceive = `{"jsonrpc":"2.0","method":"receive","params":{"account":"+15550001","envelope":{"source":"uuid-9","sourceName":"Bob","timestamp":1700000003000,"dataMessage":{"timestamp":1700000003000,"message":"via uuid"}}}}`
+const sourceOnlyReceive = `{"account":"+15550001","envelope":{"source":"uuid-9","sourceName":"Bob","timestamp":1700000003000,"dataMessage":{"timestamp":1700000003000,"message":"via uuid"}}}`
 
 func TestReceive_FallsBackToSource(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 	var got []*core.Message
 	done := make(chan struct{}, 4)
-	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
+	ws := connectAdapter(t, a, captureDeps(&got, done, nil), f)
 
-	writeLine(t, daemon, sourceOnlyReceive)
+	writeEnvelope(t, ws, sourceOnlyReceive)
 	awaitDispatch(t, done, 1)
 
 	asserts.Equal(t, got[0].UserID, "uuid-9", "UserID should fall back to envelope source")
 }
 
-// TestReceive_SelfDropFallsBackToDaemonAccount pins that with no configured
-// Account, the daemon-reported account still filters the bot's own messages.
-func TestReceive_SelfDropFallsBackToDaemonAccount(t *testing.T) {
-	addr, conns := startDaemon(t)
-	cfg := validConfig()
-	cfg.Account = ""
-	a, err := newAdapter(cfg)
-	asserts.NoError(t, err, "newAdapter")
-	var got []*core.Message
-	done := make(chan struct{}, 4)
-	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
-
-	writeLine(t, daemon, ownReceive) // source == the notification's account
-	writeLine(t, daemon, directReceive)
-	awaitDispatch(t, done, 1)
-
-	asserts.Equal(t, len(got), 1, "own message should be dropped via the daemon-reported account")
-	asserts.Equal(t, got[0].Content, "hello bot", "the surviving message is the real one")
-}
-
 func TestSend_Direct(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
-	daemon := connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
-	r := bufio.NewReader(daemon)
+	reconfigure(t, a, f)
 
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi there") }()
+	asserts.NoError(t, a.Send(context.Background(), "+15550002", "hi there"), "Send should succeed on 201")
 
-	req := readRequest(t, r)
-	asserts.Equal(t, req["method"], "send", "method should be send")
-	asserts.Equal(t, req["jsonrpc"], "2.0", "jsonrpc version")
-	params := req["params"].(map[string]any)
-	asserts.Equal(t, params["message"], "hi there", "message param")
-	asserts.Equal(t, params["account"], "+15550001", "account param")
-	recipients := params["recipient"].([]any)
+	req := awaitSend(t, f)
+	asserts.Equal(t, req["number"], "+15550001", "number field")
+	asserts.Equal(t, req["message"], "hi there", "message field")
+	recipients := req["recipients"].([]any)
 	asserts.Equal(t, len(recipients), 1, "one recipient")
 	asserts.Equal(t, recipients[0], "+15550002", "recipient number")
-
-	id := int(req["id"].(float64))
-	writeLine(t, daemon, `{"jsonrpc":"2.0","id":`+strconv.Itoa(id)+`,"result":{"timestamp":1700000003000}}`)
-	asserts.NoError(t, <-sendErr, "Send should succeed on a result response")
 }
 
 func TestSend_Group(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
-	daemon := connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
-	r := bufio.NewReader(daemon)
+	reconfigure(t, a, f)
 
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- a.Send(context.Background(), "group:grp==", "hi group") }()
+	asserts.NoError(t, a.Send(context.Background(), "group:grp==", "hi group"), "group Send should succeed")
 
-	req := readRequest(t, r)
-	params := req["params"].(map[string]any)
-	asserts.Equal(t, params["groupId"], "grp==", "groupId param from prefixed channel")
-	_, hasRecipient := params["recipient"]
-	asserts.False(t, hasRecipient, "group send should carry no recipient")
+	req := awaitSend(t, f)
+	recipients := req["recipients"].([]any)
+	var wantRecipient any = "group." + base64.StdEncoding.EncodeToString([]byte("grp=="))
+	asserts.Equal(t, recipients[0], wantRecipient, "group recipient should be the base64 REST form")
+}
 
-	id := int(req["id"].(float64))
-	writeLine(t, daemon, `{"jsonrpc":"2.0","id":`+strconv.Itoa(id)+`,"result":{}}`)
-	asserts.NoError(t, <-sendErr, "group Send should succeed")
+// TestSend_NeedsNoReceiveSocket pins the REST independence: Send works before
+// Connect and after Disconnect, since it never touches the receive socket.
+func TestSend_NeedsNoReceiveSocket(t *testing.T) {
+	f := startAPI(t)
+	a, _ := newAdapter(validConfig())
+	reconfigure(t, a, f)
+
+	asserts.NoError(t, a.Send(context.Background(), "+15550002", "hi"), "Send before Connect should work")
+	awaitSend(t, f)
 }
 
 func TestSend_ErrorResponse(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
+	f.sendStatus = http.StatusBadRequest
+	f.sendBody = `{"error":"Unregistered user"}`
 	a, _ := newAdapter(validConfig())
-	daemon := connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
-	r := bufio.NewReader(daemon)
+	reconfigure(t, a, f)
 
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi") }()
+	err := a.Send(context.Background(), "+15550002", "hi")
+	asserts.Error(t, err, "Send should surface a REST error")
+	asserts.True(t, strings.Contains(err.Error(), "Unregistered user"), "error should carry the container's message: "+err.Error())
+}
 
-	req := readRequest(t, r)
-	id := int(req["id"].(float64))
-	writeLine(t, daemon, `{"jsonrpc":"2.0","id":`+strconv.Itoa(id)+`,"error":{"code":-32602,"message":"Unregistered user"}}`)
+func TestSend_ErrorResponseNonJSON(t *testing.T) {
+	f := startAPI(t)
+	f.sendStatus = http.StatusInternalServerError
+	f.sendBody = `boom`
+	a, _ := newAdapter(validConfig())
+	reconfigure(t, a, f)
 
-	err := <-sendErr
-	asserts.Error(t, err, "Send should surface a JSON-RPC error")
-	asserts.True(t, strings.Contains(err.Error(), "Unregistered user"), "error should carry the daemon message")
+	err := a.Send(context.Background(), "+15550002", "hi")
+	asserts.Error(t, err, "Send should surface a REST error")
+	asserts.True(t, strings.Contains(err.Error(), "boom"), "error should fall back to the raw body: "+err.Error())
 }
 
 func TestSend_ContextCanceled(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
+	f.sendBlock = make(chan struct{})
+	t.Cleanup(func() { close(f.sendBlock) })
 	a, _ := newAdapter(validConfig())
-	daemon := connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
-	r := bufio.NewReader(daemon)
+	reconfigure(t, a, f)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sendErr := make(chan error, 1)
 	go func() { sendErr <- a.Send(ctx, "+15550002", "hi") }()
 
-	readRequest(t, r) // request went out; never answer it
+	awaitSend(t, f) // request arrived; never answer it
 	cancel()
-	asserts.ErrorIs(t, <-sendErr, context.Canceled, "Send should honor ctx cancellation")
+	select {
+	case err := <-sendErr:
+		asserts.ErrorIs(t, err, context.Canceled, "Send should honor ctx cancellation")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not honor cancellation")
+	}
 }
 
 // TestSend_TimesOutWithoutResponse pins the independent round-trip bound:
-// even with a background (never-canceled) context, a request the daemon
+// even with a background (never-canceled) context, a request the container
 // accepts but never answers must fail after SendTimeout instead of blocking
 // the caller forever.
 func TestSend_TimesOutWithoutResponse(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
+	f.sendBlock = make(chan struct{})
+	t.Cleanup(func() { close(f.sendBlock) })
 	cfg := validConfig()
 	cfg.SendTimeout = 100 * time.Millisecond
 	a, err := newAdapter(cfg)
 	asserts.NoError(t, err, "newAdapter")
-	daemon := connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
-	r := bufio.NewReader(daemon)
+	reconfigure(t, a, f)
 
 	sendErr := make(chan error, 1)
 	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi") }()
 
-	readRequest(t, r) // request went out; never answer it
+	awaitSend(t, f) // request arrived; never answer it
 	select {
 	case err := <-sendErr:
-		asserts.ErrorIs(t, err, context.DeadlineExceeded, "Send should time out on a silent daemon")
+		asserts.ErrorIs(t, err, context.DeadlineExceeded, "Send should time out on a silent container")
 	case <-time.After(2 * time.Second):
 		t.Fatal("Send did not time out")
 	}
 }
 
-// TestSend_AfterReadLoopExit pins the late-registration guard: a Send issued
-// after the read loop already died (and ran failPending) must fail promptly
-// instead of waiting on a channel nothing can ever settle.
-func TestSend_AfterReadLoopExit(t *testing.T) {
-	addr, conns := startDaemon(t)
-	a, _ := newAdapter(validConfig())
-	loopErr := make(chan error, 1)
-	daemon := connectAdapter(t, a, captureDeps(nil, nil, loopErr), addr, conns)
-
-	_ = daemon.Close()
-	select {
-	case <-loopErr: // read loop has exited; failPending already ran
-	case <-time.After(2 * time.Second):
-		t.Fatal("read loop never reported the remote close")
-	}
-
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi") }()
-	select {
-	case err := <-sendErr:
-		asserts.Error(t, err, "Send on a dead connection must fail")
-	case <-time.After(2 * time.Second):
-		t.Fatal("Send hung on a connection whose read loop already exited")
-	}
-}
-
-// TestSend_WriteError covers the write failure path: the local socket is
-// closed underneath the adapter, so the frame write itself errors.
-func TestSend_WriteError(t *testing.T) {
-	addr, conns := startDaemon(t)
-	a, _ := newAdapter(validConfig())
-	connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
-
-	c := a.currentConn()
-	asserts.NoError(t, c.net.Close(), "close local socket")
-
+func TestSend_RequestError(t *testing.T) {
+	a, _ := newAdapter(validConfig()) // BaseURL points at a dead address
 	err := a.Send(context.Background(), "+15550002", "hi")
-	asserts.Error(t, err, "Send on a locally closed socket should fail")
-	asserts.True(t, strings.Contains(err.Error(), "send write failed") ||
-		strings.Contains(err.Error(), "connection closed"), "error should name the write or closed conn: "+err.Error())
-}
-
-func TestSend_NotConnected(t *testing.T) {
-	a, _ := newAdapter(validConfig())
-	asserts.ErrorIs(t, a.Send(context.Background(), "+15550002", "hi"), ErrNotConnected,
-		"Send before Connect should fail with ErrNotConnected")
-}
-
-func TestSend_ConnClosedWhilePending(t *testing.T) {
-	addr, conns := startDaemon(t)
-	a, _ := newAdapter(validConfig())
-	daemon := connectAdapter(t, a, captureDeps(nil, nil, make(chan error, 1)), addr, conns)
-	r := bufio.NewReader(daemon)
-
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi") }()
-
-	readRequest(t, r)
-	_ = daemon.Close() // daemon dies with the request pending
-
-	select {
-	case err := <-sendErr:
-		asserts.Error(t, err, "a pending Send must fail when the connection drops")
-	case <-time.After(2 * time.Second):
-		t.Fatal("Send hung after connection loss")
-	}
+	asserts.Error(t, err, "Send against a dead container should fail")
+	asserts.True(t, strings.Contains(err.Error(), "send request failed"), "error should name the request failure: "+err.Error())
 }
 
 func TestReadLoop_RemoteCloseReportsDone(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 	loopErr := make(chan error, 1)
-	daemon := connectAdapter(t, a, captureDeps(nil, nil, loopErr), addr, conns)
+	ws := connectAdapter(t, a, captureDeps(nil, nil, loopErr), f)
 
-	_ = daemon.Close()
+	_ = ws.Close()
 
 	select {
 	case err := <-loopErr:
@@ -451,10 +451,10 @@ func TestReadLoop_RemoteCloseReportsDone(t *testing.T) {
 }
 
 func TestDisconnect_CleanNoDone(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 	loopErr := make(chan error, 1)
-	connectAdapter(t, a, captureDeps(nil, nil, loopErr), addr, conns)
+	connectAdapter(t, a, captureDeps(nil, nil, loopErr), f)
 
 	asserts.NoError(t, a.Disconnect(), "clean Disconnect should succeed")
 
@@ -468,7 +468,7 @@ func TestDisconnect_CleanNoDone(t *testing.T) {
 }
 
 func TestDisconnect_DrainsInflightDispatch(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 
 	entered := make(chan struct{}, 1)
@@ -483,9 +483,9 @@ func TestDisconnect_DrainsInflightDispatch(t *testing.T) {
 		Done:       func(error) {},
 		Disconnect: func() error { return nil },
 	}
-	daemon := connectAdapter(t, a, deps, addr, conns)
+	ws := connectAdapter(t, a, deps, f)
 
-	writeLine(t, daemon, directReceive)
+	writeEnvelope(t, ws, directReceive)
 	<-entered
 
 	go func() {
@@ -509,7 +509,7 @@ func TestDisconnect_DrainTimeout(t *testing.T) {
 	drainTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { drainTimeout = old })
 
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 
 	entered := make(chan struct{}, 1)
@@ -522,10 +522,10 @@ func TestDisconnect_DrainTimeout(t *testing.T) {
 		Done:       func(error) {},
 		Disconnect: func() error { return nil },
 	}
-	daemon := connectAdapter(t, a, deps, addr, conns)
+	ws := connectAdapter(t, a, deps, f)
 	t.Cleanup(func() { close(release) })
 
-	writeLine(t, daemon, directReceive)
+	writeEnvelope(t, ws, directReceive)
 	<-entered
 
 	err := a.Disconnect()
@@ -535,13 +535,15 @@ func TestDisconnect_DrainTimeout(t *testing.T) {
 
 // TestDisconnect_WaitsForReadLoopExit pins the drain's happens-before edge:
 // Disconnect must not return until the read loop has stopped consuming
-// buffered frames, since only then is the inflight counter complete.
+// messages, since only then is the inflight counter complete.
 func TestDisconnect_WaitsForReadLoopExit(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
-	connectAdapter(t, a, captureDeps(nil, nil, nil), addr, conns)
+	connectAdapter(t, a, captureDeps(nil, nil, nil), f)
 
-	c := a.currentConn()
+	a.mu.Lock()
+	c := a.conn
+	a.mu.Unlock()
 	asserts.NoError(t, a.Disconnect(), "Disconnect should succeed")
 
 	select {
@@ -552,19 +554,20 @@ func TestDisconnect_WaitsForReadLoopExit(t *testing.T) {
 }
 
 func TestAttachments(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
 	var got []*core.Message
 	done := make(chan struct{}, 4)
-	daemon := connectAdapter(t, a, captureDeps(&got, done, nil), addr, conns)
+	ws := connectAdapter(t, a, captureDeps(&got, done, nil), f)
 
-	writeLine(t, daemon, attachmentReceive)
+	writeEnvelope(t, ws, attachmentReceive)
 	awaitDispatch(t, done, 1)
 
 	atts, err := a.Attachments(got[0])
 	asserts.NoError(t, err, "Attachments should succeed")
 	asserts.Equal(t, len(atts), 1, "one attachment")
 	asserts.True(t, atts[0].IsImage, "image/jpeg should be flagged as image")
+	asserts.Equal(t, atts[0].URL, f.ts.URL+"/v1/attachments/att-1", "URL should point at the container's attachment endpoint")
 	sa, ok := atts[0].ExtraData.(*Attachment)
 	asserts.True(t, ok, "ExtraData should carry the *Attachment")
 	asserts.Equal(t, sa.ID, "att-1", "attachment id")
@@ -585,12 +588,13 @@ func TestRawMessage_NotSignal(t *testing.T) {
 	asserts.False(t, ok, "RawMessage should report non-signal Raw")
 }
 
-// TestBot_EndToEnd drives the full core.Bot lifecycle against the fake daemon:
-// connect, receive a message, reply from the handler, then shut down cleanly.
+// TestBot_EndToEnd drives the full core.Bot lifecycle against the fake
+// container: connect, receive a message, reply from the handler, then shut
+// down cleanly.
 func TestBot_EndToEnd(t *testing.T) {
-	addr, conns := startDaemon(t)
+	f := startAPI(t)
 	cfg := validConfig()
-	cfg.Address = addr
+	cfg.BaseURL = f.ts.URL
 	bot, err := New(cfg)
 	asserts.NoError(t, err, "New")
 
@@ -604,15 +608,13 @@ func TestBot_EndToEnd(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- bot.Run(ctx) }()
 
-	daemon := acceptConn(t, conns)
-	r := bufio.NewReader(daemon)
-	writeLine(t, daemon, `{"jsonrpc":"2.0","method":"receive","params":{"account":"+15550001","envelope":{"source":"+15550002","sourceNumber":"+15550002","sourceName":"Ada","timestamp":1700000000123,"dataMessage":{"timestamp":1700000000123,"message":"ping"}}}}`)
+	ws := acceptWS(t, f)
+	writeEnvelope(t, ws, `{"account":"+15550001","envelope":{"source":"+15550002","sourceNumber":"+15550002","sourceName":"Ada","timestamp":1700000000123,"dataMessage":{"timestamp":1700000000123,"message":"ping"}}}`)
 
-	req := readRequest(t, r)
-	params := req["params"].(map[string]any)
-	asserts.Equal(t, params["message"], "pong", "handler reply should reach the daemon")
-	id := int(req["id"].(float64))
-	writeLine(t, daemon, `{"jsonrpc":"2.0","id":`+strconv.Itoa(id)+`,"result":{}}`)
+	req := awaitSend(t, f)
+	asserts.Equal(t, req["message"], "pong", "handler reply should reach the container")
+	recipients := req["recipients"].([]any)
+	asserts.Equal(t, recipients[0], "+15550002", "reply should target the sender")
 
 	select {
 	case <-replied:

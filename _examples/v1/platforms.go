@@ -49,8 +49,8 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		})
 	case "signal":
 		return signal.New(signal.Config{
-			Address: os.Getenv("SIGNAL_ADDR"),    // signal-cli daemon socket, e.g. "127.0.0.1:7583"
-			Account: os.Getenv("SIGNAL_ACCOUNT"), // optional; the bot's own E.164 number
+			BaseURL: os.Getenv("SIGNAL_API_URL"), // signal-cli-rest-api container, e.g. "http://127.0.0.1:8080"
+			Number:  os.Getenv("SIGNAL_NUMBER"),  // the bot's own E.164 number
 		})
 	case "cli":
 		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)

@@ -3,8 +3,8 @@
 How to provision credentials for each platform botbooter supports. Slack,
 Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
 and Microsoft Teams need cloud credentials plus a public HTTPS webhook; Signal
-needs no credentials at all, only a running signal-cli daemon with a registered
-phone number; the CLI needs nothing.
+needs no credentials at all, only a running signal-cli-rest-api container with
+a registered phone number; the CLI needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/_docs/platforms.md), pkg.go.dev renders the README but not this file.
 
@@ -15,7 +15,7 @@ phone number; the CLI needs nothing.
 - Telegram, [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api)
 - WhatsApp, [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks getting started](https://developers.facebook.com/docs/graph-api/webhooks/getting-started)
 - Microsoft Teams, [Azure Bot resource](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication)
-- Signal, [signal-cli](https://github.com/AsamK/signal-cli) · [JSON-RPC service](https://github.com/AsamK/signal-cli/wiki/JSON-RPC-service)
+- Signal, [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) · [API reference](https://bbernhard.github.io/signal-cli-rest-api/)
 - CLI, [`_examples/v1`](../_examples/v1) and the [README Quickstart](../README.md#quickstart)
 
 ---
@@ -352,119 +352,114 @@ not supported.
 ## Signal
 
 Signal has no official bot API, so botbooter talks to a
-**[signal-cli](https://github.com/AsamK/signal-cli) daemon** instead: the daemon
-owns the Signal protocol (registration, encryption, receiving, sending) and the
-adapter speaks newline-delimited **JSON-RPC 2.0** to its TCP socket. There are
-**no tokens or API keys** — the only credential is the phone number registered
-with the daemon, and the only thing botbooter needs is the daemon's address.
+**[signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)
+container** instead: the container owns the Signal protocol (registration,
+encryption, receiving, sending) and the adapter speaks two channels to it —
+inbound messages arrive over the container's **receive WebSocket**
+(`/v1/receive/{number}`), replies go out as plain **REST** calls
+(`POST /v2/send`). There are **no tokens or API keys** — the only credential is
+the phone number registered with the container, and the only things botbooter
+needs are the container's URL and that number.
 
-Like Telegram, this is a dial-out model: outbound TCP only, no public endpoint,
-port, or webhook to host.
+The only host requirement is **Docker** (the container bundles signal-cli and
+its Java runtime). Like Telegram, this is a dial-out model: outbound
+HTTP/WebSocket only, no public endpoint, port, or webhook to host.
 
-#### Step 1, Install signal-cli
+#### Step 1, Run the container
 
-signal-cli needs Java 21+. Install it from your package manager or the
-[release archives](https://github.com/AsamK/signal-cli/releases):
+Run it in **`json-rpc` mode** — the adapter's receive WebSocket only exists
+there (the default `normal` mode spawns a signal-cli process per request and
+serves receive as a plain GET, which the adapter does not use):
 
 ```bash
-brew install signal-cli        # macOS
-# or download a release tarball and put signal-cli on your PATH
+docker run -d --name signal-api --restart=always \
+	-p 127.0.0.1:8080:8080 \
+	-v $HOME/.local/share/signal-api:/home/.local/share/signal-cli \
+	-e MODE=json-rpc \
+	bbernhard/signal-cli-rest-api
 ```
+
+> ⚠️ **The API is unauthenticated**: anyone who can reach it can read and send
+> as the bot's account (and fetch its attachments). Publish the port on
+> `127.0.0.1` (or a private network) only, and never expose it to the internet.
+
+The volume holds the account state — keep it, or you'll re-register on every
+container recreate.
 
 #### Step 2, Register a phone number
 
 The bot needs its **own** phone number (a landline or VoIP number works —
-registration can verify by voice call). Either register the number as a primary
-device:
+registration can verify by voice call). Either link the container to an
+existing Signal account as a secondary device — open
+
+```text
+http://127.0.0.1:8080/v1/qrcodelink?device_name=botbooter
+```
+
+in a browser and scan the QR code with the Signal app (*Settings → Linked
+devices*) — or register the number as a primary device over the API:
 
 ```bash
-signal-cli -a +15550001 register            # may require a captcha token, see below
-signal-cli -a +15550001 verify 123-456      # the code you received by SMS/voice
+curl -X POST http://127.0.0.1:8080/v1/register/+15550001
+curl -X POST http://127.0.0.1:8080/v1/register/+15550001/verify/123-456   # the SMS/voice code
 ```
 
 If `register` fails with a captcha error, solve one at
 [signalcaptchas.org/registration/generate.html](https://signalcaptchas.org/registration/generate.html)
-and pass it with `--captcha`, see the
-[registration wiki page](https://github.com/AsamK/signal-cli/wiki/Registration-with-captcha).
-
-**Or** link signal-cli to an existing Signal account as a secondary device
-(like Signal Desktop):
-
-```bash
-signal-cli link -n botbooter    # prints a link URI; render it as a QR code and scan it in the app
-```
+and POST it in the body: `{"captcha": "signalcaptcha://…"}`.
 
 Prefer a dedicated number for a bot: with a linked device the bot shares your
 account, and messages you send yourself won't reach it (the adapter drops the
-account's own messages to avoid reply loops).
+bot's own messages to avoid reply loops).
 
-#### Step 3, Run the daemon
-
-Start the daemon with the JSON-RPC TCP socket:
-
-```bash
-signal-cli -a +15550001 daemon --tcp 127.0.0.1:7583
-```
-
-> ⚠️ **The socket is unauthenticated**: anyone who can connect can read and send
-> as the bot's account. Bind it to `127.0.0.1` (or a private network) only, and
-> never expose it to the internet.
-
-The daemon must stay running; it holds the account state and the long-lived
-connection to Signal's servers. `127.0.0.1:7583` is the daemon's default.
-
-#### Step 4, Run the bot
+#### Step 3, Run the bot
 
 ```go
 import "github.com/lao/botbooter/signal"
 
 bot, err := signal.New(signal.Config{
-	Address: os.Getenv("SIGNAL_ADDR"),    // daemon socket, e.g. "127.0.0.1:7583"; required
-	Account: os.Getenv("SIGNAL_ACCOUNT"), // the bot's own E.164 number, e.g. "+15550001"
+	BaseURL: os.Getenv("SIGNAL_API_URL"), // e.g. "http://127.0.0.1:8080"; required
+	Number:  os.Getenv("SIGNAL_NUMBER"),  // the bot's own E.164 number, e.g. "+15550001"; required
 })
 ```
 
-`Account` is optional for a single-account daemon (self-message filtering falls
-back to the account the daemon reports) but **required for a multi-account
-daemon** (one started without `-a`), where outbound requests must name the
-sending account. Optional `signal.Config` fields: `DialTimeout` (bounds the
-connect dial, default 10s) and `SendTimeout` (bounds each send round-trip,
-default 30s).
+Optional `signal.Config` fields: `DialTimeout` (bounds the receive-socket
+handshake, default 10s), `SendTimeout` (bounds each send round-trip, default
+30s), and `HTTPClient` (the outbound REST client).
 
 Message the bot from **another** account; it drops its own messages.
 
 **Groups.** A group message arrives with `ChannelID` set to `"group:"+groupID`,
-and replying to that `ChannelID` posts back to the group — handlers need no
+and replying to that `ChannelID` posts back to the group — the adapter converts
+the id to the REST API's group-recipient form internally, so handlers need no
 special casing. The raw group id is on `signal.RawMessage(m).GroupID`.
 
-**Attachments.** signal-cli delivers attachments **by id, not URL**, and stores
-the bytes in its own data directory
-(`$XDG_DATA_HOME/signal-cli/attachments/<id>`, i.e.
-`~/.local/share/signal-cli/attachments/<id>` by default). `Attachment.URL` is
-empty; `Attachment.ExtraData` carries a `*signal.Attachment` with the id,
-content type, filename and size. Read the bytes from the daemon's attachment
-directory — with a remote daemon, that directory lives on the daemon's host.
+**Attachments.** The container delivers attachments by id and serves the bytes
+itself, so `Attachment.URL` points at its `/v1/attachments/{id}` endpoint —
+fetch it with any HTTP client (the URL is only as reachable, and as private, as
+the container). `Attachment.ExtraData` carries a `*signal.Attachment` with the
+id, content type, filename and size.
 
 **Environment variables** (read by the bundled example):
 
 | Variable | Value |
 |---|---|
-| `SIGNAL_ADDR` | daemon JSON-RPC TCP address from step 3, e.g. `127.0.0.1:7583` |
-| `SIGNAL_ACCOUNT` | optional; the bot's own number (`+15550001`), required for multi-account daemons |
+| `SIGNAL_API_URL` | container base URL from step 1, e.g. `http://127.0.0.1:8080` |
+| `SIGNAL_NUMBER` | the bot's own number registered in step 2 (`+15550001`) |
 
 #### No messages?
 
-- **`Connect` fails (connection refused)**: the daemon isn't running, or
-  `SIGNAL_ADDR` doesn't match the `--tcp` address it was started with.
-- **`Send` fails / `ErrNotConnected`**: the daemon connection dropped (the bot's
-  event loop ends and `Run` returns — restart the bot after restarting the
-  daemon); on a multi-account daemon, an unset `SIGNAL_ACCOUNT` makes every send
-  fail.
+- **`Connect` fails**: the container isn't running, `SIGNAL_API_URL` is wrong,
+  or the container isn't in `json-rpc` mode — the receive WebSocket only exists
+  there (check `docker logs signal-api`).
+- **`Send` fails**: the REST call surfaces the container's error message —
+  typically an unregistered number, or a number that doesn't match the
+  registered account.
 - **Nothing arrives**: you're messaging from the bot's own account (drop-own
-  filtering), or the daemon isn't receiving — check its logs; `signal-cli
-  receive` conflicts with a running daemon, don't run both.
+  filtering), or the number never finished registration/linking — hit
+  `http://127.0.0.1:8080/v1/accounts` to list registered accounts.
 
-**Official docs:** [signal-cli](https://github.com/AsamK/signal-cli) · [JSON-RPC service](https://github.com/AsamK/signal-cli/wiki/JSON-RPC-service) · [Registration with captcha](https://github.com/AsamK/signal-cli/wiki/Registration-with-captcha) · [Linking to an existing account](https://github.com/AsamK/signal-cli/wiki/Linking-other-devices-(Provisioning))
+**Official docs:** [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) · [API reference](https://bbernhard.github.io/signal-cli-rest-api/) · [Execution modes](https://github.com/bbernhard/signal-cli-rest-api#execution-modes) · [signal-cli](https://github.com/AsamK/signal-cli)
 
 ---
 

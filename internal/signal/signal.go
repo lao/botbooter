@@ -1,35 +1,44 @@
-// Package signal is the Signal adapter for botbooter. It talks to a signal-cli
-// daemon (https://github.com/AsamK/signal-cli) over its JSON-RPC TCP socket
-// (`signal-cli daemon --tcp <addr>`) and implements core.Adapter.
+// Package signal is the Signal adapter for botbooter. It talks to a
+// signal-cli-rest-api container (https://github.com/bbernhard/signal-cli-rest-api)
+// running in json-rpc mode.
 //
-// Signal has no official bot API, so the daemon owns the Signal protocol and
-// this adapter speaks newline-delimited JSON-RPC 2.0 to it over plain TCP:
-// inbound messages arrive as "receive" notifications on the long-lived
-// connection, and replies go out as "send" requests on the same connection.
-// The socket is unauthenticated — bind the daemon to localhost or a private
-// network only.
+// Signal has no official bot API, so the container owns the Signal protocol
+// and this adapter speaks two channels to it: inbound messages arrive over the
+// container's receive WebSocket (GET /v1/receive/{number}, upgraded), and
+// replies go out as plain REST calls (POST /v2/send). The container's API is
+// unauthenticated — bind it to localhost or a private network only.
 package signal
 
 import (
-	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
-	"net"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/lao/botbooter/internal/core"
 )
 
 // groupChannelPrefix marks a core ChannelID as a Signal group id rather than a
-// phone number. Inbound group messages carry it and Send strips it back off.
+// phone number. Inbound group messages carry it and Send converts it to the
+// REST API's group-recipient form.
 const groupChannelPrefix = "group:"
+
+// restGroupPrefix is the recipient prefix signal-cli-rest-api expects for
+// groups: "group." + base64(internal group id).
+const restGroupPrefix = "group."
 
 // Shutdown budgets: how long Disconnect waits for the read loop to exit and
 // for in-flight dispatches to drain. Package variables so tests can shrink them.
@@ -42,38 +51,38 @@ const (
 	defaultDialTimeout = 10 * time.Second
 	defaultSendTimeout = 30 * time.Second
 
-	// maxLineBytes caps a single JSON-RPC frame from the daemon. Envelopes are
-	// small (attachments arrive as ids, not inline bytes); the cap only bounds a
-	// misbehaving peer.
-	maxLineBytes = 1 << 20 // 1 MiB
+	// maxMessageBytes caps a single WebSocket message from the container.
+	// Envelopes are small (attachments arrive as ids, not inline bytes); the
+	// cap only bounds a misbehaving peer.
+	maxMessageBytes = 1 << 20 // 1 MiB
 )
 
 // ErrMissingConfig is returned by New when a required Config field is empty.
 var ErrMissingConfig = errors.New("signal: missing required config field")
 
-// ErrNotConnected is returned by Send when the adapter has no live daemon
-// connection to write to.
-var ErrNotConnected = errors.New("signal: not connected")
-
-// Config configures a Signal bot backed by a signal-cli daemon.
+// Config configures a Signal bot backed by a signal-cli-rest-api container.
 type Config struct {
-	// Address is the TCP address of the signal-cli daemon's JSON-RPC socket,
-	// e.g. "127.0.0.1:7583" (the daemon's default). Required.
-	Address string
-	// Account is the bot's own E.164 number, e.g. "+15550001". It is passed on
-	// outbound requests (required by multi-account daemons) and used to drop
-	// the bot's own messages. Optional for single-account daemons; without it,
-	// self-message filtering falls back to the account the daemon reports.
-	Account string
-	// DialTimeout bounds the Connect dial; defaults to 10s when zero.
+	// BaseURL is the container's API base URL, e.g. "http://127.0.0.1:8080".
+	// http and https are accepted (the receive socket dials ws/wss
+	// accordingly). Required.
+	BaseURL string
+	// Number is the bot's own registered E.164 number, e.g. "+15550001". It
+	// routes the receive socket, names the sender on outbound messages, and
+	// drops the bot's own messages. Required.
+	Number string
+	// DialTimeout bounds the receive-socket handshake on Connect; defaults to
+	// 10s when zero.
 	DialTimeout time.Duration
-	// SendTimeout bounds each Send's request/response round-trip regardless of
-	// the caller's context; defaults to 30s when zero.
+	// SendTimeout bounds each Send's REST round-trip regardless of the
+	// caller's context; defaults to 30s when zero.
 	SendTimeout time.Duration
+	// HTTPClient is the client for outbound REST calls; defaults to a plain
+	// client (each call is already bounded by SendTimeout).
+	HTTPClient *http.Client
 }
 
 // Message is the parsed payload of a signal-cli receive envelope. Raw holds
-// the notification's original params JSON for callers that need more.
+// the envelope's original JSON for callers that need more.
 type Message struct {
 	Source      string
 	SourceUUID  string
@@ -85,10 +94,8 @@ type Message struct {
 	Raw         json.RawMessage
 }
 
-// Attachment is a file attached to a Signal message. signal-cli delivers
-// attachments by id and stores the bytes in its own data directory
-// ($XDG_DATA_HOME/signal-cli/attachments/<id>); this adapter carries the
-// metadata only.
+// Attachment is a file attached to a Signal message, delivered by id. The
+// container serves the bytes at GET /v1/attachments/{id}.
 type Attachment struct {
 	ID          string
 	ContentType string
@@ -97,22 +104,18 @@ type Attachment struct {
 }
 
 type adapter struct {
-	cfg Config
+	cfg    Config
+	wsURL  string // receive socket, derived from BaseURL + Number
+	client *http.Client
 
 	mu   sync.Mutex
-	conn *rpcConn
+	conn *wsConn
 }
 
-// rpcConn holds one live daemon connection's state. Connect creates a fresh
-// one and Disconnect drops it, so nothing leaks across reconnects.
-type rpcConn struct {
-	net net.Conn
-
-	writeMu sync.Mutex
-
-	pendMu  sync.Mutex
-	pending map[uint64]chan rpcResult
-	nextID  atomic.Uint64
+// wsConn holds one live receive-socket's state. Connect creates a fresh one
+// and Disconnect drops it, so nothing leaks across reconnects.
+type wsConn struct {
+	ws *websocket.Conn
 
 	// cancelDispatch aborts this connection's dispatch goroutines; Disconnect
 	// calls it after the drain window so a stuck handler cannot leak.
@@ -123,26 +126,17 @@ type rpcConn struct {
 	// is suppressed instead of reported via deps.Done.
 	closed atomic.Bool
 	// loopDone is closed when the read loop returns. Disconnect waits on it
-	// after closing the socket: Close only stops future reads, and frames
-	// already buffered in the scanner keep dispatching (and incrementing
-	// inflight) until the loop exits, so the loop's exit is the happens-before
-	// edge that makes the drain counter complete.
+	// after closing the socket: Close only stops future reads, and a message
+	// already read keeps dispatching (and incrementing inflight) until the
+	// loop exits, so the loop's exit is the happens-before edge that makes
+	// the drain counter complete.
 	loopDone chan struct{}
 }
 
-type rpcResult struct {
-	result json.RawMessage
-	err    *rpcError
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// New creates a Signal bot that talks to a signal-cli daemon at cfg.Address.
-// It returns ErrMissingConfig if Address is empty; the daemon is not dialed
-// until the bot connects.
+// New creates a Signal bot that talks to the signal-cli-rest-api container at
+// cfg.BaseURL. It returns ErrMissingConfig if BaseURL or Number is empty, or
+// an error for an unparseable BaseURL; the container is not dialed until the
+// bot connects.
 func New(cfg Config) (*core.Bot, error) {
 	a, err := newAdapter(cfg)
 	if err != nil {
@@ -152,8 +146,16 @@ func New(cfg Config) (*core.Bot, error) {
 }
 
 func newAdapter(cfg Config) (*adapter, error) {
-	if cfg.Address == "" {
-		return nil, fmt.Errorf("%w: Address is required", ErrMissingConfig)
+	if cfg.BaseURL == "" {
+		return nil, fmt.Errorf("%w: BaseURL is required", ErrMissingConfig)
+	}
+	if cfg.Number == "" {
+		return nil, fmt.Errorf("%w: Number is required", ErrMissingConfig)
+	}
+	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+	wsURL, err := receiveSocketURL(cfg.BaseURL, cfg.Number)
+	if err != nil {
+		return nil, err
 	}
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = defaultDialTimeout
@@ -161,24 +163,51 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.SendTimeout <= 0 {
 		cfg.SendTimeout = defaultSendTimeout
 	}
-	return &adapter{cfg: cfg}, nil
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{}
+	}
+	return &adapter{cfg: cfg, wsURL: wsURL, client: client}, nil
+}
+
+// receiveSocketURL derives the ws/wss receive endpoint from the http/https
+// base URL.
+func receiveSocketURL(baseURL, number string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("signal: invalid BaseURL: %w", err)
+	}
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	default:
+		return "", fmt.Errorf("signal: BaseURL scheme must be http or https, got %q", u.Scheme)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/v1/receive/" + url.PathEscape(number)
+	return u.String(), nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
-	netConn, err := net.DialTimeout("tcp", a.cfg.Address, a.cfg.DialTimeout)
+	dialer := websocket.Dialer{HandshakeTimeout: a.cfg.DialTimeout}
+	ws, resp, err := dialer.DialContext(ctx, a.wsURL, nil)
 	if err != nil {
-		return err
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return fmt.Errorf("signal: receive socket dial failed (is the container running in json-rpc mode?): %w", err)
 	}
+	ws.SetReadLimit(maxMessageBytes)
 
 	// One detached, cancelable context per connection parents all dispatch:
 	// WithoutCancel lets in-flight handler processing finish during the
 	// shutdown drain, and WithCancel lets Disconnect abort stragglers after
-	// it. Note replies sent during the drain fail: Disconnect closes the
-	// socket before draining, so the drain preserves processing, not replies.
+	// it. Replies keep working during the drain — they travel over the REST
+	// client, not the receive socket Disconnect closes.
 	dispatchCtx, cancelDispatch := context.WithCancel(context.WithoutCancel(ctx))
-	c := &rpcConn{
-		net:            netConn,
-		pending:        make(map[uint64]chan rpcResult),
+	c := &wsConn{
+		ws:             ws,
 		cancelDispatch: cancelDispatch,
 		loopDone:       make(chan struct{}),
 	}
@@ -203,53 +232,28 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// readLoop consumes newline-delimited JSON-RPC frames from the daemon until
-// the connection dies, routing responses to pending Sends and "receive"
-// notifications to dispatch. A malformed line is logged and skipped.
-func (a *adapter) readLoop(c *rpcConn, dispatchCtx context.Context, deps core.AdapterDeps) {
+// readLoop consumes receive envelopes from the WebSocket until the connection
+// dies, dispatching each user message. A malformed message is logged and
+// skipped.
+func (a *adapter) readLoop(c *wsConn, dispatchCtx context.Context, deps core.AdapterDeps) {
 	defer close(c.loopDone)
-	sc := bufio.NewScanner(c.net)
-	sc.Buffer(make([]byte, 0, 64<<10), maxLineBytes)
-	for sc.Scan() {
-		line := sc.Bytes()
-		var frame struct {
-			ID     *uint64         `json:"id"`
-			Method string          `json:"method"`
-			Params json.RawMessage `json:"params"`
-			Result json.RawMessage `json:"result"`
-			Error  *rpcError       `json:"error"`
+	for {
+		_, data, err := c.ws.ReadMessage()
+		if err != nil {
+			if c.closed.Load() {
+				return // intentional Disconnect; core settles the lifecycle itself
+			}
+			deps.Done(fmt.Errorf("signal: receive socket closed: %w", err))
+			return
 		}
-		if err := json.Unmarshal(line, &frame); err != nil {
-			log.Printf("signal: skipping unparseable frame: %v", err)
-			continue
-		}
-		switch {
-		case frame.ID != nil && frame.Method == "":
-			// id + no method = a response; an id-bearing request from the
-			// daemon must not settle a pending Send.
-			c.settle(*frame.ID, rpcResult{result: frame.Result, err: frame.Error})
-		case frame.Method == "receive":
-			a.handleReceive(c, dispatchCtx, frame.Params, deps)
-		}
+		a.handleReceive(c, dispatchCtx, data, deps)
 	}
-
-	// The connection is gone either way; unblock every pending Send.
-	c.failPending()
-
-	if c.closed.Load() {
-		return // intentional Disconnect; core settles the lifecycle itself
-	}
-	err := sc.Err()
-	if err == nil {
-		err = errors.New("signal: daemon closed the connection")
-	}
-	deps.Done(err)
 }
 
-// receiveParams mirrors the subset of a signal-cli "receive" notification the
+// receiveEnvelope mirrors the subset of a signal-cli receive payload the
 // adapter consumes. Only envelopes carrying a dataMessage are user messages;
 // receipts, typing indicators and sync messages have none and are skipped.
-type receiveParams struct {
+type receiveEnvelope struct {
 	Account  string `json:"account"`
 	Envelope struct {
 		Source       string `json:"source"`
@@ -272,10 +276,10 @@ type receiveParams struct {
 	} `json:"envelope"`
 }
 
-func (a *adapter) handleReceive(c *rpcConn, dispatchCtx context.Context, params json.RawMessage, deps core.AdapterDeps) {
-	var p receiveParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		log.Printf("signal: skipping unparseable receive params: %v", err)
+func (a *adapter) handleReceive(c *wsConn, dispatchCtx context.Context, data []byte, deps core.AdapterDeps) {
+	var p receiveEnvelope
+	if err := json.Unmarshal(data, &p); err != nil {
+		log.Printf("signal: skipping unparseable receive payload: %v", err)
 		return
 	}
 	if p.Envelope.DataMessage == nil {
@@ -287,11 +291,7 @@ func (a *adapter) handleReceive(c *rpcConn, dispatchCtx context.Context, params 
 		source = p.Envelope.Source
 	}
 	// Drop the bot's own messages to avoid reply loops.
-	self := a.cfg.Account
-	if self == "" {
-		self = p.Account
-	}
-	if source == self {
+	if source == a.cfg.Number {
 		return
 	}
 
@@ -302,9 +302,9 @@ func (a *adapter) handleReceive(c *rpcConn, dispatchCtx context.Context, params 
 		SourceName: p.Envelope.SourceName,
 		Timestamp:  time.UnixMilli(p.Envelope.Timestamp).UTC(),
 		Text:       dm.Message,
-		// params was copied out of the scanner buffer by RawMessage.UnmarshalJSON,
-		// so it is already private to this frame.
-		Raw: params,
+		// data is this message's own buffer (ReadMessage allocates per
+		// message), so it is already private to this envelope.
+		Raw: data,
 	}
 	if dm.GroupInfo != nil {
 		m.GroupID = dm.GroupInfo.GroupID
@@ -316,8 +316,8 @@ func (a *adapter) handleReceive(c *rpcConn, dispatchCtx context.Context, params 
 	// Dispatch off the read loop so a slow handler cannot stall the socket; the
 	// counter lets Disconnect drain in-flight messages instead of dropping them.
 	// Account on the loop's own connection, not a.conn: a reconnect can install
-	// a newer connection while this loop still flushes buffered frames, and its
-	// drain must not be charged for work it never spawned.
+	// a newer connection while this loop still flushes buffered messages, and
+	// its drain must not be charged for work it never spawned.
 	c.inflight.Add(1)
 	go func() {
 		defer c.inflight.Add(-1)
@@ -341,118 +341,65 @@ func toCoreMessage(m *Message) *core.Message {
 	}
 }
 
-func (a *adapter) currentConn() *rpcConn {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.conn
-}
-
-// Send delivers text over the daemon as a JSON-RPC "send" request and waits
-// for the matching response, bounded by cfg.SendTimeout. channelID is a
-// recipient number, or a group id carrying the "group:" prefix as produced on
-// inbound group messages.
+// Send delivers text as a POST /v2/send REST call, bounded by cfg.SendTimeout.
+// channelID is a recipient number, or a group id carrying the "group:" prefix
+// as produced on inbound group messages. Send needs no live receive socket —
+// the REST endpoint stands on its own.
 func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	c := a.currentConn()
-	if c == nil {
-		return ErrNotConnected
-	}
-
 	// Bound the round-trip independently of the caller: Bot.SendMessage passes
-	// a background context, and a request the daemon accepts but never answers
-	// would otherwise block that caller forever.
+	// a background context, and a request the container accepts but never
+	// answers would otherwise block that caller forever.
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.SendTimeout)
 	defer cancel()
 
-	params := map[string]any{"message": text}
-	if groupID, ok := strings.CutPrefix(channelID, groupChannelPrefix); ok {
-		params["groupId"] = groupID
-	} else {
-		params["recipient"] = []string{channelID}
-	}
-	if a.cfg.Account != "" {
-		params["account"] = a.cfg.Account
+	recipient := channelID
+	if internalID, ok := strings.CutPrefix(channelID, groupChannelPrefix); ok {
+		// The REST API addresses groups as "group." + base64 of the internal
+		// group id signal-cli reports on inbound envelopes.
+		recipient = restGroupPrefix + base64.StdEncoding.EncodeToString([]byte(internalID))
 	}
 
-	id := c.nextID.Add(1)
-	ch := make(chan rpcResult, 1)
-	c.pendMu.Lock()
-	c.pending[id] = ch
-	c.pendMu.Unlock()
-	defer func() {
-		c.pendMu.Lock()
-		delete(c.pending, id)
-		c.pendMu.Unlock()
-	}()
-
-	frame, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"method":  "send",
-		"params":  params,
+	body, err := json.Marshal(map[string]any{
+		"number":     a.cfg.Number,
+		"recipients": []string{recipient},
+		"message":    text,
 	})
 	if err != nil {
 		return err
 	}
-	frame = append(frame, '\n')
 
-	c.writeMu.Lock()
-	_, err = c.net.Write(frame)
-	c.writeMu.Unlock()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.BaseURL+"/v2/send", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("signal: send write failed: %w", err)
+		return err
 	}
+	req.Header.Set("Content-Type", "application/json")
 
-	// loopDone guards the registration race: a Send that registered its pending
-	// entry after the dying read loop already ran failPending would otherwise
-	// wait on a channel nothing can ever settle. loopDone closes strictly after
-	// failPending, so one of the first two cases always fires on a dead conn.
-	select {
-	case res, ok := <-ch:
-		return sendOutcome(res, ok)
-	case <-c.loopDone:
-		// The loop may have settled the response just before exiting; prefer it.
-		select {
-		case res, ok := <-ch:
-			return sendOutcome(res, ok)
-		default:
-			return errors.New("signal: connection closed before send response")
-		}
-	case <-ctx.Done():
-		return ctx.Err()
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("signal: send request failed: %w", err)
 	}
-}
+	defer func() { _ = resp.Body.Close() }()
 
-// sendOutcome maps a settled (or failed-pending) response to Send's error.
-func sendOutcome(res rpcResult, ok bool) error {
-	if !ok {
-		return errors.New("signal: connection closed before send response")
-	}
-	if res.err != nil {
-		return fmt.Errorf("signal: send failed: %s (code %d)", res.err.Message, res.err.Code)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("signal: send failed: %s: %s", resp.Status, restErrorMessage(resp.Body))
 	}
 	return nil
 }
 
-// settle delivers the daemon's response for request id to its waiting Send.
-func (c *rpcConn) settle(id uint64, res rpcResult) {
-	c.pendMu.Lock()
-	ch := c.pending[id]
-	delete(c.pending, id)
-	c.pendMu.Unlock()
-	if ch != nil {
-		ch <- res
+// restErrorMessage extracts the container's {"error": "..."} payload from a
+// failed response, falling back to the raw (truncated) body.
+func restErrorMessage(body io.Reader) string {
+	raw, err := io.ReadAll(io.LimitReader(body, 4<<10))
+	if err != nil || len(raw) == 0 {
+		return "(no error body)"
 	}
-}
-
-// failPending closes every pending response channel so Sends waiting on a
-// dead connection fail instead of hanging.
-func (c *rpcConn) failPending() {
-	c.pendMu.Lock()
-	defer c.pendMu.Unlock()
-	for id, ch := range c.pending {
-		close(ch)
-		delete(c.pending, id)
+	var e struct {
+		Error string `json:"error"`
 	}
+	if json.Unmarshal(raw, &e) == nil && e.Error != "" {
+		return e.Error
+	}
+	return string(raw)
 }
 
 func (a *adapter) Disconnect() error {
@@ -466,9 +413,9 @@ func (a *adapter) Disconnect() error {
 	// Mark intentional before closing so the read loop suppresses the
 	// resulting error instead of reporting it via deps.Done.
 	c.closed.Store(true)
-	_ = c.net.Close()
+	_ = c.ws.Close()
 
-	// Let the read loop finish consuming already-buffered frames before the
+	// Let the read loop finish the message it may already hold before the
 	// drain: every inflight.Add happens inside the loop, so waiting here is
 	// what guarantees the drain counter observes all of them. The loop cannot
 	// hang — reads fail after Close and handleReceive never blocks.
@@ -503,12 +450,10 @@ func (a *adapter) Disconnect() error {
 
 // drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so a
 // received message finishes processing rather than being dropped at shutdown.
-// Only processing is preserved: the socket is already closed by the time the
-// drain runs, so a handler that replies during the drain gets a write error.
-// It polls an
-// atomic counter rather than a WaitGroup: an Add racing Wait would risk a
-// misuse panic.
-func (c *rpcConn) drainDispatch(ctx context.Context) {
+// Replies still work during the drain — they go over REST, not the closed
+// receive socket. It polls an atomic counter rather than a WaitGroup: an Add
+// racing Wait would risk a misuse panic.
+func (c *wsConn) drainDispatch(ctx context.Context) {
 	for c.inflight.Load() > 0 {
 		select {
 		case <-ctx.Done():
@@ -518,9 +463,9 @@ func (c *rpcConn) drainDispatch(ctx context.Context) {
 	}
 }
 
-// Attachments returns the files attached to m. signal-cli delivers attachments
-// by id, so Attachment.URL is empty and ExtraData carries the *Attachment; the
-// bytes live in the daemon's attachment directory under that id.
+// Attachments returns the files attached to m. The container serves attachment
+// bytes at /v1/attachments/{id}, so URL points there; ExtraData carries the
+// *Attachment with the id, content type, filename and size.
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	sm, ok := RawMessage(m)
 	if !ok || sm == nil {
@@ -531,6 +476,7 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 		att := &sm.Attachments[i]
 		out = append(out, core.Attachment{
 			IsImage:   strings.HasPrefix(att.ContentType, "image/"),
+			URL:       a.cfg.BaseURL + "/v1/attachments/" + url.PathEscape(att.ID),
 			ExtraData: att,
 		})
 	}

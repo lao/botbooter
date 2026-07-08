@@ -43,6 +43,11 @@ func TestIsolationDeps(t *testing.T) {
 		// full versioned module path matches the other constants and how
 		// `go list -deps` emits it.
 		jwtv5 = "github.com/golang-jwt/jwt/v5"
+		// gorillaws is the Signal adapter's only third-party dependency (the
+		// receive-socket transport). It is deliberately NOT in any absent list:
+		// slack-go and discordgo pull it in as their own websocket transport, so
+		// its presence proves nothing about cross-platform leakage.
+		gorillaws = "github.com/gorilla/websocket"
 	)
 	// The SDK checks above miss a cross-import of a marker-less internal package
 	// (internal/cli and internal/whatsapp pull in no third-party SDK), so also
@@ -63,7 +68,7 @@ func TestIsolationDeps(t *testing.T) {
 		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5}, []string{gotelegram}, "telegram"},
 		{"github.com/lao/botbooter/whatsapp", []string{discordgo, slackgo, gotelegram, jwtv5}, nil, "whatsapp"},
 		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram}, []string{jwtv5}, "teams"},
-		{"github.com/lao/botbooter/signal", []string{discordgo, slackgo, gotelegram, jwtv5}, nil, "signal"},
+		{"github.com/lao/botbooter/signal", []string{discordgo, slackgo, gotelegram, jwtv5}, []string{gorillaws}, "signal"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.pkg, func(t *testing.T) {

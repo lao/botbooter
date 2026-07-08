@@ -7,7 +7,7 @@
 //	go run ./_examples/v1 telegram   # reads TELEGRAM_BOT_TOKEN
 //	go run ./_examples/v1 whatsapp   # reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
 //	go run ./_examples/v1 teams      # reads TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (and optional TEAMS_APP_TENANT_ID, TEAMS_PATH)
-//	go run ./_examples/v1 signal     # reads SIGNAL_ADDR (and optional SIGNAL_ACCOUNT)
+//	go run ./_examples/v1 signal     # reads SIGNAL_API_URL / SIGNAL_NUMBER
 package main
 
 import (

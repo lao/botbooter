@@ -7,9 +7,9 @@
 // packages — botbooter/slack, botbooter/discord, botbooter/telegram,
 // botbooter/whatsapp, botbooter/teams, botbooter/signal or botbooter/cli — each
 // of which pulls in only its own platform SDK (WhatsApp and Teams speak REST
-// APIs over plain HTTP and need none; Signal speaks JSON-RPC to a signal-cli
-// daemon over plain TCP), then drive it through the shared types re-exported
-// here. A bot that uses one platform never compiles the other platforms' SDKs
+// APIs over plain HTTP and need none; Signal speaks REST plus a receive
+// WebSocket to a signal-cli-rest-api container), then drive it through the
+// shared types re-exported here. A bot that uses one platform never compiles the other platforms' SDKs
 // into its binary.
 package botbooter
 
