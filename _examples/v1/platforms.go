@@ -11,7 +11,8 @@ import (
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
-	"github.com/lao/botbooter/whatsapp"
+	"github.com/lao/botbooter/whatsapp/cloud"
+	"github.com/lao/botbooter/whatsapp/whatsmeow"
 )
 
 func requestedBotType(args []string) string {
@@ -30,7 +31,7 @@ func newBot(botType string) (*botbooter.Bot, error) {
 	case "telegram":
 		return telegram.New(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	case "whatsapp":
-		return whatsapp.New(whatsapp.Config{
+		return cloud.New(cloud.Config{
 			Token:         os.Getenv("WA_TOKEN"),
 			PhoneNumberID: os.Getenv("WA_PHONE_ID"),
 			AppSecret:     os.Getenv("WA_APP_SECRET"),
@@ -38,6 +39,10 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Addr:          os.Getenv("WA_ADDR"),
 			Path:          os.Getenv("WA_PATH"), // optional; defaults to /webhook
 		})
+	case "whatsmeow":
+		// WhatsApp Web flavor: QR-links to a phone on first run, then reuses the
+		// session stored in the SQLite file.
+		return whatsmeow.New(whatsmeow.Config{DBPath: os.Getenv("WA_MEOW_DB")}) // "" -> botbooter-whatsapp.db
 	case "teams":
 		return teams.New(teams.Config{
 			AppID:       os.Getenv("TEAMS_APP_ID"),
@@ -50,6 +55,6 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)
 		return cli.New(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, teams or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams or cli)", botType)
 	}
 }

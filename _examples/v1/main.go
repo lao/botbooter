@@ -1,11 +1,12 @@
 // Command v1 is a small demo of botbooter. It runs an "echo" bot on Slack,
-// Discord, Telegram, WhatsApp or the local CLI.
+// Discord, Telegram, WhatsApp (either flavor) or the local CLI.
 //
 //	go run ./_examples/v1            # CLI mode (no credentials needed)
 //	go run ./_examples/v1 slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
 //	go run ./_examples/v1 discord    # reads DISCORD_BOT_TOKEN
 //	go run ./_examples/v1 telegram   # reads TELEGRAM_BOT_TOKEN
-//	go run ./_examples/v1 whatsapp   # reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
+//	go run ./_examples/v1 whatsapp   # Cloud API flavor: reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
+//	go run ./_examples/v1 whatsmeow  # WhatsApp Web flavor: no credentials; scan the QR on first run (optional WA_MEOW_DB, default botbooter-whatsapp.db)
 package main
 
 import (
