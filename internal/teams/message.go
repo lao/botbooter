@@ -82,15 +82,33 @@ func toMessage(act *inboundActivity, raw json.RawMessage) *core.Message {
 		attachments:    act.Attachments,
 	}
 	return &core.Message{
-		ID:         act.ID,
-		UserID:     act.From.ID,
-		AuthorName: act.From.Name,
-		ChannelID:  act.Conversation.ID,
-		Content:    stripRecipientMention(act),
-		Timestamp:  ts,
-		ReplyToID:  act.ReplyToID,
-		Raw:        tm,
+		ID:               act.ID,
+		UserID:           act.From.ID,
+		AuthorName:       act.From.Name,
+		ChannelID:        act.Conversation.ID,
+		Content:          stripRecipientMention(act),
+		Timestamp:        ts,
+		ReplyToID:        act.ReplyToID,
+		MentionedUserIDs: mentionedUserIDs(act),
+		Raw:              tm,
 	}
+}
+
+// mentionedUserIDs collects the IDs mentioned in the Activity's entities,
+// excluding the bot itself (Recipient) — the same entity stripRecipientMention
+// removes from the text.
+func mentionedUserIDs(act *inboundActivity) []string {
+	var ids []string
+	for _, e := range act.Entities {
+		if !strings.EqualFold(e.Type, "mention") || e.Mentioned.ID == "" {
+			continue
+		}
+		if e.Mentioned.ID == act.Recipient.ID {
+			continue
+		}
+		ids = append(ids, e.Mentioned.ID)
+	}
+	return ids
 }
 
 // stripRecipientMention removes the bot's own @mention markup from the Activity
