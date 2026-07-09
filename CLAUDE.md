@@ -9,7 +9,7 @@ botbooter is a Go library (module `github.com/lao/botbooter`, Go 1.25+) for writ
 ## Commands
 
 ```bash
-make all        # fmt + vet + lint + test-race — run before considering work done
+make all        # fmt + vet (both incl. _examples) + lint + test-race — run before considering work done
 make test       # go test ./...
 make test-race  # race detector (CI runs this; the lifecycle code is concurrency-heavy)
 make cover      # race + atomic coverage, prints total

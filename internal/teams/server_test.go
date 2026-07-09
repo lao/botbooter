@@ -134,9 +134,9 @@ func TestHandleMessages_DispatchesOnDetachedCtx(t *testing.T) {
 
 	select {
 	case c := <-gotCtx:
-		// The dispatch context is detached from the request/run context, so a
-		// later shutdown cancellation cannot abort an already-acked dispatch.
-		asserts.NoError(t, c.Err(), "dispatch must ride the detached context")
+		asserts.NoError(t, c.Err(), "dispatch ctx live before cancel")
+		cancelDispatch()
+		asserts.ErrorIs(t, c.Err(), context.Canceled, "dispatch rides the passed detached ctx")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for dispatch")
 	}
@@ -515,6 +515,40 @@ func TestServe_ReportsUnexpectedError(t *testing.T) {
 	default:
 		t.Fatal("unexpected serve error was not reported")
 	}
+}
+
+func TestConnect_StaleWatcherIgnoresReplacedServer(t *testing.T) {
+	a := testAdapter(t)
+	called := make(chan struct{}, 1)
+	deps := core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { called <- struct{}{}; return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should bind")
+
+	// Simulate a reconnect that installed a different server, then close the one
+	// this Connect started so it does not leak.
+	a.mu.Lock()
+	old := a.srv
+	a.srv = &http.Server{}
+	a.mu.Unlock()
+	defer func() { _ = old.Close() }()
+
+	cancel() // wake the now-stale watcher
+
+	select {
+	case <-called:
+		t.Fatal("a stale watcher must not drive Disconnect on a replaced server")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: the guard saw a.srv != its own server and skipped.
+	}
+}
+
+func TestDisconnect_NeverConnected(t *testing.T) {
+	a := testAdapter(t)
+	asserts.NoError(t, a.Disconnect(), "Disconnect before Connect should be safe")
 }
 
 func TestConnect_BadAddr(t *testing.T) {

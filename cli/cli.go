@@ -11,13 +11,18 @@ import (
 	cliint "github.com/lao/botbooter/internal/cli"
 )
 
-// New creates a CLI bot backed by the given reader and writer.
+// Message is the raw payload of a CLI message: the typed line plus any
+// tokens that resolved to local-file attachments.
+type Message = cliint.Message
+
+// New creates a CLI bot backed by the given reader and writer. A nil in or out
+// defaults to os.Stdin or os.Stdout respectively.
 func New(in io.Reader, out io.Writer) *botbooter.Bot {
 	return cliint.New(in, out)
 }
 
 // RawData returns the parsed CLI line carried on m, reporting whether m
 // originated from the CLI adapter.
-func RawData(m *botbooter.Message) (*botbooter.CLIMessage, bool) {
+func RawData(m *botbooter.Message) (*Message, bool) {
 	return cliint.RawData(m)
 }

@@ -366,6 +366,13 @@ bot, err := teams.New(teams.Config{
 Optional `teams.Config` fields: `Path` (webhook route, default `/api/messages`)
 and `HTTPClient` (the outbound HTTP client; defaults to a 30-second timeout).
 
+Group and channel messages arrive prefixed with the bot's own `<at>Bot</at>`
+mention; botbooter strips it from `Message.Content` and excludes the bot's ID
+from `Message.MentionedUserIDs`, so anchored patterns (e.g. `^echo`) still
+match. Mentions of **other** users are kept in both. Note the divergence: on
+Slack and Discord the bot's own mention stays in `Content` and
+`MentionedUserIDs`.
+
 Every inbound request is authenticated by validating the **Bot Connector JWT**
 (JWKS signature, audience == App ID, issuer, and a `serviceurl` claim that must
 match the Activity), and outbound replies only go to allowlisted Bot Framework

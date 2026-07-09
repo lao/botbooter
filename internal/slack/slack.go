@@ -149,7 +149,7 @@ func (a *adapter) Disconnect() error {
 	select {
 	case <-drained:
 	case <-time.After(dispatchDrainTimeout):
-		err = fmt.Errorf("slack: dispatch drain timed out")
+		err = errors.New("slack: dispatch drain timed out")
 	}
 	if cancel != nil {
 		cancel()
@@ -248,10 +248,15 @@ func toMessage(msg *slackevents.MessageEvent) *core.Message {
 var slackMentionRE = regexp.MustCompile(`<@([A-Z0-9]+)(?:\|[^>]*)?>`)
 
 // slackMentions extracts mentioned user ids from message text, returning nil
-// when there are none.
+// when there are none. Each id appears once, in first-mention order.
 func slackMentions(text string) []string {
 	var ids []string
+	seen := make(map[string]bool)
 	for _, m := range slackMentionRE.FindAllStringSubmatch(text, -1) {
+		if seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
 		ids = append(ids, m[1])
 	}
 	return ids
@@ -310,22 +315,14 @@ func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEv
 
 // shouldSkipEvent reports whether an inbound event must not be dispatched: it
 // drops messages from bots (loop prevention) and messages with no text and no
-// files (nothing actionable — e.g. edits, joins).
+// files (nothing actionable — e.g. edits, joins). Only *MessageEvent needs skip
+// logic because handleEventsAPI dispatches nothing else.
 func shouldSkipEvent(event slackevents.EventsAPIEvent) bool {
-	switch ev := event.InnerEvent.Data.(type) {
-	case *slackevents.MessageEvent:
-		return ev.BotID != "" || ev.SubType == "bot_message" || (ev.Text == "" && len(ev.Files) == 0)
-	case *slackevents.AppMentionEvent:
-		return ev.BotID != ""
-	case *slackevents.MessageMetadataPostedEvent:
-		return ev.BotId != ""
-	case *slackevents.MessageMetadataUpdatedEvent:
-		return ev.BotId != ""
-	case *slackevents.MessageMetadataDeletedEvent:
-		return ev.BotId != ""
-	default:
+	ev, ok := event.InnerEvent.Data.(*slackevents.MessageEvent)
+	if !ok {
 		return false
 	}
+	return ev.BotID != "" || ev.SubType == "bot_message" || (ev.Text == "" && len(ev.Files) == 0)
 }
 
 func attachmentsFromMessage(m *slackevents.MessageEvent) []core.Attachment {

@@ -61,7 +61,6 @@ var imageFileExts = map[string]bool{
 type activityAttachment struct {
 	ContentType string `json:"contentType"`
 	ContentURL  string `json:"contentUrl"`
-	Name        string `json:"name"`
 	// Content is the FileDownloadInfo object on uploaded-file attachments; empty otherwise.
 	Content attachmentContent `json:"content"`
 }

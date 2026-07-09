@@ -227,11 +227,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.logger = deps.Logger
 	a.mu.Unlock()
 
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			deps.Done(err)
-		}
-	}()
+	go serve(srv, ln, deps.Done)
 
 	// Tear down when the run context is canceled
 	go func() {
@@ -245,6 +241,12 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	}()
 
 	return nil
+}
+
+func serve(srv *http.Server, ln net.Listener, done func(error)) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		done(err)
+	}
 }
 
 func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {

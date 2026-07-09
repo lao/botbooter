@@ -119,12 +119,14 @@ func TestLifecycle_StaleWatcherDoesNotCancelSuccessor(t *testing.T) {
 // blockingAdapter blocks inside Connect until released, modeling an adapter
 // whose Connect performs a slow (network) dial — e.g. discordgo's Session.Open.
 type blockingAdapter struct {
+	entered     chan struct{} // closed when Connect is entered (Connect runs once per test)
 	release     chan struct{}
 	mu          sync.Mutex
 	disconnects int
 }
 
 func (a *blockingAdapter) Connect(ctx context.Context, deps AdapterDeps) error {
+	close(a.entered)
 	<-a.release
 	return nil
 }
@@ -152,18 +154,20 @@ func (a *blockingAdapter) disconnectCount() int {
 // exactly once, never twice — the double-invocation the connection-scoped
 // teardown must prevent.
 func TestLifecycle_DisconnectRacingConnectDisconnectsOnce(t *testing.T) {
-	a := &blockingAdapter{release: make(chan struct{})}
+	a := &blockingAdapter{entered: make(chan struct{}), release: make(chan struct{})}
 	b := New(SlackBotType, a)
 
 	connErr := make(chan error, 1)
 	go func() { connErr <- b.Connect(context.Background()) }()
-	// Let Connect enter adapter.Connect (holding b.mu).
-	time.Sleep(20 * time.Millisecond)
+	// Wait until Connect has entered adapter.Connect (holding b.mu).
+	<-a.entered
 
 	discErr := make(chan error, 1)
 	go func() { discErr <- b.Disconnect() }()
-	// Disconnect is now blocked on b.mu; release Connect so it installs the
-	// connection and unlocks, letting Disconnect proceed.
+	// Blocking on b.mu is not observable from outside, so give Disconnect a
+	// moment to reach the lock (best effort — either interleaving must satisfy
+	// the assertions), then release Connect so it installs the connection and
+	// unlocks, letting Disconnect proceed.
 	time.Sleep(20 * time.Millisecond)
 	close(a.release)
 

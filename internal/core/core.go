@@ -64,22 +64,20 @@ func (t BotType) String() string {
 // are best-effort per platform. Raw carries the originating platform's untouched
 // event; read it with the matching typed accessor (e.g. discord.RawEvent).
 type Message struct {
-	ID               string
-	UserID           string
-	AuthorName       string
-	ChannelID        string
-	Content          string
-	Timestamp        time.Time
-	ReplyToID        string
+	ID         string
+	UserID     string
+	AuthorName string
+	ChannelID  string
+	Content    string
+	Timestamp  time.Time
+	ReplyToID  string
+	// MentionedUserIDs lists each mentioned user once, in first-mention order.
+	// Whether the bot's own mention appears follows Content: Teams strips the
+	// bot's mention from Content and so excludes its ID here; Slack and Discord
+	// keep it in both.
 	MentionedUserIDs []string
 
 	Raw any
-}
-
-// CLIMessage is the raw payload of a message read from the CLI adapter.
-type CLIMessage struct {
-	Text        string
-	Attachments []Attachment
 }
 
 // CommandHandler handles a dispatched message for a matched command.
@@ -210,10 +208,6 @@ func (c *connection) teardown(disconnectAdapter bool) error {
 	c.once.Do(func() {
 		close(c.runDone)
 		if disconnectAdapter {
-			if c.adapter == nil {
-				c.discErr = ErrUnknownBotType
-				return
-			}
 			c.discErr = c.adapter.Disconnect()
 		}
 	})
