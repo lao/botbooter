@@ -38,8 +38,6 @@ type (
 	Bot = core.Bot
 	// Message is an incoming message handed to handlers. See [core.Message].
 	Message = core.Message
-	// CLIMessage is the raw payload of a CLI message. See [core.CLIMessage].
-	CLIMessage = core.CLIMessage
 	// Command pairs a regexp pattern with a handler. See [core.Command].
 	Command = core.Command
 	// Attachment is a platform-agnostic file attachment. See [core.Attachment].

@@ -65,7 +65,7 @@ func TestParseMessage_DirectoryIgnored(t *testing.T) {
 }
 
 func TestRawData(t *testing.T) {
-	data := &core.CLIMessage{Text: "hello"}
+	data := &Message{Text: "hello"}
 	m := &core.Message{Raw: data}
 
 	got, ok := RawData(m)

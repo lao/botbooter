@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -271,11 +270,12 @@ func TestTelegramMentions(t *testing.T) {
 		Text: "hi Bob",
 		Entities: []models.MessageEntity{
 			{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 99}},
-			{Type: models.MessageEntityTypeMention}, // @username — no id, skipped
+			{Type: models.MessageEntityTypeMention},                                 // @username — no id, skipped
+			{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 99}}, // repeat, deduped
 		},
 	}}
 	got := toMessage(u)
-	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "99", "text_mention id only")
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "99", "text_mention id only, deduped")
 }
 
 func TestTelegramMentionsFromCaption(t *testing.T) {
@@ -441,11 +441,12 @@ func TestResolveAttachmentURL_NoFileID(t *testing.T) {
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	prev := log.Writer()
 	flags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
 	t.Cleanup(func() {
-		log.SetOutput(os.Stderr)
+		log.SetOutput(prev)
 		log.SetFlags(flags)
 	})
 	return &buf

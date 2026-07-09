@@ -107,7 +107,7 @@ func TestAttachments(t *testing.T) {
 	a := newAdapter(nil, io.Discard)
 
 	att := core.Attachment{URL: "/tmp/pic.png", IsImage: true}
-	m := &core.Message{Raw: &core.CLIMessage{Attachments: []core.Attachment{att}}}
+	m := &core.Message{Raw: &Message{Attachments: []core.Attachment{att}}}
 
 	got, err := a.Attachments(m)
 	asserts.NoError(t, err, "attachments")

@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -39,11 +40,15 @@ func TestNew(t *testing.T) {
 
 func TestConnect(t *testing.T) {
 	a := newTestAdapter(t)
+	// Stub the REST transport so Open's gateway lookup fails with 401 without
+	// touching the network, keeping the test hermetic.
+	a.session.Client = &http.Client{
+		Transport: stubRoundTripper{status: 401, body: `{"code":0,"message":"401: Unauthorized"}`},
+	}
 
 	err := a.Connect(context.Background(), core.AdapterDeps{})
 
-	// A fake token cannot open a real gateway connection.
-	asserts.Error(t, err, "Connect with fake token should fail")
+	asserts.Error(t, err, "Connect with rejected token should fail")
 }
 
 func TestDisconnect(t *testing.T) {
