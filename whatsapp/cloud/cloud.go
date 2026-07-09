@@ -1,13 +1,15 @@
-// Package whatsapp exposes the WhatsApp (Meta Cloud API) constructor, the
-// raw-message accessor, and the Config/Message/Media types for botbooter. Import
-// it for a WhatsApp bot; the adapter speaks the Cloud API over plain HTTP, so a
+// Package cloud is the Meta Cloud API flavor of botbooter's WhatsApp support:
+// it exposes the webhook-based constructor, the raw-message accessor, and the
+// Config/Message/Media types. Import it for a WhatsApp bot backed by a Meta
+// Business account; the adapter speaks the Cloud API over plain HTTP, so a
 // WhatsApp-only binary pulls in no third-party platform SDK — it never compiles
-// discordgo, slack-go or go-telegram.
-package whatsapp
+// discordgo, slack-go, go-telegram or whatsmeow. For the QR-linked WhatsApp Web
+// flavor (no Meta account or webhook needed), see botbooter/whatsapp/whatsmeow.
+package cloud
 
 import (
 	"github.com/lao/botbooter"
-	waint "github.com/lao/botbooter/internal/whatsapp"
+	waint "github.com/lao/botbooter/internal/whatsapp/cloud"
 )
 
 // Config configures a WhatsApp Cloud API bot.

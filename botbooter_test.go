@@ -26,7 +26,7 @@ import (
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
-	"github.com/lao/botbooter/whatsapp"
+	"github.com/lao/botbooter/whatsapp/cloud"
 )
 
 // syncBuffer is a concurrency-safe buffer: the CLI adapter writes to its output
@@ -413,9 +413,9 @@ func TestRawAccessors(t *testing.T) {
 	})
 
 	t.Run("WhatsApp", func(t *testing.T) {
-		wm := &whatsapp.Message{Type: "text"}
-		got, ok := whatsapp.RawMessage(&botbooter.Message{Raw: wm})
-		asserts.True(t, ok, "whatsapp.RawMessage")
+		wm := &cloud.Message{Type: "text"}
+		got, ok := cloud.RawMessage(&botbooter.Message{Raw: wm})
+		asserts.True(t, ok, "cloud.RawMessage")
 		asserts.True(t, got == wm, "same pointer")
 	})
 
@@ -445,10 +445,10 @@ func TestSessionAccessors(t *testing.T) {
 	asserts.NoError(t, err, "telegram.New")
 	asserts.NotNil(t, telegram.Client(telegramBot), "TelegramClient")
 
-	whatsappBot, err := whatsapp.New(whatsapp.Config{
+	whatsappBot, err := cloud.New(cloud.Config{
 		Token: "t", PhoneNumberID: "p", AppSecret: "s", VerifyToken: "v", Addr: ":0",
 	})
-	asserts.NoError(t, err, "whatsapp.New")
+	asserts.NoError(t, err, "cloud.New")
 	asserts.Equal(t, whatsappBot.BotType, botbooter.WhatsAppBotType, "WhatsApp bot type")
 
 	teamsBot, err := teams.New(teams.Config{
@@ -462,8 +462,8 @@ func TestSessionAccessors(t *testing.T) {
 }
 
 func TestWhatsAppNew_MissingConfig(t *testing.T) {
-	_, err := whatsapp.New(whatsapp.Config{})
-	asserts.ErrorIs(t, err, whatsapp.ErrMissingConfig, "empty config should report the sentinel")
+	_, err := cloud.New(cloud.Config{})
+	asserts.ErrorIs(t, err, cloud.ErrMissingConfig, "empty config should report the sentinel")
 }
 
 func TestTeamsNew_MissingConfig(t *testing.T) {
