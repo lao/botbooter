@@ -1,9 +1,6 @@
 // Package telegram exposes the Telegram (Bot API) constructor and the raw-update
 // and client accessors for botbooter. Import it for a Telegram bot; a
 // Telegram-only binary pulls in go-telegram but never discordgo or slack-go.
-//
-// Attachment resolution is platform-agnostic: call
-// botbooter.Bot.ResolveAttachmentURL on the bot returned by [New].
 package telegram
 
 import (
@@ -14,7 +11,9 @@ import (
 	tgint "github.com/lao/botbooter/internal/telegram"
 )
 
-// New creates a Telegram bot from a BotFather token.
+// New creates a Telegram bot from a BotFather token. It returns an error only
+// if go-telegram rejects the token at construction; an invalid token otherwise
+// surfaces when Run or Connect starts polling.
 func New(token string) (*botbooter.Bot, error) {
 	return tgint.New(token)
 }

@@ -73,12 +73,6 @@ type Message struct {
 	Raw any
 }
 
-// CLIMessage is the raw payload of a message read from the CLI adapter.
-type CLIMessage struct {
-	Text        string
-	Attachments []Attachment
-}
-
 // CommandHandler handles a dispatched message for a matched command.
 type CommandHandler func(ctx context.Context, b *Bot, m *Message)
 

@@ -406,7 +406,7 @@ func TestRawAccessors(t *testing.T) {
 	})
 
 	t.Run("CLI", func(t *testing.T) {
-		c := &botbooter.CLIMessage{Text: "hi"}
+		c := &cli.Message{Text: "hi"}
 		got, ok := cli.RawData(&botbooter.Message{Raw: c})
 		asserts.True(t, ok, "cli.RawData")
 		asserts.True(t, got == c, "same pointer")
