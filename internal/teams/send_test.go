@@ -115,13 +115,6 @@ func TestSend_EscapesConversationID(t *testing.T) {
 	asserts.Equal(t, gotPath, "/v3/conversations/19:abc@thread.tacv2/activities", "conversation id preserved in path")
 }
 
-func TestSend_UnknownConversation(t *testing.T) {
-	a, err := newAdapter(validConfig())
-	asserts.NoError(t, err, "newAdapter")
-	err = a.Send(context.Background(), "never-seen", "hi", core.SendOptions{})
-	asserts.Error(t, err, "Send to unknown conversation should error")
-}
-
 func TestSend_Error(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

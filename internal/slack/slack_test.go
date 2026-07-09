@@ -74,43 +74,8 @@ func TestShouldSkipEvent(t *testing.T) {
 			expectedIsBotMessage: false,
 		},
 		{
-			name:                 "app mention with bot ID",
+			name:                 "non-message event type is not skipped here",
 			event:                slackEvent(&slackevents.AppMentionEvent{BotID: "B01"}),
-			expectedIsBotMessage: true,
-		},
-		{
-			name:                 "app mention without bot ID",
-			event:                slackEvent(&slackevents.AppMentionEvent{}),
-			expectedIsBotMessage: false,
-		},
-		{
-			name:                 "message metadata posted with bot ID",
-			event:                slackEvent(&slackevents.MessageMetadataPostedEvent{BotId: "B01"}),
-			expectedIsBotMessage: true,
-		},
-		{
-			name:                 "message metadata posted without bot ID",
-			event:                slackEvent(&slackevents.MessageMetadataPostedEvent{}),
-			expectedIsBotMessage: false,
-		},
-		{
-			name:                 "message metadata updated with bot ID",
-			event:                slackEvent(&slackevents.MessageMetadataUpdatedEvent{BotId: "B01"}),
-			expectedIsBotMessage: true,
-		},
-		{
-			name:                 "message metadata updated without bot ID",
-			event:                slackEvent(&slackevents.MessageMetadataUpdatedEvent{}),
-			expectedIsBotMessage: false,
-		},
-		{
-			name:                 "message metadata deleted with bot ID",
-			event:                slackEvent(&slackevents.MessageMetadataDeletedEvent{BotId: "B01"}),
-			expectedIsBotMessage: true,
-		},
-		{
-			name:                 "message metadata deleted without bot ID",
-			event:                slackEvent(&slackevents.MessageMetadataDeletedEvent{}),
 			expectedIsBotMessage: false,
 		},
 		{

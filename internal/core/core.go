@@ -207,10 +207,6 @@ func (c *connection) teardown(disconnectAdapter bool) error {
 	c.once.Do(func() {
 		close(c.runDone)
 		if disconnectAdapter {
-			if c.adapter == nil {
-				c.discErr = ErrUnknownBotType
-				return
-			}
 			c.discErr = c.adapter.Disconnect()
 		}
 	})
