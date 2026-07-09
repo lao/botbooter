@@ -119,15 +119,14 @@ func TestLifecycle_StaleWatcherDoesNotCancelSuccessor(t *testing.T) {
 // blockingAdapter blocks inside Connect until released, modeling an adapter
 // whose Connect performs a slow (network) dial — e.g. discordgo's Session.Open.
 type blockingAdapter struct {
-	enteredOnce sync.Once
-	entered     chan struct{} // closed when Connect is first entered
+	entered     chan struct{} // closed when Connect is entered (Connect runs once per test)
 	release     chan struct{}
 	mu          sync.Mutex
 	disconnects int
 }
 
 func (a *blockingAdapter) Connect(ctx context.Context, deps AdapterDeps) error {
-	a.enteredOnce.Do(func() { close(a.entered) })
+	close(a.entered)
 	<-a.release
 	return nil
 }
