@@ -226,7 +226,7 @@ documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 ## Development
 
 ```bash
-make all        # fmt + vet (incl. _examples) + lint + test-race
+make all        # fmt + vet (both incl. _examples) + lint + test-race
 make test-race  # race detector
 make cover      # coverage report
 make run-cli    # run the example bot in CLI mode

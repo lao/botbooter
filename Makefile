@@ -1,8 +1,8 @@
-.PHONY: all build test test-race cover lint fmt vet vet-examples vuln run-cli tidy clean
+.PHONY: all build test test-race cover lint fmt fmt-examples vet vet-examples vuln run-cli tidy clean
 
 # Default target: format, vet, lint and race-test. The lifecycle code is
 # concurrency-heavy, so the pre-commit gate runs the race detector.
-all: fmt vet vet-examples lint test-race
+all: fmt fmt-examples vet vet-examples lint test-race
 
 build:
 	go build ./...
@@ -24,6 +24,11 @@ lint:
 # so make fmt can never pass while make lint fails on formatting.
 fmt:
 	golangci-lint fmt ./...
+
+# _examples is its own module, so the root ./... never reaches it (gofmt -w .
+# used to walk into it by path).
+fmt-examples:
+	cd _examples && golangci-lint fmt ./...
 
 vet:
 	go vet ./...
