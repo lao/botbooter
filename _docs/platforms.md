@@ -151,6 +151,21 @@ value to silence it.
 
 ## WhatsApp
 
+WhatsApp comes in **two flavors, selected by import path**:
+
+- **`botbooter/whatsapp/cloud`** — the official **Meta WhatsApp Business Cloud
+  API** (this section). Needs a Meta Business app, a token and a public HTTPS
+  webhook; pulls in no third-party dependency.
+- **`botbooter/whatsapp/whatsmeow`** — the **WhatsApp Web multidevice protocol**
+  via [whatsmeow](https://github.com/tulir/whatsmeow) (see
+  [below](#whatsapp-web-whatsmeow)). Pairs with a phone by QR code like WhatsApp
+  Web; no Meta account, credentials or webhook, but it drives a linked personal
+  account over an unofficial protocol.
+
+Only the flavor you import is compiled into your binary.
+
+### Cloud API flavor
+
 botbooter speaks the **Meta WhatsApp Business Cloud API**. Unlike the dial-out
 platforms, the Cloud API delivers inbound messages as **HTTP webhook callbacks**,
 so the adapter runs its own server: it binds a local `Addr`, and you put a
@@ -178,9 +193,9 @@ Meta. Outbound replies go back over the Cloud API.
    `WA_VERIFY_TOKEN`, and subscribe to the **messages** field.
 
 ```go
-import "github.com/lao/botbooter/whatsapp"
+import "github.com/lao/botbooter/whatsapp/cloud"
 
-bot, err := whatsapp.New(whatsapp.Config{
+bot, err := cloud.New(cloud.Config{
 	Token:         os.Getenv("WA_TOKEN"),
 	PhoneNumberID: os.Getenv("WA_PHONE_ID"),
 	AppSecret:     os.Getenv("WA_APP_SECRET"),
@@ -189,12 +204,12 @@ bot, err := whatsapp.New(whatsapp.Config{
 })
 ```
 
-Optional `whatsapp.Config` fields: `Path` (webhook route, default `/webhook`),
+Optional `cloud.Config` fields: `Path` (webhook route, default `/webhook`),
 `GraphVersion` (Graph API version, default `v23.0`), and `HTTPClient` (the
 outbound HTTP client; defaults to a 30-second timeout).
 
 Inbound media arrives **by id, not URL**: `Attachment.ExtraData` holds a
-`*whatsapp.Media`; resolve the bytes with `GET /{media-id}` using your access
+`*cloud.Media`; resolve the bytes with `GET /{media-id}` using your access
 token. `Send` delivers free-form text only inside the 24-hour customer-service
 window; outside it, Meta requires a pre-approved template (not yet supported).
 
@@ -220,6 +235,45 @@ window; outside it, Meta requires a pre-approved template (not yet supported).
   (a template message is required there).
 
 **Official docs:** [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks](https://developers.facebook.com/docs/graph-api/webhooks/getting-started) · [Webhook components](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components)
+
+### WhatsApp Web (whatsmeow)
+
+The `botbooter/whatsapp/whatsmeow` flavor speaks the **WhatsApp Web multidevice
+protocol** via [whatsmeow](https://github.com/tulir/whatsmeow). It links to a
+phone exactly like WhatsApp Web — no Meta app, token or webhook:
+
+```go
+import wameow "github.com/lao/botbooter/whatsapp/whatsmeow"
+
+bot, err := wameow.New(wameow.Config{}) // zero value works
+```
+
+- **First run**: the device store is empty, so `Run` prints a **QR code to
+  stderr** (override with `Config.QRCallback`); scan it from *WhatsApp → Linked
+  devices* on the phone. Later runs reuse the stored session silently.
+- **Session store**: a local SQLite file (`Config.DBPath`, default
+  `botbooter-whatsapp.db`, chmod `0600` — it holds the session's crypto keys, so
+  treat it like a credential and never commit it). `Config.Container` swaps in a
+  caller-managed store (e.g. Postgres); `Config.Client` brings a fully
+  configured whatsmeow client.
+- **Replies**: the chat JID is `Message.ChannelID`, so
+  `b.SendMessageContext(ctx, m.ChannelID, "pong")` just works.
+- **Media**: end-to-end encrypted, delivered without a URL. Fetch and decrypt
+  with `wameow.Download(ctx, bot, att)`; the raw client is available as
+  `wameow.Client(bot)`.
+- **One bot per run**: when `New` opened the session store itself, shutdown
+  (`Disconnect`, which `Run` performs on exit) closes it, so the same bot
+  cannot be run a second time — build a fresh bot with `wameow.New` for each
+  run. A caller-supplied `Config.Container` or `Config.Client` is left open
+  and stays reusable.
+- **Logout**: unlinking the device from the phone ends `Run` with the
+  `wameow.ErrLoggedOut` sentinel; reconnecting cannot recover it. Re-link by
+  building a fresh bot and running it again to scan a new QR (delete the
+  session DB first if the stale session lingers).
+
+Caveats: this drives a **linked (usually personal) account over the unofficial
+Web protocol**; WhatsApp's terms restrict automation on personal accounts, so
+prefer the Cloud API flavor for production/business use.
 
 ---
 
@@ -395,7 +449,8 @@ Two options carry the anchor:
 | **Slack** | `m.ReplyToID` (the thread root, `ThreadTimeStamp`) | a `thread_ts` | `thread_ts` on `chat.postMessage` | top-level message ⇒ plain top-level reply (does **not** open a new thread off `m.ID`; a raw `WithThreadID` of a top-level ts *will* start one) |
 | **Discord** | `m.ID` | a **reply message id** (not a Discord thread-channel id) | inline reply via `message_reference.message_id` | plain channel send |
 | **Telegram** | `m.ID` | a **reply message id** | `reply_parameters.message_id` | plain send. A *derived* id that isn't a positive integer degrades to a plain send; an *explicit* `WithThreadID` that isn't returns an error |
-| **WhatsApp** | `m.ID` | a **quote message id** | `context.message_id` (a quoted reply) | plain send (no `context`) |
+| **WhatsApp (Cloud API)** | `m.ID` | a **quote message id** | `context.message_id` (a quoted reply) | plain send (no `context`) |
+| **WhatsApp (Web / whatsmeow)** | — (options ignored) | — | — | always a plain channel send (quoted replies are a possible follow-up) |
 | **Teams** | — (options ignored) | — | — | always a plain channel send |
 | **CLI** | — (options ignored) | — | — | always a plain channel send |
 
