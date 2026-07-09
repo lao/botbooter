@@ -96,16 +96,19 @@ func toMessage(act *inboundActivity, raw json.RawMessage) *core.Message {
 
 // mentionedUserIDs collects the IDs mentioned in the Activity's entities,
 // excluding the bot itself (Recipient) — the same entity stripRecipientMention
-// removes from the text.
+// removes from the text. Each ID appears once, in first-mention order (Teams
+// emits one entity per occurrence, so a twice-mentioned user arrives twice).
 func mentionedUserIDs(act *inboundActivity) []string {
 	var ids []string
+	seen := make(map[string]bool)
 	for _, e := range act.Entities {
 		if !strings.EqualFold(e.Type, "mention") || e.Mentioned.ID == "" {
 			continue
 		}
-		if e.Mentioned.ID == act.Recipient.ID {
+		if e.Mentioned.ID == act.Recipient.ID || seen[e.Mentioned.ID] {
 			continue
 		}
+		seen[e.Mentioned.ID] = true
 		ids = append(ids, e.Mentioned.ID)
 	}
 	return ids

@@ -270,11 +270,12 @@ func TestTelegramMentions(t *testing.T) {
 		Text: "hi Bob",
 		Entities: []models.MessageEntity{
 			{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 99}},
-			{Type: models.MessageEntityTypeMention}, // @username — no id, skipped
+			{Type: models.MessageEntityTypeMention},                                 // @username — no id, skipped
+			{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 99}}, // repeat, deduped
 		},
 	}}
 	got := toMessage(u)
-	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "99", "text_mention id only")
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "99", "text_mention id only, deduped")
 }
 
 func TestTelegramMentionsFromCaption(t *testing.T) {

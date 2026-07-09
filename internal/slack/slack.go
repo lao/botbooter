@@ -248,10 +248,15 @@ func toMessage(msg *slackevents.MessageEvent) *core.Message {
 var slackMentionRE = regexp.MustCompile(`<@([A-Z0-9]+)(?:\|[^>]*)?>`)
 
 // slackMentions extracts mentioned user ids from message text, returning nil
-// when there are none.
+// when there are none. Each id appears once, in first-mention order.
 func slackMentions(text string) []string {
 	var ids []string
+	seen := make(map[string]bool)
 	for _, m := range slackMentionRE.FindAllStringSubmatch(text, -1) {
+		if seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
 		ids = append(ids, m[1])
 	}
 	return ids

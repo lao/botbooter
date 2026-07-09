@@ -243,16 +243,20 @@ func telegramAuthorName(u *models.User) string {
 
 // telegramMentions collects user ids from text_mention entities, the only entity
 // kind carrying a numeric user id; a plain @username mention references a name.
+// Each id appears once, in first-mention order.
 func telegramMentions(m *models.Message) []string {
 	entities := m.Entities
 	if m.Text == "" {
 		entities = m.CaptionEntities
 	}
 	var ids []string
+	seen := make(map[int64]bool)
 	for _, e := range entities {
-		if e.Type == models.MessageEntityTypeTextMention && e.User != nil {
-			ids = append(ids, strconv.FormatInt(e.User.ID, 10))
+		if e.Type != models.MessageEntityTypeTextMention || e.User == nil || seen[e.User.ID] {
+			continue
 		}
+		seen[e.User.ID] = true
+		ids = append(ids, strconv.FormatInt(e.User.ID, 10))
 	}
 	return ids
 }
