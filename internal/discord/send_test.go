@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -25,8 +26,10 @@ func (rt stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	return &http.Response{
 		StatusCode: rt.status,
-		Header:     http.Header{},
+		Status:     fmt.Sprintf("%d %s", rt.status, http.StatusText(rt.status)),
+		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(rt.body)),
+		Request:    req,
 	}, nil
 }
 

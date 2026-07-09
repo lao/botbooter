@@ -44,50 +44,50 @@ func TestNew_MissingConfig(t *testing.T) {
 
 func TestShouldSkipEvent(t *testing.T) {
 	tests := []struct {
-		name                 string
-		event                slackevents.EventsAPIEvent
-		expectedIsBotMessage bool
+		name     string
+		event    slackevents.EventsAPIEvent
+		wantSkip bool
 	}{
 		{
-			name:                 "message with bot ID",
-			event:                slackEvent(&slackevents.MessageEvent{BotID: "B01"}),
-			expectedIsBotMessage: true,
+			name:     "message with bot ID",
+			event:    slackEvent(&slackevents.MessageEvent{BotID: "B01"}),
+			wantSkip: true,
 		},
 		{
-			name:                 "message with bot_message subtype",
-			event:                slackEvent(&slackevents.MessageEvent{SubType: "bot_message", Text: "test"}),
-			expectedIsBotMessage: true,
+			name:     "message with bot_message subtype",
+			event:    slackEvent(&slackevents.MessageEvent{SubType: "bot_message", Text: "test"}),
+			wantSkip: true,
 		},
 		{
-			name:                 "message with empty text",
-			event:                slackEvent(&slackevents.MessageEvent{Text: ""}),
-			expectedIsBotMessage: true,
+			name:     "message with empty text",
+			event:    slackEvent(&slackevents.MessageEvent{Text: ""}),
+			wantSkip: true,
 		},
 		{
-			name:                 "caption-less file upload",
-			event:                slackEvent(&slackevents.MessageEvent{Text: "", User: "U123", Files: []slackevents.File{{Mimetype: "image/png"}}}),
-			expectedIsBotMessage: false,
+			name:     "caption-less file upload",
+			event:    slackEvent(&slackevents.MessageEvent{Text: "", User: "U123", Files: []slackevents.File{{Mimetype: "image/png"}}}),
+			wantSkip: false,
 		},
 		{
-			name:                 "user message",
-			event:                slackEvent(&slackevents.MessageEvent{Text: "Hello from user"}),
-			expectedIsBotMessage: false,
+			name:     "user message",
+			event:    slackEvent(&slackevents.MessageEvent{Text: "Hello from user"}),
+			wantSkip: false,
 		},
 		{
-			name:                 "non-message event type is not skipped here",
-			event:                slackEvent(&slackevents.AppMentionEvent{BotID: "B01"}),
-			expectedIsBotMessage: false,
+			name:     "non-message event type is not skipped here",
+			event:    slackEvent(&slackevents.AppMentionEvent{BotID: "B01"}),
+			wantSkip: false,
 		},
 		{
-			name:                 "unknown event type",
-			event:                slackEvent("some string"),
-			expectedIsBotMessage: false,
+			name:     "unknown event type",
+			event:    slackEvent("some string"),
+			wantSkip: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			asserts.Equal(t, shouldSkipEvent(tt.event), tt.expectedIsBotMessage, "shouldSkipEvent result")
+			asserts.Equal(t, shouldSkipEvent(tt.event), tt.wantSkip, "shouldSkipEvent result")
 		})
 	}
 }
@@ -297,7 +297,8 @@ func TestParseSlackTimestamp(t *testing.T) {
 }
 
 func TestClientAccessors(t *testing.T) {
-	bot, _ := New(Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
+	bot, err := New(Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
+	asserts.NoError(t, err, "New")
 	asserts.NotNil(t, Client(bot), "Client accessor returns the web client")
 	asserts.NotNil(t, SocketClient(bot), "SocketClient accessor returns the socket client")
 }

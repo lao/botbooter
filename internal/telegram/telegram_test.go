@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -441,11 +440,12 @@ func TestResolveAttachmentURL_NoFileID(t *testing.T) {
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	prev := log.Writer()
 	flags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
 	t.Cleanup(func() {
-		log.SetOutput(os.Stderr)
+		log.SetOutput(prev)
 		log.SetFlags(flags)
 	})
 	return &buf

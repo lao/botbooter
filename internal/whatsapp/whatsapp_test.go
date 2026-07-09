@@ -701,6 +701,35 @@ func TestDrainDispatch_WaitsForInflight(t *testing.T) {
 	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
 }
 
+type failingListener struct {
+	err error
+}
+
+func (l failingListener) Accept() (net.Conn, error) { return nil, l.err }
+func (failingListener) Close() error                { return nil }
+func (failingListener) Addr() net.Addr              { return testAddr("failing") }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "test" }
+func (a testAddr) String() string { return string(a) }
+
+func TestServe_ReportsUnexpectedError(t *testing.T) {
+	want := errors.New("accept failed")
+	done := make(chan error, 1)
+
+	serve(&http.Server{}, failingListener{err: want}, func(err error) {
+		done <- err
+	})
+
+	select {
+	case got := <-done:
+		asserts.ErrorIs(t, got, want, "unexpected serve error should be reported")
+	default:
+		t.Fatal("unexpected serve error was not reported")
+	}
+}
+
 func TestConnect_StaleWatcherIgnoresReplacedServer(t *testing.T) {
 	a := testAdapter()
 	called := make(chan struct{}, 1)
