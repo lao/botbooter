@@ -164,13 +164,13 @@ func newAdapter(cfg Config) (*adapter, error) {
 	}
 
 	// The store we created holds the linked session and crypto keys — a
-	// credential. Restrict it (and its journal sidecars) to the owner. Best
-	// effort: SQLite's default 0644 is the concern, but a chmod failure must not
-	// block startup.
+	// credential. Restrict it to the owner. Best effort: SQLite's default 0644
+	// is the concern, but a chmod failure must not block startup. The -wal/-shm
+	// sidecars don't exist at this point (the store runs in the default DELETE
+	// journal mode); if WAL is ever enabled, SQLite creates them with the main
+	// file's permissions, so chmodding the db file alone covers them too.
 	if ownDBPath != "" {
-		for _, p := range []string{ownDBPath, ownDBPath + "-wal", ownDBPath + "-shm"} {
-			_ = os.Chmod(p, 0o600)
-		}
+		_ = os.Chmod(ownDBPath, 0o600)
 	}
 
 	return &adapter{
