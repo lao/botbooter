@@ -42,7 +42,7 @@ func newBot(botType string) (*botbooter.Bot, error) {
 	case "whatsmeow":
 		// WhatsApp Web flavor: QR-links to a phone on first run, then reuses the
 		// session stored in the SQLite file.
-		return whatsmeow.New(whatsmeow.Config{DBPath: os.Getenv("WA_MEOW_DB")}) // "" -> botbooter-whatsapp.db
+		return whatsmeow.New(whatsmeow.Config{DBPath: os.Getenv("WA_MEOW_DB")}) // "" -> botbooter-whatsapp-meow.db
 	case "teams":
 		return teams.New(teams.Config{
 			AppID:       os.Getenv("TEAMS_APP_ID"),

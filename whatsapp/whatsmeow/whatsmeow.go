@@ -25,7 +25,7 @@ import (
 )
 
 // Config configures a whatsmeow-backed WhatsApp bot. The zero value is usable:
-// it stores the session in "botbooter-whatsapp.db" in the working directory and
+// it stores the session in "botbooter-whatsapp-meow.db" in the working directory and
 // prints pairing QR codes to stderr.
 type Config = wmint.Config
 

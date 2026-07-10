@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	defaultDBPath = "botbooter-whatsapp.db"
+	defaultDBPath = "botbooter-whatsapp-meow.db"
 	// sqliteDialect is both the database/sql driver name (registered by the
 	// blank import of modernc.org/sqlite) and the dialect whatsmeow's dbutil
 	// resolves from the "sqlite" prefix.
@@ -58,12 +58,12 @@ var ErrLoggedOut = errors.New("whatsmeow: logged out, session must be re-linked"
 var ErrNotDownloadable = errors.New("whatsmeow: attachment is not downloadable media")
 
 // Config configures a whatsmeow-backed WhatsApp bot. The zero value is usable:
-// it stores the session in "botbooter-whatsapp.db" in the working directory and
+// it stores the session in "botbooter-whatsapp-meow.db" in the working directory and
 // prints pairing QR codes to stderr.
 type Config struct {
 	// DBPath is the path to the SQLite file holding the linked session and
 	// crypto keys; it is created if missing. Defaults to
-	// "botbooter-whatsapp.db". Ignored when Client or Container is set.
+	// "botbooter-whatsapp-meow.db". Ignored when Client or Container is set.
 	DBPath string
 
 	// QRCallback is invoked with each raw pairing code emitted during first-time

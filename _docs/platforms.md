@@ -252,7 +252,7 @@ bot, err := wameow.New(wameow.Config{}) // zero value works
   stderr** (override with `Config.QRCallback`); scan it from *WhatsApp → Linked
   devices* on the phone. Later runs reuse the stored session silently.
 - **Session store**: a local SQLite file (`Config.DBPath`, default
-  `botbooter-whatsapp.db`, chmod `0600` — it holds the session's crypto keys, so
+  `botbooter-whatsapp-meow.db`, chmod `0600` — it holds the session's crypto keys, so
   treat it like a credential and never commit it). `Config.Container` swaps in a
   caller-managed store (e.g. Postgres); `Config.Client` brings a fully
   configured whatsmeow client.

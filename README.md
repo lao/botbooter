@@ -91,7 +91,7 @@ Import `botbooter` for the shared types plus the one `botbooter/<platform>` pack
 | `whatsmeow.New(cfg whatsmeow.Config)` | `(*Bot, error)` | WhatsApp, Web-protocol flavor (`botbooter/whatsapp/whatsmeow`); QR-links to a phone, no Meta account needed. |
 | `teams.New(cfg teams.Config)` | `(*Bot, error)` | Azure Bot Framework; runs an inbound webhook HTTP server. |
 
-WhatsApp comes in **two flavors selected by import path** — `whatsapp/cloud` (official Meta Cloud API: Business account, webhook + public HTTPS URL, no third-party deps) and `whatsapp/whatsmeow` (unofficial WhatsApp Web multidevice protocol via [whatsmeow](https://github.com/tulir/whatsmeow): pair by QR code like WhatsApp Web, session persisted in a local SQLite file, no Meta account or webhook). Only the flavor you import is compiled into your binary.
+WhatsApp comes in **two flavors selected by import path** — `whatsapp/cloud` (official Meta Cloud API: Business account, webhook + public HTTPS URL, no third-party deps) and `whatsapp/whatsmeow` (unofficial WhatsApp Web multidevice protocol via [whatsmeow](https://github.com/tulir/whatsmeow): pair by QR code like WhatsApp Web, session persisted in a local SQLite file — `Config.DBPath`, default `botbooter-whatsapp-meow.db` in the working directory — no Meta account or webhook). Only the flavor you import is compiled into your binary.
 
 ### Handlers, commands and middleware
 

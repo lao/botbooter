@@ -246,6 +246,20 @@ func TestNew(t *testing.T) {
 	asserts.Equal(t, info.Mode().Perm()&0o077, os.FileMode(0), "store restricted to owner")
 }
 
+func TestNewAdapterDefaultDBPath(t *testing.T) {
+	// An empty DBPath falls back to the default filename in the working
+	// directory, with the same owner-only permissions as an explicit path.
+	t.Chdir(t.TempDir())
+
+	a, err := newAdapter(Config{})
+	asserts.NoError(t, err, "newAdapter with zero Config")
+	t.Cleanup(func() { _ = a.Disconnect() })
+
+	info, err := os.Stat(defaultDBPath)
+	asserts.NoError(t, err, "store created at "+defaultDBPath)
+	asserts.Equal(t, info.Mode().Perm()&0o077, os.FileMode(0), "default store restricted to owner")
+}
+
 func TestClientNotWhatsMeowBot(t *testing.T) {
 	asserts.True(t, Client(&core.Bot{}) == nil, "nil for a bot without a whatsmeow adapter")
 }
