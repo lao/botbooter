@@ -265,11 +265,12 @@ func (a *adapter) onEvent(ctx context.Context, evt any, deps core.AdapterDeps, r
 }
 
 // onMessage converts an incoming message into a platform-agnostic Message and
-// dispatches it. It drops the bot's own messages (reply-loop guard), broadcast
-// and status traffic, and non-conversational events (reactions, receipts,
-// revokes, poll updates) that carry neither text nor media.
+// dispatches it. It drops the bot's own messages (reply-loop guard), broadcast,
+// status and newsletter/channel traffic (read-only contexts a handler cannot
+// reply into), and non-conversational events (reactions, receipts, revokes,
+// poll updates) that carry neither text nor media.
 func (a *adapter) onMessage(ctx context.Context, v *events.Message, deps core.AdapterDeps) {
-	if v.Info.IsFromMe || v.Info.Chat.Server == types.BroadcastServer {
+	if v.Info.IsFromMe || v.Info.Chat.Server == types.BroadcastServer || v.Info.Chat.Server == types.NewsletterServer {
 		return
 	}
 	text := messageText(v)

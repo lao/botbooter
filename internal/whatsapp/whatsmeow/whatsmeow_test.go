@@ -92,6 +92,19 @@ func TestOnMessage(t *testing.T) {
 		asserts.False(t, dispatched, "empty/system event must not be dispatched")
 	})
 
+	t.Run("DropsNewsletter", func(t *testing.T) {
+		dispatched := false
+		deps := core.AdapterDeps{Dispatch: func(_ context.Context, _ *core.Message) { dispatched = true }}
+		ev := &events.Message{
+			Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: types.NewJID("123", types.NewsletterServer), Sender: jid("456")}},
+			Message: &waProto.Message{Conversation: proto.String("channel post")},
+		}
+
+		(&adapter{}).onMessage(context.Background(), ev, deps)
+
+		asserts.False(t, dispatched, "newsletter/channel post must not be dispatched")
+	})
+
 	t.Run("DropsBroadcast", func(t *testing.T) {
 		dispatched := false
 		deps := core.AdapterDeps{Dispatch: func(_ context.Context, _ *core.Message) { dispatched = true }}
