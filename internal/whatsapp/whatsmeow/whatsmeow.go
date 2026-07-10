@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/mdp/qrterminal/v3"
@@ -47,6 +48,12 @@ const (
 	// query syntax (mattn's "?_foreign_keys=on" form is not understood).
 	dsnFormat = "file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 )
+
+// dsnPathEscaper percent-encodes the characters SQLite's URI parser would
+// otherwise misread inside a filename: '?' starts the query string (truncating
+// the path and swallowing the pragmas), '#' starts a fragment, and '%' begins a
+// percent-escape. Slashes stay literal so directory paths pass through.
+var dsnPathEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 
 // ErrLoggedOut is reported through Run when the linked session is invalidated
 // (for example, unlinked from the phone). Reconnecting cannot recover from it,
@@ -140,7 +147,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 		if ownDBPath == "" {
 			ownDBPath = defaultDBPath
 		}
-		c, err := sqlstore.New(context.Background(), sqliteDialect, fmt.Sprintf(dsnFormat, ownDBPath), logger)
+		c, err := sqlstore.New(context.Background(), sqliteDialect, fmt.Sprintf(dsnFormat, dsnPathEscaper.Replace(ownDBPath)), logger)
 		if err != nil {
 			return nil, fmt.Errorf("whatsmeow: open store: %w", err)
 		}

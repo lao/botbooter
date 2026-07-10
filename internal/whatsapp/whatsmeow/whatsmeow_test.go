@@ -260,6 +260,19 @@ func TestNewAdapterDefaultDBPath(t *testing.T) {
 	asserts.Equal(t, info.Mode().Perm()&0o077, os.FileMode(0), "default store restricted to owner")
 }
 
+func TestNewAdapterDBPathURIChars(t *testing.T) {
+	// SQLite parses the DSN as a URI, so '?', '#' and '%' in the path must be
+	// escaped or the filename is truncated and the pragmas are swallowed.
+	db := filepath.Join(t.TempDir(), "wa?x#1%2.db")
+
+	a, err := newAdapter(Config{DBPath: db})
+	asserts.NoError(t, err, "newAdapter with URI metacharacters in DBPath")
+	t.Cleanup(func() { _ = a.Disconnect() })
+
+	_, err = os.Stat(db)
+	asserts.NoError(t, err, "store created at the literal path")
+}
+
 func TestClientNotWhatsMeowBot(t *testing.T) {
 	asserts.True(t, Client(&core.Bot{}) == nil, "nil for a bot without a whatsmeow adapter")
 }
