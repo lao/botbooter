@@ -1,6 +1,8 @@
-// Package whatsapp is the WhatsApp adapter for botbooter. It receives messages
-// from the Meta WhatsApp Business Cloud API over an inbound webhook and sends
-// replies back through the Cloud API. It implements core.Adapter.
+// Package cloud is the Meta Cloud API flavor of botbooter's WhatsApp adapter.
+// It receives messages from the Meta WhatsApp Business Cloud API over an
+// inbound webhook and sends replies back through the Cloud API. It implements
+// core.Adapter. (The whatsmeow-backed WhatsApp Web flavor lives in the sibling
+// internal/whatsapp/whatsmeow package.)
 //
 // Unlike the dial-out adapters (Slack, Discord), the Cloud API delivers inbound
 // messages as HTTP webhook callbacks, so this adapter runs its own HTTP server:
@@ -8,7 +10,7 @@
 // Disconnect shuts the server down. Bind a local Addr, put a TLS-terminating
 // reverse proxy in front, and register the public HTTPS URL in Meta's webhook
 // settings.
-package whatsapp
+package cloud
 
 import (
 	"bytes"

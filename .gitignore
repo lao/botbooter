@@ -2,6 +2,12 @@
 .env
 .env.*
 
+# WhatsApp Web (whatsmeow) session store — holds credentials, never commit.
+botbooter-whatsapp*.db*
+
+todo.md
+
+
 # Test & coverage artifacts
 coverage.txt
 *.out
@@ -20,5 +26,4 @@ coverage.txt
 .vscode/
 .claude/
 .plans/
-todo.md
 _docs/superpowers/
