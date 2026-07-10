@@ -2,7 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/lao/botbooter.svg)](https://pkg.go.dev/github.com/lao/botbooter)
 [![CI](https://github.com/lao/botbooter/actions/workflows/ci.yml/badge.svg)](https://github.com/lao/botbooter/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/lao/botbooter)](https://goreportcard.com/report/github.com/lao/botbooter)
+[![golangci-lint](https://img.shields.io/badge/golangci--lint-enabled-brightgreen?logo=go&logoColor=white)](https://golangci-lint.run/)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/lao/botbooter)](go.mod)
 [![Test Coverage](https://codecov.io/gh/lao/botbooter/branch/main/graph/badge.svg)](https://codecov.io/gh/lao/botbooter)
 [![Releases](https://img.shields.io/github/v/release/lao/botbooter.svg?include_prereleases&color=blue)](https://github.com/lao/botbooter/releases)
