@@ -3,7 +3,7 @@
 .env.*
 
 # WhatsApp Web (whatsmeow) session store — holds credentials, never commit.
-botbooter-whatsapp.db*
+botbooter-whatsapp*.db*
 
 # Test & coverage artifacts
 coverage.txt
