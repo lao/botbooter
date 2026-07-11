@@ -38,6 +38,8 @@ const (
 	WhatsMeowBotType
 )
 
+// String returns the lowercase platform name for t, or "BotType(n)" for an
+// unknown value.
 func (t BotType) String() string {
 	switch t {
 	case SlackBotType:
