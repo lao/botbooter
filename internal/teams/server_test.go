@@ -1,9 +1,11 @@
 package teams
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -132,9 +134,9 @@ func TestHandleMessages_DispatchesOnDetachedCtx(t *testing.T) {
 
 	select {
 	case c := <-gotCtx:
-		// The dispatch context is detached from the request/run context, so a
-		// later shutdown cancellation cannot abort an already-acked dispatch.
-		asserts.NoError(t, c.Err(), "dispatch must ride the detached context")
+		asserts.NoError(t, c.Err(), "dispatch ctx live before cancel")
+		cancelDispatch()
+		asserts.ErrorIs(t, c.Err(), context.Canceled, "dispatch rides the passed detached ctx")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for dispatch")
 	}
@@ -150,6 +152,23 @@ func TestHandleMessages_RejectsMissingToken(t *testing.T) {
 
 	asserts.Equal(t, w.Code, http.StatusUnauthorized, "no token should be 401")
 	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+// TestHandleMessages_Routes401ToInjectedLogger proves the logger stored at
+// Connect (here set directly) carries the rejection diagnostic, rather than
+// always falling back to slog.Default.
+func TestHandleMessages_Routes401ToInjectedLogger(t *testing.T) {
+	a := testAdapter(t)
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	var got []*core.Message
+
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	w := post(a, captureDeps(&got, nil), body, "")
+
+	asserts.Equal(t, w.Code, http.StatusUnauthorized, "no token should be 401")
+	asserts.True(t, strings.Contains(buf.String(), "rejected with 401"),
+		"the injected logger receives the rejection diagnostic")
 }
 
 func TestHandleMessages_RejectsBadSignature(t *testing.T) {
@@ -496,6 +515,40 @@ func TestServe_ReportsUnexpectedError(t *testing.T) {
 	default:
 		t.Fatal("unexpected serve error was not reported")
 	}
+}
+
+func TestConnect_StaleWatcherIgnoresReplacedServer(t *testing.T) {
+	a := testAdapter(t)
+	called := make(chan struct{}, 1)
+	deps := core.AdapterDeps{
+		Done:       func(error) {},
+		Disconnect: func() error { called <- struct{}{}; return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should bind")
+
+	// Simulate a reconnect that installed a different server, then close the one
+	// this Connect started so it does not leak.
+	a.mu.Lock()
+	old := a.srv
+	a.srv = &http.Server{}
+	a.mu.Unlock()
+	defer func() { _ = old.Close() }()
+
+	cancel() // wake the now-stale watcher
+
+	select {
+	case <-called:
+		t.Fatal("a stale watcher must not drive Disconnect on a replaced server")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: the guard saw a.srv != its own server and skipped.
+	}
+}
+
+func TestDisconnect_NeverConnected(t *testing.T) {
+	a := testAdapter(t)
+	asserts.NoError(t, a.Disconnect(), "Disconnect before Connect should be safe")
 }
 
 func TestConnect_BadAddr(t *testing.T) {

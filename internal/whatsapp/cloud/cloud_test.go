@@ -1,4 +1,4 @@
-package whatsapp
+package cloud
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,153 @@ const statusWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WAB
 // mixedBatchWebhook holds one valid text message followed by one whose "text"
 // field is a string (not an object), which fails to unmarshal into inboundMessage.
 const mixedBatchWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"messages":[{"from":"123","id":"wamid.1","type":"text","text":{"body":"ok"}},{"from":"456","id":"wamid.2","type":"text","text":"oops"}]}}]}]}`
+
+const reactionWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"contacts":[{"wa_id":"123","profile":{"name":"Ada"}}],"messages":[{"from":"123","id":"wamid.r1","timestamp":"1","type":"reaction","reaction":{"message_id":"wamid.orig","emoji":"👍"}}]}}]}]}`
+
+const reactionRemovalWebhook = `{"object":"whatsapp_business_account","entry":[{"id":"WABA","changes":[{"field":"messages","value":{"messaging_product":"whatsapp","metadata":{"phone_number_id":"PNID"},"messages":[{"from":"123","id":"wamid.r2","timestamp":"1","type":"reaction","reaction":{"message_id":"wamid.orig","emoji":""}}]}}]}]}`
+
+// captureReactionDeps returns AdapterDeps that append every dispatched reaction to
+// *got, signaling done after each (mirrors captureDeps for the reaction path).
+func captureReactionDeps(got *[]*core.Reaction, done chan<- struct{}) core.AdapterDeps {
+	return core.AdapterDeps{
+		DispatchReaction: func(_ context.Context, r *core.Reaction) {
+			*got = append(*got, r)
+			if done != nil {
+				done <- struct{}{}
+			}
+		},
+	}
+}
+
+func TestHandleWebhook_DispatchesReaction(t *testing.T) {
+	a := testAdapter()
+	var got []*core.Reaction
+	body := []byte(reactionWebhook)
+
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(reactionWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w := httptest.NewRecorder()
+	done := make(chan struct{}, 1)
+
+	a.handleWebhook(context.Background(), w, r, captureReactionDeps(&got, done))
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, len(got), 1, "one reaction should be dispatched")
+	asserts.Equal(t, got[0].Emoji, "👍", "Emoji")
+	asserts.Equal(t, got[0].UserID, "123", "UserID is the sender")
+	asserts.Equal(t, got[0].ChannelID, "123", "ChannelID is the sender (reply target)")
+	asserts.Equal(t, got[0].MessageID, "wamid.orig", "MessageID is the reacted message")
+	asserts.Equal(t, got[0].AuthorName, "Ada", "AuthorName from the contacts profile")
+	wm, ok := RawReaction(got[0])
+	asserts.True(t, ok, "RawReaction recovers the message")
+	asserts.Equal(t, wm.Reaction.Emoji, "👍", "raw carries the reaction")
+}
+
+func TestHandleWebhook_SkipsReactionRemoval(t *testing.T) {
+	a := testAdapter()
+	var got []*core.Reaction
+	body := []byte(reactionRemovalWebhook)
+
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(reactionRemovalWebhook))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, r, captureReactionDeps(&got, nil))
+
+	// Dispatch is off the request path; wait for the goroutine to drain, then
+	// assert nothing was dispatched (empty emoji = removal, added-only scope).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.drainDispatch(ctx)
+	asserts.Equal(t, len(got), 0, "a reaction removal (empty emoji) is not dispatched")
+}
+
+func TestParseMessage_Reaction(t *testing.T) {
+	raw := json.RawMessage(`{"from":"123","id":"wamid.r1","timestamp":"1","type":"reaction","reaction":{"message_id":"wamid.orig","emoji":"👍"}}`)
+
+	m, err := parseMessage(raw)
+
+	asserts.NoError(t, err, "a reaction message should parse")
+	asserts.Equal(t, m.Type, "reaction", "type is reaction")
+	asserts.NotNil(t, m.Reaction, "Reaction should be populated")
+	asserts.Equal(t, m.Reaction.MessageID, "wamid.orig", "reacted message id")
+	asserts.Equal(t, m.Reaction.Emoji, "👍", "emoji")
+	asserts.True(t, m.Media == nil, "a reaction carries no media")
+}
+
+func TestParseWebhook_Reaction(t *testing.T) {
+	messages := parseWebhook(slog.Default(), []byte(reactionWebhook))
+
+	asserts.Equal(t, len(messages), 1, "one reaction message expected")
+	m := messages[0]
+	asserts.Equal(t, m.Type, "reaction", "type is reaction")
+	asserts.NotNil(t, m.Reaction, "Reaction should be populated")
+	asserts.Equal(t, m.Reaction.Emoji, "👍", "emoji")
+	asserts.Equal(t, m.Reaction.MessageID, "wamid.orig", "reacted message id")
+	asserts.Equal(t, m.AuthorName, "Ada", "AuthorName enriched from contacts")
+}
+
+func TestRawReaction_NonMatch(t *testing.T) {
+	// A Reaction that did not originate from WhatsApp (Raw is not *Message).
+	wm, ok := RawReaction(&core.Reaction{Raw: "not-whatsapp"})
+	asserts.False(t, ok, "a non-WhatsApp reaction should not match")
+	asserts.True(t, wm == nil, "no message is recovered on a non-match")
+}
+
+func TestSend_OmitsContext(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := testAdapter()
+	a.baseURL = srv.URL
+	a.http = srv.Client()
+
+	err := a.Send(context.Background(), "123", "hi", core.SendOptions{})
+
+	asserts.NoError(t, err, "Send should succeed")
+	asserts.False(t, strings.Contains(string(body), `"context"`), "a plain Send carries no context object: "+string(body))
+}
+
+func TestSendThreaded_IncludesContext(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := testAdapter()
+	a.baseURL = srv.URL
+	a.http = srv.Client()
+
+	err := a.SendThreaded(context.Background(), "123", "wamid.orig", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should succeed")
+	asserts.True(t, strings.Contains(string(body), `"context"`), "body carries a context object: "+string(body))
+	asserts.True(t, strings.Contains(string(body), `"message_id":"wamid.orig"`), "context targets the reacted message: "+string(body))
+}
+
+func TestSendThreaded_EmptyReplyToOmitsContext(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := testAdapter()
+	a.baseURL = srv.URL
+	a.http = srv.Client()
+
+	err := a.SendThreaded(context.Background(), "123", "", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should succeed")
+	asserts.False(t, strings.Contains(string(body), `"context"`), "an empty replyToID degrades to a plain send with no context object: "+string(body))
+}
 
 func TestNew(t *testing.T) {
 	bot, err := New(validConfig())
@@ -249,6 +397,26 @@ func TestHandleWebhook_BadSignature(t *testing.T) {
 	asserts.Equal(t, len(got), 0, "no message should be dispatched")
 }
 
+// TestHandleWebhook_RoutesWarningToInjectedLogger proves the logger stored at
+// Connect (here set directly) actually carries adapter diagnostics: a signed but
+// unparseable body must warn through a.log(), not slog.Default.
+func TestHandleWebhook_RoutesWarningToInjectedLogger(t *testing.T) {
+	a := testAdapter()
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	body := []byte("{ not json")
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(string(body)))
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, r, captureDeps(&[]*core.Message{}, nil))
+
+	asserts.Equal(t, w.Code, http.StatusOK, "an unparseable body is still acked 200")
+	asserts.True(t, strings.Contains(buf.String(), "unparseable body"),
+		"the injected logger receives the parse-failure warning")
+}
+
 func TestHandleWebhook_StatusOnlyIgnored(t *testing.T) {
 	a := testAdapter()
 	var got []*core.Message
@@ -294,7 +462,7 @@ func TestHandleWebhook_UnparseableBody(t *testing.T) {
 }
 
 func TestParseWebhook_Image(t *testing.T) {
-	messages := parseWebhook([]byte(imageWebhook))
+	messages := parseWebhook(slog.Default(), []byte(imageWebhook))
 
 	asserts.Equal(t, len(messages), 1, "one message expected")
 	m := messages[0]
@@ -306,7 +474,7 @@ func TestParseWebhook_Image(t *testing.T) {
 }
 
 func TestParseWebhook_SkipsUnparseable(t *testing.T) {
-	messages := parseWebhook([]byte(mixedBatchWebhook))
+	messages := parseWebhook(slog.Default(), []byte(mixedBatchWebhook))
 
 	asserts.Equal(t, len(messages), 1, "the valid message survives; the bad one is skipped")
 	asserts.Equal(t, messages[0].From, "123", "the surviving message is the valid one")
@@ -351,7 +519,7 @@ func TestSend(t *testing.T) {
 	a.cfg.PhoneNumberID = "PNID"
 	a.cfg.Token = "tok"
 
-	err := a.Send(context.Background(), "123", "hi there")
+	err := a.Send(context.Background(), "123", "hi there", core.SendOptions{})
 
 	asserts.NoError(t, err, "Send should succeed on 200")
 	asserts.Equal(t, gotMethod, http.MethodPost, "Send should POST")
@@ -376,14 +544,79 @@ func TestSend_Error(t *testing.T) {
 	a.baseURL = srv.URL
 	a.http = srv.Client()
 
-	err := a.Send(context.Background(), "123", "hi")
+	err := a.Send(context.Background(), "123", "hi", core.SendOptions{})
 
 	asserts.Error(t, err, "non-2xx response should error")
 	asserts.True(t, strings.Contains(err.Error(), "24 hour"), "error should carry the response body")
 }
 
-// The adapter must satisfy the optional core capability so the unified
-// (*core.Bot).ResolveAttachmentURL routes to it rather than the att.URL
+func TestSend_Threading(t *testing.T) {
+	newSrv := func(payload *map[string]any) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(payload)
+			w.WriteHeader(http.StatusOK)
+		}))
+	}
+	newAdapter := func(srv *httptest.Server) *adapter {
+		a := testAdapter()
+		a.baseURL = srv.URL
+		a.http = srv.Client()
+		return a
+	}
+
+	t.Run("InReplyToQuotesMessageID", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "123", ID: "wamid.X"}})
+
+		asserts.NoError(t, err, "Send should succeed on 200")
+		ctx, _ := payload["context"].(map[string]any)
+		asserts.Equal(t, ctx["message_id"], "wamid.X", "context.message_id quotes the message")
+	})
+
+	t.Run("WithThreadIDQuotesRawID", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi", core.SendOptions{ThreadID: "wamid.RAW"})
+
+		asserts.NoError(t, err, "Send")
+		ctx, _ := payload["context"].(map[string]any)
+		asserts.Equal(t, ctx["message_id"], "wamid.RAW", "context.message_id quotes the raw ThreadID")
+	})
+
+	t.Run("NoAnchorOmitsContext", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi", core.SendOptions{})
+
+		asserts.NoError(t, err, "Send with no anchor")
+		_, hasContext := payload["context"]
+		asserts.True(t, !hasContext, "no context key when there is no anchor")
+	})
+
+	t.Run("ThreadIDWinsOverReplyTo", func(t *testing.T) {
+		var payload map[string]any
+		srv := newSrv(&payload)
+		defer srv.Close()
+
+		err := newAdapter(srv).Send(context.Background(), "123", "hi",
+			core.SendOptions{ThreadID: "wamid.RAW", ReplyTo: &core.Message{ChannelID: "123", ID: "wamid.X"}})
+
+		asserts.NoError(t, err, "Send")
+		ctx, _ := payload["context"].(map[string]any)
+		asserts.Equal(t, ctx["message_id"], "wamid.RAW", "explicit ThreadID wins over ReplyTo.ID")
+	})
+}
+
+// The adapter must satisfy the optional AttachmentResolver so the unified
+// (*core.Bot).ResolveAttachmentURL routes to it rather than the default
 // passthrough (guards the pointer-receiver method-set trap).
 var _ core.AttachmentResolver = (*adapter)(nil)
 
@@ -502,6 +735,24 @@ func TestConnectDisconnect(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect should be idempotent")
 }
 
+// foreignAdapter is a non-WhatsApp core.Adapter used to prove Addr returns ""
+// when the bot's adapter is not the WhatsApp adapter type.
+type foreignAdapter struct{}
+
+func (foreignAdapter) Connect(context.Context, core.AdapterDeps) error { return nil }
+func (foreignAdapter) Disconnect() error                               { return nil }
+func (foreignAdapter) Send(context.Context, string, string, core.SendOptions) error {
+	return nil
+}
+func (foreignAdapter) Attachments(*core.Message) ([]core.Attachment, error) {
+	return nil, nil
+}
+
+func TestAddr_WrongBot(t *testing.T) {
+	b := core.New(core.WhatsAppBotType, foreignAdapter{})
+	asserts.Equal(t, Addr(b), "", "Addr returns \"\" when the adapter is not the WhatsApp adapter")
+}
+
 func TestAddr_ExposesBoundListener(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -613,6 +864,35 @@ func TestDrainDispatch_WaitsForInflight(t *testing.T) {
 	a.drainDispatch(ctx)
 
 	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
+}
+
+type failingListener struct {
+	err error
+}
+
+func (l failingListener) Accept() (net.Conn, error) { return nil, l.err }
+func (failingListener) Close() error                { return nil }
+func (failingListener) Addr() net.Addr              { return testAddr("failing") }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "test" }
+func (a testAddr) String() string { return string(a) }
+
+func TestServe_ReportsUnexpectedError(t *testing.T) {
+	want := errors.New("accept failed")
+	done := make(chan error, 1)
+
+	serve(&http.Server{}, failingListener{err: want}, func(err error) {
+		done <- err
+	})
+
+	select {
+	case got := <-done:
+		asserts.ErrorIs(t, got, want, "unexpected serve error should be reported")
+	default:
+		t.Fatal("unexpected serve error was not reported")
+	}
 }
 
 func TestConnect_StaleWatcherIgnoresReplacedServer(t *testing.T) {

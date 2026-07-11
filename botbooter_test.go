@@ -26,7 +26,7 @@ import (
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
-	"github.com/lao/botbooter/whatsapp"
+	"github.com/lao/botbooter/whatsapp/cloud"
 )
 
 // syncBuffer is a concurrency-safe buffer: the CLI adapter writes to its output
@@ -88,11 +88,6 @@ func newDiscordBot(t *testing.T) *botbooter.Bot {
 		body:   `{"message":"401: Unauthorized","code":0}`,
 	}
 	return bot
-}
-
-func mustAddHandler(t *testing.T, bot *botbooter.Bot, pattern string, handler botbooter.CommandHandler) {
-	t.Helper()
-	asserts.NoError(t, bot.AddHandler(botbooter.Command{Pattern: pattern, Handler: handler}), "AddHandler "+pattern)
 }
 
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
@@ -242,7 +237,7 @@ func TestCLIBot_Run_ProcessesInput(t *testing.T) {
 	out := &syncBuffer{}
 	bot := cli.New(in, out)
 
-	mustAddHandler(t, bot, "^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
 	})
 	unknown := 0
@@ -264,7 +259,7 @@ func TestCLIBot_GetAttachments_EndToEnd(t *testing.T) {
 
 	bot := cli.New(strings.NewReader("echo "+png+"\n"), &syncBuffer{})
 	var got []botbooter.Attachment
-	mustAddHandler(t, bot, "^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		atts, err := b.GetAttachments(m)
 		asserts.NoError(t, err, "GetAttachments")
 		got = atts
@@ -406,16 +401,16 @@ func TestRawAccessors(t *testing.T) {
 	})
 
 	t.Run("CLI", func(t *testing.T) {
-		c := &botbooter.CLIMessage{Text: "hi"}
+		c := &cli.Message{Text: "hi"}
 		got, ok := cli.RawData(&botbooter.Message{Raw: c})
 		asserts.True(t, ok, "cli.RawData")
 		asserts.True(t, got == c, "same pointer")
 	})
 
 	t.Run("WhatsApp", func(t *testing.T) {
-		wm := &whatsapp.Message{Type: "text"}
-		got, ok := whatsapp.RawMessage(&botbooter.Message{Raw: wm})
-		asserts.True(t, ok, "whatsapp.RawMessage")
+		wm := &cloud.Message{Type: "text"}
+		got, ok := cloud.RawMessage(&botbooter.Message{Raw: wm})
+		asserts.True(t, ok, "cloud.RawMessage")
 		asserts.True(t, got == wm, "same pointer")
 	})
 
@@ -445,10 +440,10 @@ func TestSessionAccessors(t *testing.T) {
 	asserts.NoError(t, err, "telegram.New")
 	asserts.NotNil(t, telegram.Client(telegramBot), "TelegramClient")
 
-	whatsappBot, err := whatsapp.New(whatsapp.Config{
+	whatsappBot, err := cloud.New(cloud.Config{
 		Token: "t", PhoneNumberID: "p", AppSecret: "s", VerifyToken: "v", Addr: ":0",
 	})
-	asserts.NoError(t, err, "whatsapp.New")
+	asserts.NoError(t, err, "cloud.New")
 	asserts.Equal(t, whatsappBot.BotType, botbooter.WhatsAppBotType, "WhatsApp bot type")
 
 	teamsBot, err := teams.New(teams.Config{
@@ -462,8 +457,8 @@ func TestSessionAccessors(t *testing.T) {
 }
 
 func TestWhatsAppNew_MissingConfig(t *testing.T) {
-	_, err := whatsapp.New(whatsapp.Config{})
-	asserts.ErrorIs(t, err, whatsapp.ErrMissingConfig, "empty config should report the sentinel")
+	_, err := cloud.New(cloud.Config{})
+	asserts.ErrorIs(t, err, cloud.ErrMissingConfig, "empty config should report the sentinel")
 }
 
 func TestTeamsNew_MissingConfig(t *testing.T) {
