@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -130,6 +131,34 @@ func TestConnection_SupersededTeardownDoesNotSwallowAdapterDisconnect(t *testing
 	asserts.NoError(t, c.teardown(true), "true teardown second")
 
 	asserts.Equal(t, a.disconnectCount(), 1, "adapter disconnected exactly once despite losing the once race")
+}
+
+// Concurrent true teardowns of the same connection must collapse into one
+// adapter Disconnect. b.conn is uninstalled only after teardown returns (so a
+// Connect racing a slow drain gets ErrAlreadyConnected), which means two
+// Bot.Disconnect callers can both observe themselves current and both pass
+// disconnectAdapter=true — discOnce is what keeps the adapter call single.
+func TestConnection_ConcurrentTrueTeardownsDisconnectOnce(t *testing.T) {
+	a := &watcherAdapter{}
+	_, cancel := context.WithCancel(context.Background())
+	c := &connection{cancel: cancel, done: make(chan error, 1), runDone: make(chan struct{}), adapter: a}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = c.teardown(true)
+		}()
+	}
+	wg.Wait()
+
+	asserts.Equal(t, a.disconnectCount(), 1, "adapter disconnected exactly once across concurrent true teardowns")
+	for i, err := range errs {
+		asserts.NoError(t, err, fmt.Sprintf("teardown caller %d shares the single Disconnect result", i))
+	}
 }
 
 // blockingAdapter blocks inside Connect until released, modeling an adapter
