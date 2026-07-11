@@ -21,21 +21,21 @@ func CheckBannedImports(t TestingT, dir string, banned []string, label string) {
 	}
 	fset := token.NewFileSet()
 	checked := 0
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-		file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
-		NoError(t, err, "parse "+label+" file "+entry.Name())
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ImportsOnly)
+		NoError(t, err, "parse "+label+"/"+name)
 		if err != nil {
-			return
+			return // a parse error aborts the scan, matching the prior ParseDir behavior
 		}
 		checked++
 		for _, imp := range file.Imports {
 			for _, b := range banned {
 				False(t, strings.Contains(imp.Path.Value, b),
-					label+" file "+entry.Name()+" must not import "+b)
+					label+" file "+name+" must not import "+b)
 			}
 		}
 	}

@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"regexp"
@@ -21,6 +21,9 @@ var ErrUnknownBotType = errors.New("botbooter: unknown bot type")
 // ErrAlreadyConnected is returned by Connect when the Bot is already connected.
 var ErrAlreadyConnected = errors.New("botbooter: already connected")
 
+// ErrNilMessage is returned by Bot methods handed a nil *Message argument.
+var ErrNilMessage = errors.New("botbooter: nil message")
+
 // BotType identifies the messaging platform a Bot is connected to.
 type BotType int
 
@@ -32,9 +35,12 @@ const (
 	TelegramBotType
 	WhatsAppBotType
 	TeamsBotType
+	WhatsMeowBotType
 	GitHubBotType
 )
 
+// String returns the lowercase platform name for t, or "BotType(n)" for an
+// unknown value.
 func (t BotType) String() string {
 	switch t {
 	case SlackBotType:
@@ -49,6 +55,8 @@ func (t BotType) String() string {
 		return "whatsapp"
 	case TeamsBotType:
 		return "teams"
+	case WhatsMeowBotType:
+		return "whatsmeow"
 	case GitHubBotType:
 		return "github"
 	default:
@@ -61,23 +69,47 @@ func (t BotType) String() string {
 // are best-effort per platform. Raw carries the originating platform's untouched
 // event; read it with the matching typed accessor (e.g. discord.RawEvent).
 type Message struct {
-	ID               string
-	UserID           string
-	AuthorName       string
-	ChannelID        string
-	Content          string
-	Timestamp        time.Time
-	ReplyToID        string
+	ID         string
+	UserID     string
+	AuthorName string
+	ChannelID  string
+	Content    string
+	Timestamp  time.Time
+	ReplyToID  string
+	// MentionedUserIDs lists each mentioned user once, in first-mention order.
+	// Whether the bot's own mention appears follows Content: Teams strips the
+	// bot's mention from Content and so excludes its ID here; Slack and Discord
+	// keep it in both.
 	MentionedUserIDs []string
 
 	Raw any
 }
 
-// CLIMessage is the raw payload of a message read from the CLI adapter.
-type CLIMessage struct {
-	Text        string
-	Attachments []Attachment
+// Reaction is a platform-agnostic emoji reaction added to a message, handed to
+// handlers registered with [Bot.OnReaction]. UserID, ChannelID and MessageID are
+// always set; MessageID identifies the reacted message and is the reply target for
+// [Bot.ReplyToMessage]. Emoji renders as-is when sent back in a message on its
+// origin platform: a unicode character on most platforms, Slack's colon-wrapped
+// shortname (":thumbsup:", covering custom workspace emojis), Discord's
+// "<:name:id>" markup for its custom emojis. It is NOT normalized across
+// platforms — compare per platform. AuthorName is best-effort and inline-only —
+// empty on platforms whose reaction payload carries only a user id. Raw carries
+// the originating platform event untouched; read it with the matching typed
+// accessor (e.g. slack.RawReaction) to recover the platform's original values,
+// such as the unwrapped emoji name (slack.RawReaction(r).Reaction gives
+// "thumbsup", discord.RawReaction(r).Emoji.Name the bare custom-emoji name).
+type Reaction struct {
+	Emoji      string
+	UserID     string
+	AuthorName string
+	ChannelID  string
+	MessageID  string
+
+	Raw any
 }
+
+// ReactionHandler handles an emoji reaction dispatched to [Bot.OnReaction].
+type ReactionHandler func(ctx context.Context, b *Bot, r *Reaction)
 
 // CommandHandler handles a dispatched message for a matched command.
 type CommandHandler func(ctx context.Context, b *Bot, m *Message)
@@ -110,7 +142,7 @@ type Attachment struct {
 type Adapter interface {
 	Connect(ctx context.Context, deps AdapterDeps) error
 	Disconnect() error
-	Send(ctx context.Context, channelID, text string) error
+	Send(ctx context.Context, channelID, text string, opts SendOptions) error
 	Attachments(m *Message) ([]Attachment, error)
 }
 
@@ -121,11 +153,64 @@ type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
 }
 
-// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
+// ThreadedSender is an OPTIONAL capability an Adapter may implement to post a
+// reply nested on a specific message. Like [AttachmentResolver] it is deliberately
+// NOT part of the mandatory Adapter interface: adapters that implement it get
+// threaded replies via [Bot.ReplyToMessage]; those that do not fall back to a
+// plain channel message.
+type ThreadedSender interface {
+	SendThreaded(ctx context.Context, channelID, replyToID, text string) error
+}
+
+// SendOptions is the resolved set of per-send modifiers an Adapter reads off a
+// Send call. Its zero value means "a plain channel message". A threading anchor
+// is platform-specific, so each adapter derives its own from these fields:
+//   - ReplyTo: reply anchored on this whole message; the adapter picks the
+//     correct native anchor (Slack thread_ts from ReplyToID; Discord/Telegram/
+//     WhatsApp the replied-to/quoted message id).
+//   - ThreadID: a raw native anchor supplied by the caller, used verbatim. It
+//     wins over ReplyTo when both are set. On Slack it is a thread_ts; on
+//     Discord/Telegram/WhatsApp a reply/quote message id (NOT a Discord
+//     thread-channel id).
+type SendOptions struct {
+	ReplyTo  *Message
+	ThreadID string
+}
+
+// SendOption modifies a SendOptions. Construct them with [InReplyTo] /
+// [WithThreadID] and pass them to [Bot.SendMessageContext] / [Bot.SendMessage].
+type SendOption func(*SendOptions)
+
+// InReplyTo anchors the send on m so the adapter posts into m's thread or
+// reply-chain, deriving the correct per-platform anchor itself.
+func InReplyTo(m *Message) SendOption { return func(o *SendOptions) { o.ReplyTo = m } }
+
+// WithThreadID anchors the send on a raw native id the adapter uses verbatim.
+// It takes precedence over [InReplyTo]. The caller owns platform-correctness.
+func WithThreadID(id string) SendOption { return func(o *SendOptions) { o.ThreadID = id } }
+
+// resolveSendOptions folds opts into a single SendOptions, skipping nil options
+// so a conditionally-built option slice can carry a nil entry without panicking.
+func resolveSendOptions(opts ...SendOption) SendOptions {
+	var o SendOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	return o
+}
+
+// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot,
+// plus the Bot's logger so adapter diagnostics route through the same sink.
+// DispatchReaction is optional: adapters on platforms without reaction events
+// simply never call it.
 type AdapterDeps struct {
-	Dispatch   func(ctx context.Context, m *Message)
-	Done       func(err error)
-	Disconnect func() error
+	Dispatch         func(ctx context.Context, m *Message)
+	DispatchReaction func(ctx context.Context, r *Reaction)
+	Done             func(err error)
+	Disconnect       func() error
+	Logger           *slog.Logger // always non-nil
 }
 
 // Bot is the platform-agnostic chat bot. Register handlers and middleware
@@ -139,6 +224,9 @@ type Bot struct {
 	commands              []Command
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
+	reactionHandlers      []ReactionHandler
+	setupErrs             []error // registration errors, surfaced by Connect
+	logger                *slog.Logger
 
 	mu   sync.Mutex
 	conn *connection
@@ -190,21 +278,25 @@ func AdapterAs[T any](b *Bot) (T, bool) {
 	return a, ok
 }
 
-// AddHandler registers cmd, compiling its Pattern and returning an error if it
-// is not valid. Commands are matched in registration order, first match wins.
-func (b *Bot) AddHandler(cmd Command) error {
+// AddHandler registers cmd, compiling its Pattern. An invalid pattern is
+// recorded rather than returned — it surfaces from Connect (and Run) and is
+// also logged at record time (so a registration after Connect is not silently
+// dropped), and the command is not registered. Commands are matched in
+// registration order, first match wins.
+func (b *Bot) AddHandler(cmd Command) {
 	re, err := regexp.Compile(cmd.Pattern)
 	if err != nil {
-		return fmt.Errorf("botbooter: invalid command pattern %q: %w", cmd.Pattern, err)
+		b.log().Error("botbooter: invalid command pattern", "pattern", cmd.Pattern, "error", err)
+		b.setupErrs = append(b.setupErrs, fmt.Errorf("botbooter: invalid command pattern %q: %w", cmd.Pattern, err))
+		return
 	}
 	cmd.re = re
 	b.commands = append(b.commands, cmd)
-	return nil
 }
 
 // HandleFunc is a convenience wrapper around AddHandler.
-func (b *Bot) HandleFunc(pattern string, handler CommandHandler) error {
-	return b.AddHandler(Command{Pattern: pattern, Handler: handler})
+func (b *Bot) HandleFunc(pattern string, handler CommandHandler) {
+	b.AddHandler(Command{Pattern: pattern, Handler: handler})
 }
 
 // SetUnknownCommandHandler sets the handler invoked when a message matches no
@@ -218,9 +310,49 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }
 
+// OnReaction registers h to run whenever a user adds an emoji reaction, on the
+// platforms that surface reaction events (Slack, Discord, Telegram, WhatsApp).
+// Handlers are not regex-matched — branch on Reaction.Emoji inside the handler —
+// and, unlike message dispatch, reactions bypass the Middleware chain.
+func (b *Bot) OnReaction(h ReactionHandler) {
+	b.reactionHandlers = append(b.reactionHandlers, h)
+}
+
+// dispatchReaction runs every registered reaction handler. Each handler call is
+// recovered individually, so a panic in one handler neither skips the others nor
+// takes down the adapter's event loop.
+func (b *Bot) dispatchReaction(ctx context.Context, r *Reaction) {
+	for _, h := range b.reactionHandlers {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					b.log().Error("botbooter: recovered from panic while handling reaction", "panic", rec)
+				}
+			}()
+			h(ctx, b, r)
+		}()
+	}
+}
+
+// SetLogger routes the Bot's and its adapter's diagnostics (panic recovery,
+// shutdown warnings, webhook rejections) through logger instead of
+// [slog.Default]. Like handler registration, call it before Connect.
+func (b *Bot) SetLogger(logger *slog.Logger) {
+	b.logger = logger
+}
+
+// log returns the configured logger, falling back to slog.Default().
+func (b *Bot) log() *slog.Logger {
+	if b.logger != nil {
+		return b.logger
+	}
+	return slog.Default()
+}
+
 // Connect starts the adapter's event loop and returns without blocking. It
 // returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
-// if the Bot has no adapter, or any error from the adapter's own Connect.
+// if the Bot has no adapter, every registration error recorded by AddHandler
+// (joined, one per invalid pattern), or any error from the adapter's own Connect.
 func (b *Bot) Connect(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -229,6 +361,9 @@ func (b *Bot) Connect(ctx context.Context) error {
 	}
 	if b.adapter == nil {
 		return ErrUnknownBotType
+	}
+	if err := errors.Join(b.setupErrs...); err != nil {
+		return err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	c := &connection{
@@ -242,9 +377,11 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// prior connection writes into its own dead channel and never touches the
 	// shared adapter.
 	deps := AdapterDeps{
-		Dispatch:   b.dispatch,
-		Done:       func(err error) { c.done <- err },
-		Disconnect: func() error { return b.disconnectConn(c) },
+		Dispatch:         b.dispatch,
+		DispatchReaction: b.dispatchReaction,
+		Done:             func(err error) { c.done <- err },
+		Disconnect:       func() error { return b.disconnectConn(c) },
+		Logger:           b.log(),
 	}
 
 	// adapter.Connect is non-blocking by contract. Holding b.mu across it — and
@@ -262,14 +399,27 @@ func (b *Bot) Connect(ctx context.Context) error {
 // connection the adapter is disconnected; if c has been superseded by a
 // reconnect, only c's own runCtx/runDone are settled and the adapter — now
 // owned by the newer connection — is left untouched.
+//
+// b.conn is cleared only AFTER teardown returns, so a Connect racing a
+// slow adapter Disconnect (drains can take seconds) gets ErrAlreadyConnected
+// instead of starting a second live session on the shared adapter. Concurrent
+// teardowns of the same connection serialize on its sync.Once: the losers
+// block inside teardown until the winner's adapter Disconnect finishes.
 func (b *Bot) disconnectConn(c *connection) error {
 	b.mu.Lock()
 	current := b.conn == c
-	if current {
-		b.conn = nil
-	}
 	b.mu.Unlock()
-	return c.teardown(current)
+
+	err := c.teardown(current)
+
+	if current {
+		b.mu.Lock()
+		if b.conn == c {
+			b.conn = nil
+		}
+		b.mu.Unlock()
+	}
+	return err
 }
 
 // Disconnect tears down the active connection: it cancels the run context and
@@ -278,17 +428,15 @@ func (b *Bot) disconnectConn(c *connection) error {
 func (b *Bot) Disconnect() error {
 	b.mu.Lock()
 	c := b.conn
-	b.conn = nil
 	b.mu.Unlock()
 
-	if c != nil {
-		return c.teardown(true)
+	if c == nil {
+		if b.adapter == nil {
+			return ErrUnknownBotType
+		}
+		return nil
 	}
-
-	if b.adapter == nil {
-		return ErrUnknownBotType
-	}
-	return nil
+	return b.disconnectConn(c)
 }
 
 // Run connects the Bot and blocks until ctx is canceled, the event loop ends,
@@ -327,7 +475,7 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	if disconnectErr != nil {
 		if ctx.Err() != nil {
-			log.Printf("botbooter: error disconnecting during shutdown: %v", disconnectErr)
+			b.log().Error("botbooter: error disconnecting during shutdown", "error", disconnectErr)
 		} else if loopErr == nil {
 			loopErr = disconnectErr
 		}
@@ -345,20 +493,55 @@ func (b *Bot) Start() error {
 // SendMessage sends text to channelID using a background context. Prefer
 // SendMessageContext from within a handler so the send honors shutdown and
 // cancellation; SendMessage's background context outlives Run's teardown.
-func (b *Bot) SendMessage(channelID, text string) error {
-	return b.SendMessageContext(context.Background(), channelID, text)
+func (b *Bot) SendMessage(channelID, text string, opts ...SendOption) error {
+	return b.SendMessageContext(context.Background(), channelID, text, opts...)
 }
 
 // SendMessageContext sends text to channelID, honoring ctx for cancellation.
-func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) error {
+// Pass [InReplyTo] or [WithThreadID] to thread the message onto an inbound one;
+// with no options it is a plain channel message.
+func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string, opts ...SendOption) error {
 	if b.adapter == nil {
 		return ErrUnknownBotType
 	}
-	return b.adapter.Send(ctx, channelID, text)
+	return b.adapter.Send(ctx, channelID, text, resolveSendOptions(opts...))
 }
 
-// GetAttachments returns the platform-agnostic attachments of message.
+// ReplyToMessage posts text as a reply nested on the message identified by
+// replyToID in channelID. If the Bot's adapter implements [ThreadedSender] the
+// call is delegated; otherwise it falls back to a plain [Bot.SendMessageContext],
+// so the reply still reaches the channel, just not threaded. It returns
+// [ErrUnknownBotType] if the Bot has no adapter.
+func (b *Bot) ReplyToMessage(ctx context.Context, channelID, replyToID, text string) error {
+	if b.adapter == nil {
+		return ErrUnknownBotType
+	}
+	if s, ok := b.adapter.(ThreadedSender); ok {
+		return s.SendThreaded(ctx, channelID, replyToID, text)
+	}
+	return b.adapter.Send(ctx, channelID, text, SendOptions{})
+}
+
+// Reply is convenience sugar for replying into the thread or reply-chain of the
+// inbound message m — it is exactly SendMessageContext(ctx, m.ChannelID, text,
+// InReplyTo(m)). Each adapter derives its own platform-specific anchor; see
+// [SendOptions]. It returns ErrNilMessage if m is nil, or ErrUnknownBotType if
+// the Bot has no adapter.
+func (b *Bot) Reply(ctx context.Context, m *Message, text string) error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	// A nil adapter is caught by the delegated SendMessageContext.
+	return b.SendMessageContext(ctx, m.ChannelID, text, InReplyTo(m))
+}
+
+// GetAttachments returns the platform-agnostic attachments of message. It
+// returns ErrNilMessage if message is nil, or ErrUnknownBotType if the Bot has
+// no adapter.
 func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
+	if message == nil {
+		return nil, ErrNilMessage
+	}
 	if b.adapter == nil {
 		return nil, ErrUnknownBotType
 	}
@@ -399,7 +582,7 @@ func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string,
 func (b *Bot) dispatch(ctx context.Context, message *Message) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("botbooter: recovered from panic while handling message: %v", r)
+			b.log().Error("botbooter: recovered from panic while handling message", "panic", r)
 		}
 	}()
 

@@ -2,6 +2,12 @@
 .env
 .env.*
 
+# WhatsApp Web (whatsmeow) session store — holds credentials, never commit.
+botbooter-whatsapp*.db*
+
+todo.md
+SPEC.md
+
 # Test & coverage artifacts
 coverage.txt
 *.out
@@ -10,9 +16,9 @@ coverage.txt
 # Build artifacts
 /bin/
 /dist/
-# Compiled example binary (go build ./_examples/v1); anchored so it does not
-# match the _examples/v1 source directory.
-/v1
+# Compiled example binary (go build ./_examples/basic); anchored so it does not
+# match the _examples/basic source directory.
+/basic
 
 # Editor / OS noise
 .DS_Store
@@ -20,7 +26,6 @@ coverage.txt
 .vscode/
 .claude/
 .plans/
-todo.md
 _docs/superpowers/
 
 # Working documents (plans/specs) — kept local, not part of the library

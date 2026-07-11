@@ -33,7 +33,8 @@ func newAdapter(in io.Reader, out io.Writer) *adapter {
 	return &adapter{in: in, out: out}
 }
 
-// New creates a CLI bot backed by the given reader and writer.
+// New creates a CLI bot backed by the given reader and writer. A nil in or out
+// defaults to os.Stdin or os.Stdout respectively.
 func New(in io.Reader, out io.Writer) *core.Bot {
 	return core.New(core.CLIBotType, newAdapter(in, out))
 }
@@ -84,7 +85,9 @@ func (a *adapter) Disconnect() error {
 	return nil
 }
 
-func (a *adapter) Send(_ context.Context, _, text string) error {
+// Send writes text to the CLI's output. The CLI has no threading, so SendOptions
+// is ignored.
+func (a *adapter) Send(_ context.Context, _, text string, _ core.SendOptions) error {
 	_, err := fmt.Fprintln(a.out, text)
 	return err
 }
@@ -98,15 +101,21 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	return data.Attachments, nil
 }
 
+// Message is the raw payload of a message read from the CLI adapter.
+type Message struct {
+	Text        string
+	Attachments []core.Attachment
+}
+
 // RawData returns the parsed CLI line carried on m, reporting whether m
 // originated from the CLI adapter.
-func RawData(m *core.Message) (*core.CLIMessage, bool) {
-	data, ok := m.Raw.(*core.CLIMessage)
+func RawData(m *core.Message) (*Message, bool) {
+	data, ok := m.Raw.(*Message)
 	return data, ok
 }
 
-func parseMessage(line string) *core.CLIMessage {
-	msg := &core.CLIMessage{Text: line}
+func parseMessage(line string) *Message {
+	msg := &Message{Text: line}
 	for _, token := range strings.Fields(line) {
 		if !looksLikePath(token) {
 			continue
@@ -129,7 +138,9 @@ func fileAttachment(path string) (core.Attachment, bool) {
 	}
 
 	att := core.Attachment{URL: path, ExtraData: path}
-	if f, err := os.Open(path); err == nil {
+	// The CLI adapter is for trusted local input only (see package doc); opening
+	// an operator-typed path is the feature, not an injection vector.
+	if f, err := os.Open(path); err == nil { //nolint:gosec
 		defer func() { _ = f.Close() }()
 		buf := make([]byte, 512)
 		n, _ := f.Read(buf)

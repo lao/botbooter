@@ -2,6 +2,7 @@ package teams
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/lao/botbooter/internal/asserts"
@@ -75,6 +76,23 @@ func TestStripRecipientMention(t *testing.T) {
 	// An empty recipient id must never match an entity carrying an empty mentioned id.
 	emptyRecip := &inboundActivity{Text: "hi", Entities: []mentionEntity{mention("", "<at>x</at>")}}
 	asserts.Equal(t, stripRecipientMention(emptyRecip), "hi", "empty recipient id: no strip")
+}
+
+func TestToMessage_MentionedUserIDs(t *testing.T) {
+	body := `{"type":"message","id":"a","text":"<at>Bot</at> tell <at>John</at> and <at>Jane</at> and <at>John</at>","recipient":{"id":"bot-1"},` +
+		`"entities":[{"type":"mention","text":"<at>Bot</at>","mentioned":{"id":"bot-1"}},` +
+		`{"type":"mention","text":"<at>John</at>","mentioned":{"id":"user-2"}},` +
+		`{"type":"clientInfo","mentioned":{"id":"ignored"}},` +
+		`{"type":"mention","text":"<at>Jane</at>","mentioned":{"id":"user-3"}},` +
+		`{"type":"mention","text":"<at>John</at>","mentioned":{"id":"user-2"}}]}`
+	var act inboundActivity
+	asserts.NoError(t, json.Unmarshal([]byte(body), &act), "unmarshal")
+	got := toMessage(&act, json.RawMessage(body))
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "user-2,user-3", "mention ids exclude the bot and non-mention entities, deduped")
+
+	var plain inboundActivity
+	asserts.NoError(t, json.Unmarshal([]byte(`{"type":"message","id":"b","text":"hi"}`), &plain), "unmarshal plain")
+	asserts.Equal(t, len(toMessage(&plain, nil).MentionedUserIDs), 0, "no entities -> nil")
 }
 
 func TestToMessage_StripsBotMention(t *testing.T) {

@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -66,8 +67,9 @@ type adapter struct {
 	tokenURL  string
 	openIDURL string
 
-	mu  sync.Mutex
-	srv *http.Server
+	mu     sync.Mutex
+	logger *slog.Logger // set from AdapterDeps at Connect; guarded by mu
+	srv    *http.Server
 	// boundAddr is the listener's resolved address, so a cfg.Addr of ":0" is
 	// recoverable via Addr. Set with srv, cleared with it.
 	boundAddr string

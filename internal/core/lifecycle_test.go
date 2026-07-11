@@ -39,7 +39,7 @@ func (f *fakeAdapter) Disconnect() error {
 	return f.disconnectErr
 }
 
-func (f *fakeAdapter) Send(_ context.Context, _, text string) error {
+func (f *fakeAdapter) Send(_ context.Context, _, text string, _ SendOptions) error {
 	if f.sendErr != nil {
 		return f.sendErr
 	}

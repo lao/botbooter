@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -70,6 +70,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.srv = srv
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
+	a.logger = deps.Logger
 	a.mu.Unlock()
 
 	go serve(srv, ln, deps.Done)
@@ -112,7 +113,7 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 	// refresh during drain must ride r.Context() or it would 401 an
 	// already-in-flight request.
 	if err := a.validateInbound(r.Context(), r.Header.Get("Authorization"), act.ServiceURL, act.ChannelID); err != nil {
-		log.Printf("teams: inbound request rejected with 401: %v", err)
+		a.log().Warn("teams: inbound request rejected with 401", "error", err)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -169,7 +170,7 @@ func (a *adapter) Disconnect() error {
 	// already-acked messages, which is operationally significant.
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
-		log.Printf("teams: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		a.log().Warn("teams: drain deadline reached; canceling in-flight dispatches", "inflight", n)
 		drainErr = fmt.Errorf("teams: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 
@@ -192,6 +193,17 @@ func (a *adapter) Disconnect() error {
 		return err
 	}
 	return drainErr
+}
+
+// log returns the Bot's logger handed over at Connect, or slog.Default()
+// before the first Connect.
+func (a *adapter) log() *slog.Logger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 // drainDispatch waits, bounded by ctx, for in-flight dispatch so an acked

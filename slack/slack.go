@@ -30,6 +30,13 @@ func RawEvent(m *botbooter.Message) (*slackevents.MessageEvent, bool) {
 	return slackint.RawEvent(m)
 }
 
+// RawReaction returns the raw Slack reaction event carried on r, reporting
+// whether r originated from Slack. Its Reaction field is the platform's original
+// bare shortname ("thumbsup") behind r.Emoji's colon-wrapped ":thumbsup:".
+func RawReaction(r *botbooter.Reaction) (*slackevents.ReactionAddedEvent, bool) {
+	return slackint.RawReaction(r)
+}
+
 // Client returns the Slack Web API client backing b, or nil if b is not a Slack
 // bot.
 func Client(b *botbooter.Bot) *slackapi.Client {

@@ -10,7 +10,9 @@ import (
 	discordint "github.com/lao/botbooter/internal/discord"
 )
 
-// New creates a Discord bot that connects via the Gateway.
+// New creates a Discord bot that connects via the Gateway. It returns an error
+// only if discordgo rejects the token at construction; an invalid or revoked
+// token otherwise surfaces when Run or Connect opens the gateway session.
 func New(token string) (*botbooter.Bot, error) {
 	return discordint.New(token)
 }
@@ -19,6 +21,14 @@ func New(token string) (*botbooter.Bot, error) {
 // whether m originated from Discord.
 func RawEvent(m *botbooter.Message) (*discordgo.MessageCreate, bool) {
 	return discordint.RawEvent(m)
+}
+
+// RawReaction returns the raw Discord reaction-add event carried on r, reporting
+// whether r originated from Discord. Its Emoji field holds the platform's
+// original values (bare Name, ID) behind the "<:name:id>" markup a custom emoji
+// gets in r.Emoji.
+func RawReaction(r *botbooter.Reaction) (*discordgo.MessageReactionAdd, bool) {
+	return discordint.RawReaction(r)
 }
 
 // Session returns the discordgo gateway session backing b, or nil if b is not a

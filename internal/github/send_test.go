@@ -11,6 +11,7 @@ import (
 
 	gogithub "github.com/google/go-github/v88/github"
 	"github.com/lao/botbooter/internal/asserts"
+	"github.com/lao/botbooter/internal/core"
 )
 
 // TestSend_PATAuthorizationHeader asserts the PAT wiring: the client built by
@@ -36,7 +37,7 @@ func TestSend_PATAuthorizationHeader(t *testing.T) {
 	asserts.NoError(t, err, "repoint client")
 	a.client = client
 
-	asserts.NoError(t, a.Send(context.Background(), "lao/botbooter#42", "hi"), "send")
+	asserts.NoError(t, a.Send(context.Background(), "lao/botbooter#42", "hi", core.SendOptions{}), "send")
 	asserts.True(t, strings.Contains(gotAuth, "ghp_test"), "Authorization carries the PAT, got "+gotAuth)
 }
 
@@ -103,7 +104,7 @@ func TestSend_PostsComment(t *testing.T) {
 	asserts.NoError(t, err, "new adapter")
 	a.client = testClient(t, srv)
 
-	asserts.NoError(t, a.Send(context.Background(), "lao/botbooter#42", "done"), "send")
+	asserts.NoError(t, a.Send(context.Background(), "lao/botbooter#42", "done", core.SendOptions{}), "send")
 	asserts.True(t, strings.HasSuffix(gotPath, "/repos/lao/botbooter/issues/42/comments"), "comment endpoint, got "+gotPath)
 	var payload struct {
 		Body string `json:"body"`
@@ -116,7 +117,7 @@ func TestSend_BadChannelID(t *testing.T) {
 	a, err := newAdapter(patConfig())
 	asserts.NoError(t, err, "new adapter")
 
-	asserts.ErrorIs(t, a.Send(context.Background(), "not-a-channel", "x"), ErrBadChannelID, "malformed channel id")
+	asserts.ErrorIs(t, a.Send(context.Background(), "not-a-channel", "x", core.SendOptions{}), ErrBadChannelID, "malformed channel id")
 }
 
 func TestSend_APIError(t *testing.T) {
@@ -130,7 +131,7 @@ func TestSend_APIError(t *testing.T) {
 	asserts.NoError(t, err, "new adapter")
 	a.client = testClient(t, srv)
 
-	err = a.Send(context.Background(), "lao/botbooter#42", "x")
+	err = a.Send(context.Background(), "lao/botbooter#42", "x", core.SendOptions{})
 	asserts.Error(t, err, "API failure surfaces")
 	asserts.True(t, strings.Contains(err.Error(), "lao/botbooter#42"), "error names the channel")
 }

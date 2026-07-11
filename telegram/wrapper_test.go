@@ -22,3 +22,18 @@ func TestRawUpdate(t *testing.T) {
 	asserts.True(t, ok, "raw present")
 	asserts.Equal(t, got, want, "raw update")
 }
+
+func TestRawReactionUpdate(t *testing.T) {
+	t.Run("Present", func(t *testing.T) {
+		want := &models.MessageReactionUpdated{MessageID: 55}
+		got, ok := RawReactionUpdate(&botbooter.Reaction{Raw: &models.Update{MessageReaction: want}})
+		asserts.True(t, ok, "reaction raw present")
+		asserts.Equal(t, got, want, "raw reaction update")
+	})
+
+	t.Run("WrongRaw", func(t *testing.T) {
+		got, ok := RawReactionUpdate(&botbooter.Reaction{Raw: "not a reaction update"})
+		asserts.False(t, ok, "wrong raw type")
+		asserts.True(t, got == nil, "nil update")
+	})
+}
