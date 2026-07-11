@@ -45,7 +45,7 @@ vuln:
 # Run the example bot locally in CLI mode (no credentials required).
 # _examples is its own module, so run it from that directory.
 run-cli:
-	cd _examples && go run ./v1 cli
+	cd _examples && go run ./basic cli
 
 tidy:
 	go mod tidy
