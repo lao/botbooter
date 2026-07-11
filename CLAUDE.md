@@ -45,7 +45,7 @@ The tradeoff of that duplication: **a bug or fix in one adapter's copied scaffol
 
 ### Dispatch (`core.Bot.dispatch`)
 
-Commands are regex patterns compiled once in `AddHandler` (invalid patterns return an error there). Matching is **first-match-wins**; no match falls through to the unknown-command handler if set. Middleware is composed inner-to-outer so registration order = execution order, each calling `next`. The whole dispatch is wrapped in a `recover` — a panicking handler is logged, not fatal.
+Commands are regex patterns compiled once in `AddHandler` (registration returns nothing, joebot-style: invalid patterns are recorded on the Bot and surface as one `errors.Join`ed error from `Connect`/`Run`, which refuse to start). Matching is **first-match-wins**; no match falls through to the unknown-command handler if set. Middleware is composed inner-to-outer so registration order = execution order, each calling `next`. The whole dispatch is wrapped in a `recover` — a panicking handler is logged, not fatal.
 
 ### Lifecycle (the subtle part — read `internal/core/core.go` before touching it)
 

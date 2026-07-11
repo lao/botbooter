@@ -37,9 +37,7 @@ func main() {
 	b := &ExampleBot{Bot: bot}
 
 	b.AddMiddleware(loggingMiddleware)
-	if err := b.HandleFunc("^echo ", b.echo); err != nil {
-		log.Fatal(err)
-	}
+	b.HandleFunc("^echo ", b.echo)
 	b.SetUnknownCommandHandler(b.unknownCommand)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
