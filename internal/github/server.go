@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"time"
@@ -41,7 +40,7 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	}
 	parsed, err := gogithub.ParseWebHook("issue_comment", payload)
 	if err != nil {
-		log.Printf("github: discarding webhook with unparseable body: %v", err)
+		a.log().Warn("github: discarding webhook with unparseable body", "error", err)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -112,6 +111,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.srv = srv
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
+	a.logger = deps.Logger
 	a.mu.Unlock()
 
 	go func() {
@@ -189,7 +189,7 @@ func (a *adapter) Disconnect() error {
 
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
-		log.Printf("github: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		a.log().Warn("github: drain deadline reached; canceling in-flight dispatches", "inflight", n)
 		drainErr = fmt.Errorf("github: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 
