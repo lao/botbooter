@@ -72,6 +72,7 @@ go run ./_examples/basic telegram   # uses TELEGRAM_BOT_TOKEN
 go run ./_examples/basic whatsapp   # WhatsApp Cloud API flavor: uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
 go run ./_examples/basic whatsmeow  # WhatsApp Web flavor: no credentials — scan the QR on first run (+ optional WA_MEOW_DB)
 go run ./_examples/basic teams      # uses TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (+ optional TEAMS_APP_TENANT_ID / TEAMS_PATH)
+go run ./_examples/basic github     # uses GITHUB_TOKEN / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR (+ optional GITHUB_PATH)
 ```
 
 ## Concepts

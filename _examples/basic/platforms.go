@@ -8,6 +8,7 @@ import (
 	"github.com/lao/botbooter"
 	"github.com/lao/botbooter/cli"
 	"github.com/lao/botbooter/discord"
+	"github.com/lao/botbooter/github"
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
@@ -51,10 +52,18 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Addr:        os.Getenv("TEAMS_ADDR"),
 			Path:        os.Getenv("TEAMS_PATH"), // optional; defaults to /api/messages
 		})
+	case "github":
+		// PAT mode; for GitHub App auth set AppID/InstallationID/PrivateKey instead.
+		return github.New(github.Config{
+			Token:         os.Getenv("GITHUB_TOKEN"),
+			WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+			Addr:          os.Getenv("GITHUB_ADDR"),
+			Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
+		})
 	case "cli":
 		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)
 		return cli.New(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github or cli)", botType)
 	}
 }

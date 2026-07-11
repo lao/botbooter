@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -100,7 +101,20 @@ type adapter struct {
 	// it after the drain window so a stuck handler cannot leak, and clears it
 	// only when a reconnect has not already installed a newer connection.
 	detachedCancel context.CancelFunc
-	inflight       atomic.Int64
+	// logger is the Bot's logger handed over at Connect; read via log().
+	logger   *slog.Logger
+	inflight atomic.Int64
+}
+
+// log returns the Bot's logger handed over at Connect, or slog.Default()
+// before the first Connect.
+func (a *adapter) log() *slog.Logger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 // New creates a GitHub bot. It returns ErrMissingConfig if a required field is
