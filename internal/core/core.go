@@ -236,11 +236,13 @@ type Bot struct {
 // fresh one and Disconnect drops it, so nothing from a prior connection can
 // leak into a successor across disconnect→reconnect races.
 type connection struct {
-	cancel  context.CancelFunc
-	done    chan error    // adapter reports event-loop termination here
-	runDone chan struct{} // closed exactly once when this connection tears down
-	once    sync.Once
-	adapter Adapter
+	cancel   context.CancelFunc
+	done     chan error    // adapter reports event-loop termination here
+	runDone  chan struct{} // closed exactly once when this connection tears down
+	once     sync.Once
+	discOnce sync.Once // scopes adapter.Disconnect to exactly one true teardown
+	discErr  error     // adapter.Disconnect result, recorded once and shared by all true callers
+	adapter  Adapter
 }
 
 // teardown cancels the run context and closes runDone exactly once. It runs the
@@ -248,12 +250,14 @@ type connection struct {
 // connection passes false so it can never disconnect the shared adapter a newer
 // connection now owns.
 //
-// The adapter call sits OUTSIDE the once: c.cancel wakes adapter ctx-watchers
-// whose deps.Disconnect arrives as a superseded (false) teardown, and if that
-// consumed the once first it would swallow the true caller's adapter
-// Disconnect entirely. Exactly-once is guaranteed instead by the callers:
-// Disconnect and disconnectConn both uninstall b.conn under b.mu, so at most
-// one caller per connection ever passes true.
+// The adapter call sits under its own discOnce, NOT the runDone once: c.cancel
+// wakes adapter ctx-watchers whose deps.Disconnect arrives as a superseded
+// (false) teardown, and if that consumed a shared once first it would swallow
+// the true caller's adapter Disconnect entirely. A false teardown never touches
+// discOnce, while concurrent true callers (b.conn is uninstalled only after
+// teardown returns, so more than one caller can observe itself current)
+// collapse into one adapter Disconnect — the losers block until the winner
+// finishes and share its error via discErr.
 func (c *connection) teardown(disconnectAdapter bool) error {
 	c.cancel()
 	c.once.Do(func() { close(c.runDone) })
@@ -263,7 +267,8 @@ func (c *connection) teardown(disconnectAdapter bool) error {
 	if c.adapter == nil {
 		return ErrUnknownBotType
 	}
-	return c.adapter.Disconnect()
+	c.discOnce.Do(func() { c.discErr = c.adapter.Disconnect() })
+	return c.discErr
 }
 
 // New creates a Bot of the given type backed by adapter.
