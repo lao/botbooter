@@ -38,6 +38,35 @@ func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+// TestSendThreaded_IncludesThreadTS verifies the reply is posted in the reacted
+// message's thread (thread_ts = replyToID).
+func TestSendThreaded_IncludesThreadTS(t *testing.T) {
+	rt := &capturingRoundTripper{}
+	client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(&http.Client{Transport: rt}))
+	a := &adapter{client: client}
+
+	err := a.SendThreaded(context.Background(), "C123", "1700000000.000100", "hi there")
+
+	asserts.NoError(t, err, "SendThreaded should succeed")
+	asserts.Equal(t, rt.form.Get("thread_ts"), "1700000000.000100", "body carries thread_ts")
+	asserts.Equal(t, rt.form.Get("channel"), "C123", "body carries channel")
+}
+
+// TestSendThreaded_Error verifies SendThreaded surfaces the Slack API's error
+// rather than swallowing it.
+func TestSendThreaded_Error(t *testing.T) {
+	httpStub := &http.Client{Transport: stubRoundTripper{
+		status: http.StatusOK,
+		body:   `{"ok":false,"error":"invalid_auth"}`,
+	}}
+	client := slackapi.New("xoxb-test", slackapi.OptionHTTPClient(httpStub))
+	a := &adapter{client: client}
+
+	err := a.SendThreaded(context.Background(), "C123", "1700000000.000100", "hi")
+
+	asserts.Error(t, err, "SendThreaded should surface the Slack API error")
+}
+
 // TestSend_SurfacesError verifies adapter.Send returns the Slack API's error.
 func TestSend_SurfacesError(t *testing.T) {
 	httpStub := &http.Client{Transport: stubRoundTripper{

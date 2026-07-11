@@ -23,3 +23,18 @@ func TestRawEvent(t *testing.T) {
 	asserts.True(t, ok, "raw present")
 	asserts.Equal(t, got, want, "raw event")
 }
+
+func TestRawReaction(t *testing.T) {
+	t.Run("SlackRaw", func(t *testing.T) {
+		want := &slackevents.ReactionAddedEvent{}
+		got, ok := RawReaction(&botbooter.Reaction{Raw: want})
+		asserts.True(t, ok, "raw present")
+		asserts.Equal(t, got, want, "raw reaction")
+	})
+
+	t.Run("WrongRaw", func(t *testing.T) {
+		got, ok := RawReaction(&botbooter.Reaction{Raw: "not a slack reaction"})
+		asserts.False(t, ok, "raw absent")
+		asserts.Equal(t, got, (*slackevents.ReactionAddedEvent)(nil), "nil reaction")
+	})
+}

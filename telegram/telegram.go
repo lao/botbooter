@@ -24,6 +24,12 @@ func RawUpdate(m *botbooter.Message) (*models.Update, bool) {
 	return tgint.RawUpdate(m)
 }
 
+// RawReactionUpdate returns the raw Telegram message_reaction update carried on r,
+// reporting whether r originated from a Telegram reaction.
+func RawReactionUpdate(r *botbooter.Reaction) (*models.MessageReactionUpdated, bool) {
+	return tgint.RawReactionUpdate(r)
+}
+
 // Client returns the go-telegram bot client backing b, or nil if b is not a
 // Telegram bot.
 func Client(b *botbooter.Bot) *bot.Bot {

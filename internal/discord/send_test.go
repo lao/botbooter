@@ -33,6 +33,41 @@ func (rt stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}, nil
 }
 
+func TestSendThreaded(t *testing.T) {
+	a := newTestAdapter(t)
+	rt := &capturingRoundTripper{}
+	a.session.Client = &http.Client{Transport: rt}
+
+	err := a.SendThreaded(context.Background(), "C1", "M1", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should succeed on 200")
+	asserts.True(t, strings.Contains(rt.body, "message_reference"), "body carries a message reference: "+rt.body)
+	asserts.True(t, strings.Contains(rt.body, "M1"), "reference targets the reacted message: "+rt.body)
+}
+
+// TestSendThreaded_EmptyReplyToID verifies an empty replyToID degrades to a
+// plain channel send (no message_reference) via Send's guard, instead of
+// posting an invalid empty MessageReference.
+func TestSendThreaded_EmptyReplyToID(t *testing.T) {
+	a := newTestAdapter(t)
+	rt := &capturingRoundTripper{}
+	a.session.Client = &http.Client{Transport: rt}
+
+	err := a.SendThreaded(context.Background(), "C1", "", "hi")
+
+	asserts.NoError(t, err, "SendThreaded with empty replyToID")
+	asserts.True(t, !strings.Contains(rt.body, "message_reference"), "no reference when replyToID is empty: "+rt.body)
+}
+
+func TestSendThreaded_Error(t *testing.T) {
+	a := newTestAdapter(t)
+	a.session.Client = &http.Client{
+		Transport: stubRoundTripper{status: 401, body: `{"code":0,"message":"401: Unauthorized"}`},
+	}
+
+	asserts.Error(t, a.SendThreaded(context.Background(), "C1", "M1", "hi"), "SendThreaded should fail on 401")
+}
+
 // nonDiscordAdapter is a minimal core.Adapter that is not discord's *adapter.
 type nonDiscordAdapter struct{}
 

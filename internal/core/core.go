@@ -80,6 +80,32 @@ type Message struct {
 	Raw any
 }
 
+// Reaction is a platform-agnostic emoji reaction added to a message, handed to
+// handlers registered with [Bot.OnReaction]. UserID, ChannelID and MessageID are
+// always set; MessageID identifies the reacted message and is the reply target for
+// [Bot.ReplyToMessage]. Emoji renders as-is when sent back in a message on its
+// origin platform: a unicode character on most platforms, Slack's colon-wrapped
+// shortname (":thumbsup:", covering custom workspace emojis), Discord's
+// "<:name:id>" markup for its custom emojis. It is NOT normalized across
+// platforms — compare per platform. AuthorName is best-effort and inline-only —
+// empty on platforms whose reaction payload carries only a user id. Raw carries
+// the originating platform event untouched; read it with the matching typed
+// accessor (e.g. slack.RawReaction) to recover the platform's original values,
+// such as the unwrapped emoji name (slack.RawReaction(r).Reaction gives
+// "thumbsup", discord.RawReaction(r).Emoji.Name the bare custom-emoji name).
+type Reaction struct {
+	Emoji      string
+	UserID     string
+	AuthorName string
+	ChannelID  string
+	MessageID  string
+
+	Raw any
+}
+
+// ReactionHandler handles an emoji reaction dispatched to [Bot.OnReaction].
+type ReactionHandler func(ctx context.Context, b *Bot, r *Reaction)
+
 // CommandHandler handles a dispatched message for a matched command.
 type CommandHandler func(ctx context.Context, b *Bot, m *Message)
 
@@ -120,6 +146,15 @@ type Adapter interface {
 // usable ride the passthrough in [Bot.ResolveAttachmentURL].
 type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
+}
+
+// ThreadedSender is an OPTIONAL capability an Adapter may implement to post a
+// reply nested on a specific message. Like [AttachmentResolver] it is deliberately
+// NOT part of the mandatory Adapter interface: adapters that implement it get
+// threaded replies via [Bot.ReplyToMessage]; those that do not fall back to a
+// plain channel message.
+type ThreadedSender interface {
+	SendThreaded(ctx context.Context, channelID, replyToID, text string) error
 }
 
 // SendOptions is the resolved set of per-send modifiers an Adapter reads off a
@@ -163,11 +198,14 @@ func resolveSendOptions(opts ...SendOption) SendOptions {
 
 // AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot,
 // plus the Bot's logger so adapter diagnostics route through the same sink.
+// DispatchReaction is optional: adapters on platforms without reaction events
+// simply never call it.
 type AdapterDeps struct {
-	Dispatch   func(ctx context.Context, m *Message)
-	Done       func(err error)
-	Disconnect func() error
-	Logger     *slog.Logger // always non-nil
+	Dispatch         func(ctx context.Context, m *Message)
+	DispatchReaction func(ctx context.Context, r *Reaction)
+	Done             func(err error)
+	Disconnect       func() error
+	Logger           *slog.Logger // always non-nil
 }
 
 // Bot is the platform-agnostic chat bot. Register handlers and middleware
@@ -181,6 +219,7 @@ type Bot struct {
 	commands              []Command
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
+	reactionHandlers      []ReactionHandler
 	setupErrs             []error // registration errors, surfaced by Connect
 	logger                *slog.Logger
 
@@ -259,6 +298,30 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }
 
+// OnReaction registers h to run whenever a user adds an emoji reaction, on the
+// platforms that surface reaction events (Slack, Discord, Telegram, WhatsApp).
+// Handlers are not regex-matched — branch on Reaction.Emoji inside the handler —
+// and, unlike message dispatch, reactions bypass the Middleware chain.
+func (b *Bot) OnReaction(h ReactionHandler) {
+	b.reactionHandlers = append(b.reactionHandlers, h)
+}
+
+// dispatchReaction runs every registered reaction handler. Each handler call is
+// recovered individually, so a panic in one handler neither skips the others nor
+// takes down the adapter's event loop.
+func (b *Bot) dispatchReaction(ctx context.Context, r *Reaction) {
+	for _, h := range b.reactionHandlers {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					b.log().Error("botbooter: recovered from panic while handling reaction", "panic", rec)
+				}
+			}()
+			h(ctx, b, r)
+		}()
+	}
+}
+
 // SetLogger routes the Bot's and its adapter's diagnostics (panic recovery,
 // shutdown warnings, webhook rejections) through logger instead of
 // [slog.Default]. Like handler registration, call it before Connect.
@@ -302,10 +365,11 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// prior connection writes into its own dead channel and never touches the
 	// shared adapter.
 	deps := AdapterDeps{
-		Dispatch:   b.dispatch,
-		Done:       func(err error) { c.done <- err },
-		Disconnect: func() error { return b.disconnectConn(c) },
-		Logger:     b.log(),
+		Dispatch:         b.dispatch,
+		DispatchReaction: b.dispatchReaction,
+		Done:             func(err error) { c.done <- err },
+		Disconnect:       func() error { return b.disconnectConn(c) },
+		Logger:           b.log(),
 	}
 
 	// adapter.Connect is non-blocking by contract. Holding b.mu across it — and
@@ -429,6 +493,21 @@ func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string, op
 		return ErrUnknownBotType
 	}
 	return b.adapter.Send(ctx, channelID, text, resolveSendOptions(opts...))
+}
+
+// ReplyToMessage posts text as a reply nested on the message identified by
+// replyToID in channelID. If the Bot's adapter implements [ThreadedSender] the
+// call is delegated; otherwise it falls back to a plain [Bot.SendMessageContext],
+// so the reply still reaches the channel, just not threaded. It returns
+// [ErrUnknownBotType] if the Bot has no adapter.
+func (b *Bot) ReplyToMessage(ctx context.Context, channelID, replyToID, text string) error {
+	if b.adapter == nil {
+		return ErrUnknownBotType
+	}
+	if s, ok := b.adapter.(ThreadedSender); ok {
+		return s.SendThreaded(ctx, channelID, replyToID, text)
+	}
+	return b.adapter.Send(ctx, channelID, text, SendOptions{})
 }
 
 // Reply is convenience sugar for replying into the thread or reply-chain of the

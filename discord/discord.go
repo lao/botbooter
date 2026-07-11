@@ -23,6 +23,14 @@ func RawEvent(m *botbooter.Message) (*discordgo.MessageCreate, bool) {
 	return discordint.RawEvent(m)
 }
 
+// RawReaction returns the raw Discord reaction-add event carried on r, reporting
+// whether r originated from Discord. Its Emoji field holds the platform's
+// original values (bare Name, ID) behind the "<:name:id>" markup a custom emoji
+// gets in r.Emoji.
+func RawReaction(r *botbooter.Reaction) (*discordgo.MessageReactionAdd, bool) {
+	return discordint.RawReaction(r)
+}
+
 // Session returns the discordgo gateway session backing b, or nil if b is not a
 // Discord bot.
 func Session(b *botbooter.Bot) *discordgo.Session {

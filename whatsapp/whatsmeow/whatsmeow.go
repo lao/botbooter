@@ -56,6 +56,13 @@ func RawMessage(m *botbooter.Message) (*events.Message, bool) {
 	return wmint.RawMessage(m)
 }
 
+// RawReaction returns the raw whatsmeow message event carrying the reaction on
+// r, reporting whether r originated from the WhatsApp Web (whatsmeow) flavor.
+// Its Message.GetReactionMessage() holds the reaction payload.
+func RawReaction(r *botbooter.Reaction) (*events.Message, bool) {
+	return wmint.RawReaction(r)
+}
+
 // Client returns the whatsmeow client backing b, or nil if b is not a WhatsApp
 // Web (whatsmeow) bot. Use it for platform-specific operations the portable API
 // does not cover.

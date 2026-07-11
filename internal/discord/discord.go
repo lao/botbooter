@@ -24,15 +24,23 @@ func New(token string) (*core.Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
+	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent |
+		discordgo.IntentsGuildMessageReactions | discordgo.IntentsDirectMessageReactions
 
 	return core.New(core.DiscordBotType, &adapter{session: dg}), nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
-	remove := a.session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+	removeMsg := a.session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		a.onMessage(ctx, s, m, deps)
 	})
+	removeReaction := a.session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageReactionAdd) {
+		a.onReaction(ctx, m, deps)
+	})
+	remove := func() {
+		removeMsg()
+		removeReaction()
+	}
 
 	if err := a.session.Open(); err != nil {
 		remove()
@@ -65,6 +73,43 @@ func (a *adapter) onMessage(ctx context.Context, s *discordgo.Session, m *discor
 	}
 
 	deps.Dispatch(ctx, toMessage(m))
+}
+
+// onReaction dispatches a Discord reaction-add event. There is no self-reaction
+// filter: the bot never adds reactions (no reaction egress), so a self-reply loop
+// is impossible. Guild reactions from bot users ARE dropped (mirroring the
+// message path's Author.Bot guard) so an auto-reacting bot can't ping-pong with a
+// ReplyToMessage handler; DM reactions carry no Member, so a bot reactor in a DM
+// is not filtered.
+func (a *adapter) onReaction(ctx context.Context, m *discordgo.MessageReactionAdd, deps core.AdapterDeps) {
+	if m.Member != nil && m.Member.User != nil && m.Member.User.Bot {
+		return
+	}
+	deps.DispatchReaction(ctx, toReaction(m))
+}
+
+// toReaction maps a Discord reaction-add event onto a platform-agnostic Reaction.
+// Emoji is the unicode character for a standard emoji; a custom emoji (which has
+// an ID and no unicode form) is rendered as Discord's message markup
+// ("<:name:id>", "<a:name:id>" when animated) so it displays as-is when sent
+// back in a Discord message. AuthorName is left empty (the event carries only a
+// user id).
+func toReaction(m *discordgo.MessageReactionAdd) *core.Reaction {
+	emoji := m.Emoji.Name
+	if m.Emoji.ID != "" {
+		if m.Emoji.Animated {
+			emoji = "<a:" + m.Emoji.Name + ":" + m.Emoji.ID + ">"
+		} else {
+			emoji = "<:" + m.Emoji.Name + ":" + m.Emoji.ID + ">"
+		}
+	}
+	return &core.Reaction{
+		Emoji:     emoji,
+		UserID:    m.UserID,
+		ChannelID: m.ChannelID,
+		MessageID: m.MessageID,
+		Raw:       m,
+	}
 }
 
 // toMessage maps a Discord message-create event onto a platform-agnostic Message.
@@ -131,6 +176,14 @@ func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.Se
 	return err
 }
 
+// SendThreaded implements [core.ThreadedSender]: it posts text as a reply
+// referencing the message identified by replyToID by delegating to Send with a
+// WithThreadID option. An empty replyToID inherits Send's guard and degrades to
+// a plain channel send rather than posting an invalid empty MessageReference.
+func (a *adapter) SendThreaded(ctx context.Context, channelID, replyToID, text string) error {
+	return a.Send(ctx, channelID, text, core.SendOptions{ThreadID: replyToID})
+}
+
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	mc, ok := RawEvent(m)
 	if !ok {
@@ -143,6 +196,13 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 // whether m originated from Discord.
 func RawEvent(m *core.Message) (*discordgo.MessageCreate, bool) {
 	e, ok := m.Raw.(*discordgo.MessageCreate)
+	return e, ok
+}
+
+// RawReaction returns the raw Discord reaction-add event carried on r, reporting
+// whether r originated from Discord.
+func RawReaction(r *core.Reaction) (*discordgo.MessageReactionAdd, bool) {
+	e, ok := r.Raw.(*discordgo.MessageReactionAdd)
 	return e, ok
 }
 

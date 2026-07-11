@@ -28,6 +28,16 @@ func TestRawMessage(t *testing.T) {
 	asserts.False(t, ok, "foreign raw payload rejected")
 }
 
+func TestRawReaction(t *testing.T) {
+	ev := &events.Message{}
+	got, ok := RawReaction(&botbooter.Reaction{Raw: ev})
+	asserts.True(t, ok, "whatsmeow raw reaction recovered")
+	asserts.Equal(t, got, ev, "same event")
+
+	_, ok = RawReaction(&botbooter.Reaction{Raw: "other"})
+	asserts.False(t, ok, "foreign raw payload rejected")
+}
+
 func TestDownloadForeignBot(t *testing.T) {
 	_, err := Download(context.Background(), &botbooter.Bot{}, botbooter.Attachment{})
 	asserts.ErrorIs(t, err, botbooter.ErrUnknownBotType, "foreign bot rejected")

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -34,7 +35,21 @@ func newCaptureAdapter(selfID int64, got **core.Message) (*adapter, context.Cont
 	return a, withDeps(context.Background(), &deps)
 }
 
-// newStubAdapter wires an adapter to an httptest Bot API server, mirroring New without real network I/O.
+// newReactionCapture builds an adapter and a deps-carrying ctx that collects
+// every dispatched reaction, so onUpdate's reaction path can be tested directly.
+func newReactionCapture(selfID int64) (*adapter, context.Context, *[]*core.Reaction) {
+	got := &[]*core.Reaction{}
+	deps := core.AdapterDeps{DispatchReaction: func(_ context.Context, r *core.Reaction) { *got = append(*got, r) }}
+	return &adapter{selfID: selfID}, withDeps(context.Background(), &deps), got
+}
+
+func emojiReaction(e string) models.ReactionType {
+	return models.ReactionType{Type: models.ReactionTypeTypeEmoji, ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: e}}
+}
+
+// newStubAdapter wires an adapter to an httptest Bot API server, mirroring New
+// without real network I/O. It builds the client from the production
+// clientOptions, so tests exercise the same option set New installs.
 func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -42,16 +57,161 @@ func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapt
 
 	a := &adapter{selfID: selfID}
 	a.newClient = func() (*bot.Bot, error) {
-		return bot.New("123:test-token",
-			bot.WithDefaultHandler(a.onUpdate),
-			bot.WithServerURL(srv.URL),
-			bot.WithSkipGetMe(),
-		)
+		return bot.New("123:test-token", append(a.clientOptions(), bot.WithServerURL(srv.URL))...)
 	}
 	tg, err := a.newClient()
 	asserts.NoError(t, err, "bot.New for stub server")
 	a.client = tg
 	return a
+}
+
+func TestOnReaction(t *testing.T) {
+	reactionUpdate := func(newR, oldR []models.ReactionType) *models.Update {
+		return &models.Update{MessageReaction: &models.MessageReactionUpdated{
+			Chat:        models.Chat{ID: 100},
+			MessageID:   55,
+			User:        &models.User{ID: 7, Username: "alice"},
+			NewReaction: newR,
+			OldReaction: oldR,
+		}}
+	}
+
+	t.Run("AddedEmojiDispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate([]models.ReactionType{emojiReaction("👍")}, nil))
+
+		asserts.Equal(t, len(*got), 1, "one reaction dispatched")
+		r := (*got)[0]
+		asserts.Equal(t, r.Emoji, "👍", "emoji")
+		asserts.Equal(t, r.UserID, "7", "reactor id")
+		asserts.Equal(t, r.AuthorName, "alice", "reactor name is inline on the update")
+		asserts.Equal(t, r.ChannelID, "100", "chat id")
+		asserts.Equal(t, r.MessageID, "55", "reacted message id")
+		ru, ok := RawReactionUpdate(r)
+		asserts.True(t, ok, "RawReactionUpdate recovers the update")
+		asserts.Equal(t, ru.MessageID, 55, "raw carries the reaction update")
+	})
+
+	t.Run("RemovalNotDispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate(nil, []models.ReactionType{emojiReaction("👍")}))
+		asserts.Equal(t, len(*got), 0, "a removal (present in Old, gone from New) dispatches nothing")
+	})
+
+	t.Run("AlreadyPresentNotRedispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate(
+			[]models.ReactionType{emojiReaction("👍"), emojiReaction("❤")},
+			[]models.ReactionType{emojiReaction("👍")},
+		))
+		asserts.Equal(t, len(*got), 1, "only the newly-added emoji dispatches")
+		asserts.Equal(t, (*got)[0].Emoji, "❤", "the newly-added emoji")
+	})
+
+	t.Run("NonEmojiTypeSkipped", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		// A zero-value ReactionType has a non-emoji Type; a nil ReactionTypeEmoji
+		// is likewise skipped.
+		a.onUpdate(ctx, nil, reactionUpdate([]models.ReactionType{{}}, nil))
+		asserts.Equal(t, len(*got), 0, "non-emoji reaction types are skipped")
+	})
+
+	t.Run("BotReactorIgnored", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		u := &models.Update{MessageReaction: &models.MessageReactionUpdated{
+			Chat: models.Chat{ID: 100}, MessageID: 55,
+			User:        &models.User{ID: 8, IsBot: true},
+			NewReaction: []models.ReactionType{emojiReaction("👍")},
+		}}
+		a.onUpdate(ctx, nil, u)
+		asserts.Equal(t, len(*got), 0, "another bot's reaction dispatches nothing, mirroring the message path")
+	})
+
+	t.Run("AnonymousNoUser", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		u := &models.Update{MessageReaction: &models.MessageReactionUpdated{
+			Chat: models.Chat{ID: 100}, MessageID: 55,
+			NewReaction: []models.ReactionType{emojiReaction("👍")},
+		}}
+		a.onUpdate(ctx, nil, u)
+		asserts.Equal(t, len(*got), 0, "anonymous reaction (no user) dispatches nothing")
+	})
+}
+
+func TestRawReactionUpdate_NonTelegram(t *testing.T) {
+	t.Run("foreign raw", func(t *testing.T) {
+		u, ok := RawReactionUpdate(&core.Reaction{Raw: "not-a-telegram-update"})
+		asserts.False(t, ok, "a non-Telegram reaction is not recovered")
+		asserts.True(t, u == nil, "no update returned for a foreign reaction")
+	})
+
+	t.Run("telegram update without a reaction", func(t *testing.T) {
+		// A Telegram *models.Update whose MessageReaction is nil is not a reaction.
+		u, ok := RawReactionUpdate(&core.Reaction{Raw: &models.Update{}})
+		asserts.False(t, ok, "an update carrying no MessageReaction is not a reaction")
+		asserts.True(t, u == nil, "no update returned when MessageReaction is nil")
+	})
+}
+
+func TestSendThreaded(t *testing.T) {
+	var body string
+	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "sendMessage") {
+			b, _ := io.ReadAll(r.Body)
+			body = string(b)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":100,"type":"private"}}}`))
+	})
+
+	err := a.SendThreaded(context.Background(), "100", "55", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should succeed")
+	asserts.True(t, strings.Contains(body, "reply_parameters"), "reply_parameters sent: "+body)
+	asserts.True(t, strings.Contains(body, `"message_id":55`), "reply targets message 55: "+body)
+}
+
+// A non-numeric replyToID cannot be a Telegram message id, so SendThreaded falls
+// back to a plain send with no reply_parameters rather than failing.
+func TestSendThreaded_NonNumericFallsBack(t *testing.T) {
+	var gotText, gotReply string
+	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "sendMessage") {
+			_ = r.ParseMultipartForm(1 << 20)
+			gotText = r.FormValue("text")
+			gotReply = r.FormValue("reply_parameters")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":100,"type":"private"}}}`))
+	})
+
+	err := a.SendThreaded(context.Background(), "100", "not-a-number", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should fall back to a plain send")
+	asserts.Equal(t, gotText, "hi", "text is still sent on the fallback path")
+	asserts.Equal(t, gotReply, "", "no reply_parameters on the fallback path")
+}
+
+// A non-positive replyToID (Telegram message ids start at 1) would make the API
+// reject the send with Bad Request, so SendThreaded degrades to a plain send
+// with no reply_parameters instead — same as the non-numeric case.
+func TestSendThreaded_NonPositiveFallsBack(t *testing.T) {
+	var gotText, gotReply string
+	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "sendMessage") {
+			_ = r.ParseMultipartForm(1 << 20)
+			gotText = r.FormValue("text")
+			gotReply = r.FormValue("reply_parameters")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":100,"type":"private"}}}`))
+	})
+
+	err := a.SendThreaded(context.Background(), "100", "0", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should fall back to a plain send")
+	asserts.Equal(t, gotText, "hi", "text is still sent on the fallback path")
+	asserts.Equal(t, gotReply, "", "no reply_parameters for a non-positive reply id")
 }
 
 func TestNew(t *testing.T) {
@@ -616,6 +776,45 @@ func TestConnect_StartsAndStops(t *testing.T) {
 		asserts.True(t, errors.Is(err, context.Canceled), "loop reports the context cancellation")
 	case <-time.After(2 * time.Second):
 		t.Fatal("Done was not called after the context was canceled")
+	}
+}
+
+// TestConnect_PollsWithFullAllowedUpdates pins the allowed_updates the poll
+// loop sends on getUpdates. Setting allowed_updates replaces Telegram's server
+// default (and persists server-side), so the list must stay the full default
+// set plus message_reaction: message_reaction must be present (it is excluded
+// from the default, and OnReaction dies without it), and callback_query is a
+// canary for the rest of the default set — if it disappears, the list was
+// narrowed and raw-client RegisterHandler consumers silently lose updates.
+func TestConnect_PollsWithFullAllowedUpdates(t *testing.T) {
+	allowed := make(chan string, 1)
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			_ = r.ParseMultipartForm(1 << 20)
+			select {
+			case allowed <- r.FormValue("allowed_updates"):
+			default:
+			}
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(error) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail")
+
+	select {
+	case got := <-allowed:
+		asserts.True(t, strings.Contains(got, `"message_reaction"`),
+			"getUpdates requests message_reaction (excluded from the server default): "+got)
+		asserts.True(t, strings.Contains(got, `"callback_query"`),
+			"getUpdates keeps the server-default set (callback_query canary): "+got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no getUpdates request reached the stub server")
 	}
 }
 
