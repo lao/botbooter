@@ -265,12 +265,25 @@ func (a *adapter) onEvent(ctx context.Context, evt any, deps core.AdapterDeps, r
 }
 
 // onMessage converts an incoming message into a platform-agnostic Message and
-// dispatches it. It drops the bot's own messages (reply-loop guard), broadcast,
-// status and newsletter/channel traffic (read-only contexts a handler cannot
-// reply into), and non-conversational events (reactions, receipts, revokes,
+// dispatches it. An added emoji reaction rides the same event type and is
+// dispatched as a core.Reaction instead. It drops the bot's own messages
+// (reply-loop guard), broadcast, status and newsletter/channel traffic
+// (read-only contexts a handler cannot reply into), removed reactions (scope is
+// added-only), and the remaining non-conversational events (receipts, revokes,
 // poll updates) that carry neither text nor media.
 func (a *adapter) onMessage(ctx context.Context, v *events.Message, deps core.AdapterDeps) {
 	if v.Info.IsFromMe || v.Info.Chat.Server == types.BroadcastServer || v.Info.Chat.Server == types.NewsletterServer {
+		return
+	}
+	if react := v.Message.GetReactionMessage(); react != nil {
+		// An empty emoji means the reaction was removed; skip it, mirroring the
+		// Cloud API flavor. A reaction whose key carries no message id has no
+		// reply target, so skip it too — keeping Reaction.MessageID always set,
+		// same reasoning as Slack's file-reaction skip. No self-reaction filter:
+		// the bot never adds reactions, so a self-reply loop is impossible.
+		if react.GetText() != "" && react.GetKey().GetID() != "" {
+			deps.DispatchReaction(ctx, toReaction(v, react))
+		}
 		return
 	}
 	text := messageText(v)
@@ -286,6 +299,20 @@ func (a *adapter) onMessage(ctx context.Context, v *events.Message, deps core.Ad
 		Timestamp:  v.Info.Timestamp,
 		Raw:        v,
 	})
+}
+
+// toReaction maps an added emoji reaction onto the platform-agnostic Reaction.
+// MessageID is the reacted message's ID from the reaction key — the reply
+// target for Bot.ReplyToMessage. Emoji is the raw unicode character.
+func toReaction(v *events.Message, react *waProto.ReactionMessage) *core.Reaction {
+	return &core.Reaction{
+		Emoji:      react.GetText(),
+		UserID:     v.Info.Sender.String(),
+		AuthorName: v.Info.PushName,
+		ChannelID:  v.Info.Chat.String(),
+		MessageID:  react.GetKey().GetID(),
+		Raw:        v,
+	}
 }
 
 // messageText extracts the readable text of a message: a plain conversation
@@ -401,6 +428,14 @@ func mediaAttachment(msg *waProto.Message) (core.Attachment, bool) {
 // whether m originated from the WhatsApp Web (whatsmeow) flavor.
 func RawMessage(m *core.Message) (*events.Message, bool) {
 	v, ok := m.Raw.(*events.Message)
+	return v, ok
+}
+
+// RawReaction returns the raw whatsmeow message event carrying the reaction on
+// r, reporting whether r originated from the WhatsApp Web (whatsmeow) flavor.
+// Its Message.GetReactionMessage() holds the reaction payload.
+func RawReaction(r *core.Reaction) (*events.Message, bool) {
+	v, ok := r.Raw.(*events.Message)
 	return v, ok
 }
 

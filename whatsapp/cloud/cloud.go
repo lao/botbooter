@@ -21,6 +21,9 @@ type Message = waint.Message
 // Media is a media object attached to a WhatsApp message.
 type Media = waint.Media
 
+// ReactionInfo carries the reacted-to message id and emoji of a reaction message.
+type ReactionInfo = waint.ReactionInfo
+
 // ErrMissingConfig is returned by [New] when a required [Config] field is empty.
 var ErrMissingConfig = waint.ErrMissingConfig
 
@@ -36,6 +39,13 @@ func New(cfg Config) (*botbooter.Bot, error) {
 // m originated from WhatsApp.
 func RawMessage(m *botbooter.Message) (*Message, bool) {
 	return waint.RawMessage(m)
+}
+
+// RawReaction returns the parsed WhatsApp reaction message carried on r,
+// reporting whether r originated from a WhatsApp reaction. The reacted message's
+// id and emoji are on the returned Message's Reaction field.
+func RawReaction(r *botbooter.Reaction) (*Message, bool) {
+	return waint.RawReaction(r)
 }
 
 // Addr returns the address b's webhook listener is bound to (host:port), or ""

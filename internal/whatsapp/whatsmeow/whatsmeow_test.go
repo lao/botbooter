@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	wm "go.mau.fi/whatsmeow"
+	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -27,6 +28,20 @@ func textEvent(text string, fromMe bool) *events.Message {
 			MessageSource: types.MessageSource{Chat: jid("123"), Sender: jid("456"), IsFromMe: fromMe},
 		},
 		Message: &waProto.Message{Conversation: proto.String(text)},
+	}
+}
+
+// reactionEvent builds an incoming emoji-reaction event targeting messageID.
+// An empty emoji is a reaction removal, mirroring the wire format.
+func reactionEvent(emoji, messageID string, fromMe bool) *events.Message {
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: jid("123"), Sender: jid("456"), IsFromMe: fromMe},
+		},
+		Message: &waProto.Message{ReactionMessage: &waProto.ReactionMessage{
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID), FromMe: proto.Bool(true)},
+			Text: proto.String(emoji),
+		}},
 	}
 }
 
@@ -116,6 +131,59 @@ func TestOnMessage(t *testing.T) {
 		(&adapter{}).onMessage(context.Background(), ev, deps)
 
 		asserts.False(t, dispatched, "broadcast/status must not be dispatched")
+	})
+
+	t.Run("DispatchesAddedReaction", func(t *testing.T) {
+		var got *core.Reaction
+		deps := core.AdapterDeps{
+			Dispatch:         func(_ context.Context, _ *core.Message) { t.Fatal("a reaction must not be dispatched as a message") },
+			DispatchReaction: func(_ context.Context, r *core.Reaction) { got = r },
+		}
+
+		(&adapter{}).onMessage(context.Background(), reactionEvent("👍", "MSG1", false), deps)
+
+		asserts.NotNil(t, got, "dispatched reaction")
+		asserts.Equal(t, got.Emoji, "👍", "emoji")
+		asserts.Equal(t, got.UserID, "456@s.whatsapp.net", "user id is sender JID")
+		asserts.Equal(t, got.ChannelID, "123@s.whatsapp.net", "channel id is chat JID")
+		asserts.Equal(t, got.MessageID, "MSG1", "message id is the reacted message's id")
+		raw, ok := RawReaction(got)
+		asserts.True(t, ok, "raw event preserved")
+		asserts.NotNil(t, raw.Message.GetReactionMessage(), "raw event carries the reaction payload")
+	})
+
+	t.Run("DropsRemovedReaction", func(t *testing.T) {
+		deps := core.AdapterDeps{
+			Dispatch:         func(_ context.Context, _ *core.Message) { t.Fatal("a reaction must not be dispatched as a message") },
+			DispatchReaction: func(_ context.Context, _ *core.Reaction) { t.Fatal("a removed (empty-emoji) reaction must be dropped") },
+		}
+
+		(&adapter{}).onMessage(context.Background(), reactionEvent("", "MSG1", false), deps)
+	})
+
+	t.Run("DropsOwnReaction", func(t *testing.T) {
+		deps := core.AdapterDeps{
+			DispatchReaction: func(_ context.Context, _ *core.Reaction) { t.Fatal("the bot's own reaction must be dropped") },
+		}
+
+		(&adapter{}).onMessage(context.Background(), reactionEvent("👍", "MSG1", true), deps)
+	})
+
+	t.Run("DropsReactionWithoutMessageID", func(t *testing.T) {
+		deps := core.AdapterDeps{
+			Dispatch: func(_ context.Context, _ *core.Message) { t.Fatal("a reaction must not be dispatched as a message") },
+			DispatchReaction: func(_ context.Context, _ *core.Reaction) {
+				t.Fatal("a reaction without a reacted-message id has no reply target and must be dropped")
+			},
+		}
+
+		// Empty key ID: Reaction.MessageID would be "", breaking its always-set contract.
+		(&adapter{}).onMessage(context.Background(), reactionEvent("👍", "", false), deps)
+
+		// Nil key entirely: the nil-safe getters yield "" too.
+		noKey := reactionEvent("👍", "MSG1", false)
+		noKey.Message.ReactionMessage.Key = nil
+		(&adapter{}).onMessage(context.Background(), noKey, deps)
 	})
 
 	t.Run("DispatchesMediaWithoutCaption", func(t *testing.T) {
