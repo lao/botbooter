@@ -14,7 +14,8 @@ func noopHandler(ctx context.Context, b *Bot, m *Message) {}
 
 func mustAddHandler(t *testing.T, bot *Bot, pattern string, handler CommandHandler) {
 	t.Helper()
-	asserts.NoError(t, bot.AddHandler(Command{Pattern: pattern, Handler: handler}), "AddHandler "+pattern)
+	bot.AddHandler(Command{Pattern: pattern, Handler: handler})
+	asserts.Equal(t, len(bot.setupErrs), 0, "AddHandler "+pattern)
 }
 
 func TestBotType_String(t *testing.T) {
@@ -31,9 +32,9 @@ func TestBot_AddHandler(t *testing.T) {
 	t.Run("ValidPattern", func(t *testing.T) {
 		bot := &Bot{}
 
-		err := bot.AddHandler(Command{Pattern: "^hello$", Handler: noopHandler})
+		bot.AddHandler(Command{Pattern: "^hello$", Handler: noopHandler})
 
-		asserts.NoError(t, err, "AddHandler with valid pattern")
+		asserts.Equal(t, len(bot.setupErrs), 0, "AddHandler with valid pattern")
 		asserts.Equal(t, len(bot.commands), 1, "Number of commands after adding handler")
 		asserts.Equal(t, bot.commands[0].Pattern, "^hello$", "Handler pattern")
 		asserts.NotNil(t, bot.commands[0].re, "pattern should be precompiled")
@@ -42,24 +43,80 @@ func TestBot_AddHandler(t *testing.T) {
 	t.Run("InvalidPattern", func(t *testing.T) {
 		bot := &Bot{}
 
-		err := bot.AddHandler(Command{Pattern: "[invalid(", Handler: noopHandler})
+		bot.AddHandler(Command{Pattern: "[invalid(", Handler: noopHandler})
 
-		asserts.Error(t, err, "AddHandler with invalid pattern should fail")
+		asserts.Equal(t, len(bot.setupErrs), 1, "invalid pattern should be recorded")
 		asserts.Equal(t, len(bot.commands), 0, "invalid command should not be added")
+	})
+
+	// Connect surfaces setupErrs, but a pattern registered AFTER a successful
+	// Connect is never read again — the record-time log is the only signal, so
+	// assert it fires at AddHandler time.
+	t.Run("InvalidPatternLogsAtRecordTime", func(t *testing.T) {
+		var buf bytes.Buffer
+		bot := &Bot{}
+		bot.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+
+		bot.AddHandler(Command{Pattern: "[invalid(", Handler: noopHandler})
+
+		asserts.Equal(t, len(bot.setupErrs), 1, "invalid pattern should still be recorded")
+		asserts.True(t, strings.Contains(buf.String(), "invalid command pattern"),
+			"AddHandler logs the invalid pattern immediately")
+		asserts.True(t, strings.Contains(buf.String(), "[invalid("),
+			"the offending pattern is included in the log")
 	})
 }
 
 func TestBot_HandleFunc(t *testing.T) {
 	bot := &Bot{}
 	called := false
-	asserts.NoError(t, bot.HandleFunc("^hi$", func(ctx context.Context, b *Bot, m *Message) {
+	bot.HandleFunc("^hi$", func(ctx context.Context, b *Bot, m *Message) {
 		called = true
-	}), "HandleFunc with valid pattern")
+	})
 
 	bot.dispatch(context.Background(), &Message{Content: "hi"})
 	asserts.True(t, called, "HandleFunc handler should be called")
 
-	asserts.Error(t, bot.HandleFunc("[bad(", noopHandler), "HandleFunc with invalid pattern should fail")
+	bot.HandleFunc("[bad(", noopHandler)
+	asserts.Equal(t, len(bot.setupErrs), 1, "HandleFunc with invalid pattern should be recorded")
+}
+
+func TestBot_Connect_InvalidPatterns(t *testing.T) {
+	t.Run("SurfacesFromConnect", func(t *testing.T) {
+		bot := New(CLIBotType, &stubAdapter{})
+		bot.HandleFunc("^ok$", noopHandler)
+		bot.HandleFunc("[invalid(", noopHandler)
+
+		err := bot.Connect(context.Background())
+
+		asserts.Error(t, err, "Connect with an invalid pattern should fail")
+		asserts.True(t, strings.Contains(err.Error(), `invalid command pattern "[invalid("`),
+			"error should name the offending pattern")
+		asserts.Equal(t, bot.conn == nil, true, "no connection should be installed")
+	})
+
+	t.Run("JoinsAllPatterns", func(t *testing.T) {
+		bot := New(CLIBotType, &stubAdapter{})
+		bot.HandleFunc("[bad-one(", noopHandler)
+		bot.HandleFunc("[bad-two(", noopHandler)
+
+		err := bot.Connect(context.Background())
+
+		asserts.Error(t, err, "Connect with invalid patterns should fail")
+		asserts.True(t, strings.Contains(err.Error(), `"[bad-one("`), "first pattern reported")
+		asserts.True(t, strings.Contains(err.Error(), `"[bad-two("`), "second pattern reported")
+	})
+
+	t.Run("SurfacesFromRun", func(t *testing.T) {
+		bot := New(CLIBotType, &stubAdapter{})
+		bot.HandleFunc("[bad(", noopHandler)
+
+		err := bot.Run(context.Background())
+
+		asserts.Error(t, err, "Run with an invalid pattern should fail")
+		asserts.True(t, strings.Contains(err.Error(), `invalid command pattern "[bad("`),
+			"error should name the offending pattern")
+	})
 }
 
 func TestBot_SetUnknownCommandHandler(t *testing.T) {

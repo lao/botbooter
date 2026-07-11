@@ -181,6 +181,7 @@ type Bot struct {
 	commands              []Command
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
+	setupErrs             []error // registration errors, surfaced by Connect
 	logger                *slog.Logger
 
 	mu   sync.Mutex
@@ -226,21 +227,25 @@ func AdapterAs[T any](b *Bot) (T, bool) {
 	return a, ok
 }
 
-// AddHandler registers cmd, compiling its Pattern and returning an error if it
-// is not valid. Commands are matched in registration order, first match wins.
-func (b *Bot) AddHandler(cmd Command) error {
+// AddHandler registers cmd, compiling its Pattern. An invalid pattern is
+// recorded rather than returned — it surfaces from Connect (and Run) and is
+// also logged at record time (so a registration after Connect is not silently
+// dropped), and the command is not registered. Commands are matched in
+// registration order, first match wins.
+func (b *Bot) AddHandler(cmd Command) {
 	re, err := regexp.Compile(cmd.Pattern)
 	if err != nil {
-		return fmt.Errorf("botbooter: invalid command pattern %q: %w", cmd.Pattern, err)
+		b.log().Error("botbooter: invalid command pattern", "pattern", cmd.Pattern, "error", err)
+		b.setupErrs = append(b.setupErrs, fmt.Errorf("botbooter: invalid command pattern %q: %w", cmd.Pattern, err))
+		return
 	}
 	cmd.re = re
 	b.commands = append(b.commands, cmd)
-	return nil
 }
 
 // HandleFunc is a convenience wrapper around AddHandler.
-func (b *Bot) HandleFunc(pattern string, handler CommandHandler) error {
-	return b.AddHandler(Command{Pattern: pattern, Handler: handler})
+func (b *Bot) HandleFunc(pattern string, handler CommandHandler) {
+	b.AddHandler(Command{Pattern: pattern, Handler: handler})
 }
 
 // SetUnknownCommandHandler sets the handler invoked when a message matches no
@@ -271,7 +276,8 @@ func (b *Bot) log() *slog.Logger {
 
 // Connect starts the adapter's event loop and returns without blocking. It
 // returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
-// if the Bot has no adapter, or any error from the adapter's own Connect.
+// if the Bot has no adapter, every registration error recorded by AddHandler
+// (joined, one per invalid pattern), or any error from the adapter's own Connect.
 func (b *Bot) Connect(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -280,6 +286,9 @@ func (b *Bot) Connect(ctx context.Context) error {
 	}
 	if b.adapter == nil {
 		return ErrUnknownBotType
+	}
+	if err := errors.Join(b.setupErrs...); err != nil {
+		return err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	c := &connection{

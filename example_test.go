@@ -12,7 +12,7 @@ import (
 func Example() {
 	bot := cli.New(strings.NewReader("echo hello\n"), os.Stdout)
 
-	_ = bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
 	})
 

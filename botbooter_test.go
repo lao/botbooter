@@ -90,11 +90,6 @@ func newDiscordBot(t *testing.T) *botbooter.Bot {
 	return bot
 }
 
-func mustAddHandler(t *testing.T, bot *botbooter.Bot, pattern string, handler botbooter.CommandHandler) {
-	t.Helper()
-	asserts.NoError(t, bot.AddHandler(botbooter.Command{Pattern: pattern, Handler: handler}), "AddHandler "+pattern)
-}
-
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
 
 func writeFile(t *testing.T, path string, data []byte) {
@@ -242,7 +237,7 @@ func TestCLIBot_Run_ProcessesInput(t *testing.T) {
 	out := &syncBuffer{}
 	bot := cli.New(in, out)
 
-	mustAddHandler(t, bot, "^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
 	})
 	unknown := 0
@@ -264,7 +259,7 @@ func TestCLIBot_GetAttachments_EndToEnd(t *testing.T) {
 
 	bot := cli.New(strings.NewReader("echo "+png+"\n"), &syncBuffer{})
 	var got []botbooter.Attachment
-	mustAddHandler(t, bot, "^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		atts, err := b.GetAttachments(m)
 		asserts.NoError(t, err, "GetAttachments")
 		got = atts

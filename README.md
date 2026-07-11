@@ -52,7 +52,7 @@ import (
 func main() {
 	bot := cli.New(os.Stdin, os.Stdout)
 
-	_ = bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
 	})
 
@@ -96,7 +96,7 @@ WhatsApp comes in **two flavors selected by import path** — `whatsapp/cloud` (
 
 ```go
 // A command routes messages whose content matches a regular expression.
-_ = bot.AddHandler(botbooter.Command{
+bot.AddHandler(botbooter.Command{
 	Pattern: "^ping$",
 	Handler: func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, "pong")
@@ -104,7 +104,7 @@ _ = bot.AddHandler(botbooter.Command{
 })
 
 // HandleFunc is a shorthand for the common case.
-_ = bot.HandleFunc("^hello", greetHandler)
+bot.HandleFunc("^hello", greetHandler)
 
 // Fallback when nothing matches.
 bot.SetUnknownCommandHandler(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
@@ -118,7 +118,7 @@ bot.AddMiddleware(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Messa
 })
 ```
 
-`AddHandler` / `HandleFunc` return an error if the pattern is not a valid regular expression.
+`AddHandler` / `HandleFunc` return nothing. If a pattern is not a valid regular expression the error is recorded and `Connect`/`Run` refuse to start, reporting every invalid pattern in one joined error.
 
 ### Replies and threads
 
