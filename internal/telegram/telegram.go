@@ -56,11 +56,57 @@ func depsFrom(ctx context.Context) *core.AdapterDeps {
 	return deps
 }
 
+// allowedUpdates is Telegram's default allowed_updates set (every update type
+// except chat_member and message_reaction_count) plus message_reaction, which
+// is excluded from the default and must be requested explicitly. The list is
+// exhaustive on purpose: setting allowed_updates REPLACES the server default
+// and PERSISTS server-side across getUpdates calls, so narrowing it to just
+// what this adapter handles would silently stop delivery of callback_query,
+// edited_message, inline_query, … to raw-client consumers who RegisterHandler
+// on Client(bot). It is every models.AllowedUpdate* constant minus the two
+// default exclusions.
+var allowedUpdates = bot.AllowedUpdates{
+	models.AllowedUpdateMessage,
+	models.AllowedUpdateEditedMessage,
+	models.AllowedUpdateChannelPost,
+	models.AllowedUpdateEditedChannelPost,
+	models.AllowedUpdateBusinessConnection,
+	models.AllowedUpdateBusinessMessage,
+	models.AllowedUpdateEditedBusinessMessage,
+	models.AllowedUpdateDeletedBusinessMessages,
+	models.AllowedUpdateMessageReaction,
+	models.AllowedUpdateInlineQuery,
+	models.AllowedUpdateChosenInlineResult,
+	models.AllowedUpdateCallbackQuery,
+	models.AllowedUpdateShippingQuery,
+	models.AllowedUpdatePreCheckoutQuery,
+	models.AllowedUpdatePurchasedPaidMedia,
+	models.AllowedUpdatePoll,
+	models.AllowedUpdatePollAnswer,
+	models.AllowedUpdateMyChatMember,
+	models.AllowedUpdateChatJoinRequest,
+	models.AllowedUpdateChatBoost,
+	models.AllowedUpdateRemovedChatBoost,
+	models.AllowedUpdateManagedBot,
+	models.AllowedUpdateGuestMessage,
+}
+
+// clientOptions is the option set every client (one per connection) is built
+// with; the stub-server tests append to it, so it stays the single source of
+// truth for production client configuration.
+func (a *adapter) clientOptions() []bot.Option {
+	return []bot.Option{
+		bot.WithDefaultHandler(a.onUpdate),
+		bot.WithSkipGetMe(),
+		bot.WithAllowedUpdates(allowedUpdates),
+	}
+}
+
 // New creates a Telegram bot from a BotFather token.
 func New(token string) (*core.Bot, error) {
 	a := &adapter{}
 	a.newClient = func() (*bot.Bot, error) {
-		return bot.New(token, bot.WithDefaultHandler(a.onUpdate), bot.WithSkipGetMe())
+		return bot.New(token, a.clientOptions()...)
 	}
 
 	tg, err := a.newClient()
@@ -126,6 +172,15 @@ func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.Se
 	return err
 }
 
+// SendThreaded implements [core.ThreadedSender]: it replies to the Telegram
+// message identified by replyToID. Telegram message ids are positive ints; if
+// replyToID is not one, it falls back to a plain (unthreaded) send rather than
+// failing. It delegates to Send's non-explicit ReplyTo path, which implements
+// exactly those degrade-gracefully semantics.
+func (a *adapter) SendThreaded(ctx context.Context, channelID, replyToID, text string) error {
+	return a.Send(ctx, channelID, text, core.SendOptions{ReplyTo: &core.Message{ID: replyToID}})
+}
+
 func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 	u, ok := RawUpdate(m)
 	if !ok {
@@ -139,6 +194,16 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 func RawUpdate(m *core.Message) (*models.Update, bool) {
 	u, ok := m.Raw.(*models.Update)
 	return u, ok
+}
+
+// RawReactionUpdate returns the raw Telegram message_reaction update carried on r,
+// reporting whether r originated from a Telegram reaction.
+func RawReactionUpdate(r *core.Reaction) (*models.MessageReactionUpdated, bool) {
+	u, ok := r.Raw.(*models.Update)
+	if !ok || u.MessageReaction == nil {
+		return nil, false
+	}
+	return u.MessageReaction, true
 }
 
 // Client returns the go-telegram bot client backing b, or nil if b is not a Telegram bot.
@@ -266,6 +331,16 @@ func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 
+	deps := depsFrom(ctx)
+	if deps == nil {
+		return
+	}
+
+	if u.MessageReaction != nil {
+		a.onReaction(ctx, u, deps)
+		return
+	}
+
 	m := u.Message
 	if m == nil || m.From == nil {
 		return
@@ -274,12 +349,63 @@ func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 
-	deps := depsFrom(ctx)
-	if deps == nil {
+	deps.Dispatch(ctx, toMessage(u))
+}
+
+// onReaction dispatches one Reaction per emoji newly added in a message_reaction
+// update. Telegram delivers reactions as a diff of the full reaction set, so an
+// emoji present in NewReaction but not OldReaction is a genuine add; removals
+// (present in Old, gone from New) dispatch nothing (added-only scope). Only emoji
+// reactions are surfaced — custom_emoji and paid reaction types are skipped.
+// Anonymous channel reactions carry no user and are ignored. Reactions from
+// bot users (which covers this bot itself) are dropped, mirroring the message
+// path's bot filter, so another bot's setMessageReaction can't fire handlers.
+func (a *adapter) onReaction(ctx context.Context, u *models.Update, deps *core.AdapterDeps) {
+	mr := u.MessageReaction
+	if mr.User == nil || mr.User.IsBot {
 		return
 	}
+	old := emojiSet(mr.OldReaction)
+	for _, rt := range mr.NewReaction {
+		if rt.Type != models.ReactionTypeTypeEmoji || rt.ReactionTypeEmoji == nil {
+			continue
+		}
+		emoji := rt.ReactionTypeEmoji.Emoji
+		if old[emoji] {
+			continue
+		}
+		deps.DispatchReaction(ctx, toReaction(u, emoji))
+	}
+}
 
-	deps.Dispatch(ctx, toMessage(u))
+// emojiSet collects the emoji strings from a reaction list, ignoring non-emoji
+// reaction types. It returns nil for an empty list.
+func emojiSet(rs []models.ReactionType) map[string]bool {
+	if len(rs) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(rs))
+	for _, rt := range rs {
+		if rt.Type == models.ReactionTypeTypeEmoji && rt.ReactionTypeEmoji != nil {
+			set[rt.ReactionTypeEmoji.Emoji] = true
+		}
+	}
+	return set
+}
+
+// toReaction maps a Telegram message_reaction update (for one added emoji) onto a
+// platform-agnostic Reaction. Unlike Slack/Discord, the reactor's name is inline
+// on the update, so AuthorName is populated.
+func toReaction(u *models.Update, emoji string) *core.Reaction {
+	mr := u.MessageReaction
+	return &core.Reaction{
+		Emoji:      emoji,
+		UserID:     strconv.FormatInt(mr.User.ID, 10),
+		AuthorName: telegramAuthorName(mr.User),
+		ChannelID:  strconv.FormatInt(mr.Chat.ID, 10),
+		MessageID:  strconv.Itoa(mr.MessageID),
+		Raw:        u,
+	}
 }
 
 func chatID(s string) any {
