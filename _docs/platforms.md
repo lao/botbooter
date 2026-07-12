@@ -482,7 +482,10 @@ ngrok http 8080
 Point the webhook's payload URL at `https://…/webhook`, then comment on any
 issue or PR in a watched repository. Comment from a **human** account: the bot
 ignores its own comments and all other bots' (any `Bot`-typed author), so two
-bots can never reply-loop each other.
+App-mode bots can never reply-loop each other. A PAT-mode bot's comments arrive
+as a plain `User`, though — another bot ignores it only when it is that bot's
+own account, so two *PAT-mode* bots watching the same repository can still
+ping-pong. Prefer App mode when several bots share a repo.
 
 `Message.ChannelID` is `owner/repo#number`, so replies land on the same issue
 or PR; `github.RawEvent(m)` returns a `*github.Message` whose `Event` field

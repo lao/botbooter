@@ -73,9 +73,11 @@ type Config struct {
 	Path string
 
 	// HTTPClient is the base client for outbound GitHub API calls; a default
-	// client with a 30s timeout is used when nil. In App mode its Transport
-	// (http.DefaultTransport when nil) becomes the inner transport of the
-	// ghinstallation token-refreshing transport.
+	// client with a 30s timeout is used when nil. In App mode only its
+	// Transport (http.DefaultTransport when nil) and Timeout are used — the
+	// Transport becomes the inner transport of the ghinstallation
+	// token-refreshing transport, and other fields (Jar, CheckRedirect) are
+	// ignored.
 	HTTPClient *http.Client
 }
 
