@@ -5,6 +5,7 @@ go 1.25.0
 replace github.com/lao/botbooter => ../
 
 require (
+	github.com/google/go-github/v88 v88.0.0
 	github.com/joho/godotenv v1.5.1
 	github.com/lao/botbooter v0.0.0-00010101000000-000000000000
 )
@@ -20,7 +21,6 @@ require (
 	github.com/go-telegram/bot v1.21.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
-	github.com/google/go-github/v88 v88.0.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
