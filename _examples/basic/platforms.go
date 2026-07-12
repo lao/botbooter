@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/lao/botbooter"
@@ -53,13 +54,30 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Path:        os.Getenv("TEAMS_PATH"), // optional; defaults to /api/messages
 		})
 	case "github":
-		// PAT mode; for GitHub App auth set AppID/InstallationID/PrivateKey instead.
-		return github.New(github.Config{
+		// PAT mode (GITHUB_TOKEN) or GitHub App mode (GITHUB_APP_ID +
+		// GITHUB_INSTALLATION_ID + GITHUB_PRIVATE_KEY_FILE); set one, not both.
+		cfg := github.Config{
 			Token:         os.Getenv("GITHUB_TOKEN"),
 			WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
 			Addr:          os.Getenv("GITHUB_ADDR"),
 			Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
-		})
+		}
+		if keyFile := os.Getenv("GITHUB_PRIVATE_KEY_FILE"); keyFile != "" {
+			key, err := os.ReadFile(keyFile)
+			if err != nil {
+				return nil, fmt.Errorf("read GITHUB_PRIVATE_KEY_FILE: %w", err)
+			}
+			appID, err := strconv.ParseInt(os.Getenv("GITHUB_APP_ID"), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parse GITHUB_APP_ID: %w", err)
+			}
+			installationID, err := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parse GITHUB_INSTALLATION_ID: %w", err)
+			}
+			cfg.AppID, cfg.InstallationID, cfg.PrivateKey = appID, installationID, key
+		}
+		return github.New(cfg)
 	case "cli":
 		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)
 		return cli.New(os.Stdin, os.Stdout), nil
