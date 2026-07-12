@@ -1,12 +1,12 @@
 # Local environment
 .env
 .env.*
+todo.md
+SPEC.md
+*.pem
 
 # WhatsApp Web (whatsmeow) session store — holds credentials, never commit.
 botbooter-whatsapp*.db*
-
-todo.md
-SPEC.md
 
 # Test & coverage artifacts
 coverage.txt
