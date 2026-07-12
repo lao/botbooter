@@ -11,9 +11,19 @@
 // posts an issue comment, and PRs are issues for commenting purposes, so the
 // comment lands on the PR conversation.
 //
-//	go run ./_examples/github-prs   # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) / GITHUB_REPO (and optional GITHUB_PR_POLL_SECONDS, GITHUB_WEBHOOK_SECRET, GITHUB_ADDR, GITHUB_PATH)
+//	go run ./_examples/github-prs   # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) (and optional GITHUB_REPO, GITHUB_PR_POLL_SECONDS, GITHUB_WEBHOOK_SECRET, GITHUB_ADDR, GITHUB_PATH)
 //
-// Only the API credentials and GITHUB_REPO ("owner/name") are required. The
+// Only the API credentials are required. GITHUB_REPO ("owner/name") pins the
+// watch to one repository; when unset the example discovers every repository
+// the credentials can reach at startup — the App installation's granted repos
+// in App mode (GET /installation/repositories), everything the token user can
+// access in PAT mode (GET /user/repos; a fine-grained PAT narrows this to its
+// granted repos, a classic PAT sees every repo the account sees) — skipping
+// archived ones, which cannot receive new PRs. Watching costs one API call per
+// repository per cycle, so the startup log prints the projected calls/hour;
+// against a PAT's 5000 req/h budget that caps out around 40 repos at the 30s
+// default — raise GITHUB_PR_POLL_SECONDS or pin GITHUB_REPO if discovery finds
+// more. The
 // webhook half of the adapter still needs an address to bind, but PR watching
 // never uses it, so it defaults to a localhost-only listener with a placeholder
 // secret; set GITHUB_WEBHOOK_SECRET/GITHUB_ADDR and register the URL as a repo
@@ -47,14 +57,11 @@ import (
 	"github.com/lao/botbooter/github"
 )
 
+// repoRef names one repository to watch.
+type repoRef struct{ owner, name string }
+
 func main() {
 	_ = godotenv.Load(".env")
-
-	repo := os.Getenv("GITHUB_REPO")
-	owner, name, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || name == "" {
-		log.Fatal(`GITHUB_REPO must be "owner/name"`)
-	}
 
 	interval := 30 * time.Second
 	if s := os.Getenv("GITHUB_PR_POLL_SECONDS"); s != "" {
@@ -82,11 +89,75 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go watchPullRequests(ctx, bot, owner, name, interval)
+	repos, err := reposToWatch(ctx, bot)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(repos) == 0 {
+		log.Fatal("no repositories to watch: the credentials reach none (grant the App/PAT access, or set GITHUB_REPO)")
+	}
 
-	log.Printf("watching %s for new pull requests every %s", repo, interval)
+	for _, r := range repos {
+		go watchPullRequests(ctx, bot, r.owner, r.name, interval)
+	}
+
+	calls := int64(len(repos)) * int64(time.Hour/interval)
+	log.Printf("watching %d repositories for new pull requests every %s (~%d API calls/hour)",
+		len(repos), interval, calls)
+	if calls > 4000 {
+		log.Printf("warning: ~%d calls/hour risks the 5000/h API budget; raise GITHUB_PR_POLL_SECONDS or pin GITHUB_REPO", calls)
+	}
 	if err := bot.Run(ctx); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// reposToWatch returns the explicit GITHUB_REPO when set, and otherwise
+// discovers every repository the credentials can reach: the installation's
+// granted repos in App mode, the token user's accessible repos in PAT mode.
+// Archived repositories are skipped — they cannot receive new PRs, so watching
+// them only burns API budget.
+func reposToWatch(ctx context.Context, bot *botbooter.Bot) ([]repoRef, error) {
+	if repo := os.Getenv("GITHUB_REPO"); repo != "" {
+		owner, name, ok := strings.Cut(repo, "/")
+		if !ok || owner == "" || name == "" {
+			return nil, fmt.Errorf(`GITHUB_REPO must be "owner/name", got %q`, repo)
+		}
+		return []repoRef{{owner, name}}, nil
+	}
+
+	client := github.Client(bot)
+	appMode := os.Getenv("GITHUB_PRIVATE_KEY_FILE") != ""
+	var out []repoRef
+	page := 1
+	for {
+		var repos []*gogithub.Repository
+		var resp *gogithub.Response
+		var err error
+		if appMode {
+			var lst *gogithub.ListRepositories
+			lst, resp, err = client.Apps.ListRepos(ctx, &gogithub.ListOptions{PerPage: 100, Page: page})
+			if lst != nil {
+				repos = lst.Repositories
+			}
+		} else {
+			repos, resp, err = client.Repositories.ListByAuthenticatedUser(ctx,
+				&gogithub.RepositoryListByAuthenticatedUserOptions{ListOptions: gogithub.ListOptions{PerPage: 100, Page: page}})
+		}
+		if err != nil {
+			return nil, fmt.Errorf("discover repositories: %w", err)
+		}
+		for _, r := range repos {
+			if r.GetArchived() {
+				continue
+			}
+			out = append(out, repoRef{r.GetOwner().GetLogin(), r.GetName()})
+			log.Printf("discovered %s", r.GetFullName())
+		}
+		if resp.NextPage == 0 {
+			return out, nil
+		}
+		page = resp.NextPage
 	}
 }
 
