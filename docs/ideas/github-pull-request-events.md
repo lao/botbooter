@@ -12,9 +12,12 @@ delivery never reaches dispatch even when the repo webhook is already subscribed
 - **Egress needs nothing**: `bot.SendMessageContext(ctx, "owner/repo#N", text)` posts
   an issue comment, and PRs are issues for commenting purposes — the welcome comment
   lands on the PR conversation.
-- **Ingress is consumer-built**: the demo polls the repo's newest open PRs through
-  `github.Client(bot)` (1 API call per cycle, newest-created page, `CreatedAt`
-  cutoff + seen-set — the reaction-poller shape) and welcomes each new PR.
+- **Ingress is consumer-built**: the demo watches ALL repos the credentials reach with
+  one Search API query per cycle (`is:pr created:>=<cutoff>` + `user:`/`org:`
+  qualifiers, seen-set dedupe) through `github.Client(bot)`, discovery at startup
+  (installation repos in App mode, `/user/repos` in PAT mode) supplying the owner
+  qualifiers and the exact-repo allowlist — search tokens are NOT credential-scoped
+  (verified empirically: an unscoped installation-token search returns all of GitHub).
 - The gap is push delivery: unlike reactions, **GitHub DOES ship a webhook for this**;
   the adapter just refuses to route it.
 

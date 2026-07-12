@@ -1,42 +1,50 @@
-// Command github-prs demonstrates reacting when a pull request is opened on a
-// GitHub repository: the bot posts a welcome comment on every new PR.
+// Command github-prs demonstrates reacting when a pull request is opened on
+// any repository the bot can reach: the bot posts a welcome comment on every
+// new PR.
 //
 // The adapter's webhook ingress is issue_comment events only — a pull_request
 // "opened" delivery is acked and dropped, so no command handler fires when a PR
 // is created. This example works around that gap entirely with the public API,
 // the same way reaction ingress was prototyped before it moved into the
-// adapter: a small poller lists the repo's newest pull requests through the
-// bot's own authenticated API client (github.Client) and replies through the
-// bot's normal egress — bot.SendMessageContext with channel "owner/repo#number"
-// posts an issue comment, and PRs are issues for commenting purposes, so the
-// comment lands on the PR conversation.
+// adapter: a single watcher polls the Search API for freshly created PRs
+// through the bot's own authenticated API client (github.Client) and replies
+// through the bot's normal egress — bot.SendMessageContext with channel
+// "owner/repo#number" posts an issue comment, and PRs are issues for
+// commenting purposes, so the comment lands on the PR conversation.
 //
 //	go run ./_examples/github-prs   # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) (and optional GITHUB_REPO, GITHUB_PR_POLL_SECONDS, GITHUB_WEBHOOK_SECRET, GITHUB_ADDR, GITHUB_PATH)
 //
 // Only the API credentials are required. GITHUB_REPO ("owner/name") pins the
-// watch to one repository; when unset the example discovers every repository
-// the credentials can reach at startup — the App installation's granted repos
-// in App mode (GET /installation/repositories), everything the token user can
-// access in PAT mode (GET /user/repos; a fine-grained PAT narrows this to its
-// granted repos, a classic PAT sees every repo the account sees) — skipping
-// archived ones, which cannot receive new PRs. Watching costs one API call per
-// repository per cycle, so the startup log prints the projected calls/hour;
-// against a PAT's 5000 req/h budget that caps out around 40 repos at the 30s
-// default — raise GITHUB_PR_POLL_SECONDS or pin GITHUB_REPO if discovery finds
-// more. The
-// webhook half of the adapter still needs an address to bind, but PR watching
-// never uses it, so it defaults to a localhost-only listener with a placeholder
-// secret; set GITHUB_WEBHOOK_SECRET/GITHUB_ADDR and register the URL as a repo
-// webhook (events: issue_comment) only if you also want the "echo" command to
-// answer comments on the PR.
+// watch to one repository; when unset the example watches every repository the
+// credentials can reach, discovered once at startup — the App installation's
+// granted repos in App mode (GET /installation/repositories), everything the
+// token user can access in PAT mode (GET /user/repos; a fine-grained PAT
+// narrows this to its granted repos, a classic PAT sees every repo the account
+// sees) — skipping archived ones, which cannot receive new PRs.
 //
-// Watching is polling, not push: one PR-list API call per cycle
-// (GITHUB_PR_POLL_SECONDS, default 30), well inside a PAT's 5000 req/h budget,
-// and only PRs opened while the example is running are welcomed. Bot-authored
-// PRs (User.Type "Bot", which covers this bot in App mode) are skipped so two
-// bots cannot ping-pong; in PAT mode the token user's own PRs arrive as a plain
-// User and are NOT skipped — don't open PRs with the same account the bot posts
-// with.
+// The watch itself is one Search API query per cycle regardless of repo count
+// (GITHUB_PR_POLL_SECONDS, default 30): "is:pr created:>=<cutoff>" scoped by
+// user:/org: qualifiers built from the discovered owners. Search tokens are
+// NOT scoped to what the credentials can reach (an installation token searches
+// all of GitHub), so results are also filtered against the discovered repo
+// set; that filter is what keeps a user:-qualifier match on a non-granted repo
+// from drawing a doomed comment attempt. Search is a separate rate pool (30
+// requests/min) with plenty of headroom at the default interval; owner lists
+// long enough to need many query chunks get a startup warning. The search
+// index is eventually consistent, so each cycle re-queries a two-minute
+// overlap window and a seen-set drops duplicates; only PRs created after
+// startup are welcomed.
+//
+// Bot-authored PRs (User.Type "Bot", which covers this bot in App mode) are
+// skipped so two bots cannot ping-pong; in PAT mode the token user's own PRs
+// arrive as a plain User and are NOT skipped — don't open PRs with the same
+// account the bot posts with.
+//
+// The webhook half of the adapter still needs an address to bind, but PR
+// watching never uses it, so it defaults to a localhost-only listener with a
+// placeholder secret; set GITHUB_WEBHOOK_SECRET/GITHUB_ADDR and register the
+// URL as a repo webhook (events: issue_comment) only if you also want the
+// "echo" command to answer comments on the PR.
 package main
 
 import (
@@ -57,8 +65,23 @@ import (
 	"github.com/lao/botbooter/github"
 )
 
-// repoRef names one repository to watch.
-type repoRef struct{ owner, name string }
+// searchLag is the re-query overlap compensating for the Search API's
+// eventually consistent index; the seen-set dedupes within it.
+const searchLag = 2 * time.Minute
+
+// maxQualifierChars caps one query's owner qualifiers, leaving room for the
+// fixed "is:pr created:>=..." prefix inside GitHub's 256-char query limit.
+const maxQualifierChars = 200
+
+// watchScope is where the watcher looks: qualifier strings that scope Search
+// API queries ("repo:owner/name", or chunked "user:a org:b ..."), and the
+// exact repositories the credentials can reach — search qualifiers over-match
+// (user:X covers all of X's repos, granted or not), so hits are filtered
+// against allowed before replying.
+type watchScope struct {
+	qualifiers []string
+	allowed    map[string]bool // keyed "owner/name"
+}
 
 func main() {
 	_ = godotenv.Load(".env")
@@ -89,46 +112,104 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	repos, err := reposToWatch(ctx, bot)
+	scope, err := resolveScope(ctx, bot)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if len(repos) == 0 {
+	if len(scope.allowed) == 0 {
 		log.Fatal("no repositories to watch: the credentials reach none (grant the App/PAT access, or set GITHUB_REPO)")
 	}
 
-	for _, r := range repos {
-		go watchPullRequests(ctx, bot, r.owner, r.name, interval)
-	}
+	go watchPullRequests(ctx, bot, scope, interval)
 
-	calls := int64(len(repos)) * int64(time.Hour/interval)
-	log.Printf("watching %d repositories for new pull requests every %s (~%d API calls/hour)",
-		len(repos), interval, calls)
-	if calls > 4000 {
-		log.Printf("warning: ~%d calls/hour risks the 5000/h API budget; raise GITHUB_PR_POLL_SECONDS or pin GITHUB_REPO", calls)
+	log.Printf("watching %d repositories for new pull requests every %s (%d search query/cycle)",
+		len(scope.allowed), interval, len(scope.qualifiers))
+	if perMin := len(scope.qualifiers) * int(time.Minute/interval); perMin > 25 {
+		log.Printf("warning: ~%d searches/min risks the 30/min Search API budget; raise GITHUB_PR_POLL_SECONDS", perMin)
 	}
 	if err := bot.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// reposToWatch returns the explicit GITHUB_REPO when set, and otherwise
+// watchPullRequests polls the Search API for PRs created since the last cycle
+// across the whole scope at once and welcomes each exactly once. It reads
+// through the bot's own API client and replies through the bot's Send path, so
+// auth (PAT or App) and rate-limit handling stay in one place.
+func watchPullRequests(ctx context.Context, bot *botbooter.Bot, scope watchScope, every time.Duration) {
+	client := github.Client(bot)
+	since := time.Now()
+	welcomed := map[string]bool{} // keyed "owner/name#number", the channel ID
+
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		// Overlap the previous window by searchLag, but never reach back past
+		// startup: pre-existing PRs are not this watcher's to welcome.
+		cutoff := time.Now().Add(-searchLag)
+		if cutoff.Before(since) {
+			cutoff = since
+		}
+		for _, qualifier := range scope.qualifiers {
+			query := fmt.Sprintf("is:pr created:>=%s %s", cutoff.UTC().Format("2006-01-02T15:04:05Z"), qualifier)
+			res, _, err := client.Search.Issues(ctx, query, &gogithub.SearchOptions{
+				Sort:        "created",
+				Order:       "desc",
+				ListOptions: gogithub.ListOptions{PerPage: 50},
+			})
+			if err != nil {
+				log.Printf("search pull requests: %v", err)
+				continue
+			}
+
+			for _, pr := range res.Issues {
+				repo := strings.TrimPrefix(pr.GetRepositoryURL(), "https://api.github.com/repos/")
+				channel := repo + "#" + strconv.Itoa(pr.GetNumber())
+				if !scope.allowed[repo] || welcomed[channel] || pr.GetUser().GetType() == "Bot" {
+					continue
+				}
+				welcomed[channel] = true
+
+				log.Printf("new PR %s by %s: %q", channel, pr.GetUser().GetLogin(), pr.GetTitle())
+				welcome := fmt.Sprintf("👋 Thanks for opening this pull request, @%s! Someone will review it soon. (Reply `echo <text>` to test the comment bot.)", pr.GetUser().GetLogin())
+				if err := bot.SendMessageContext(ctx, channel, welcome); err != nil {
+					log.Printf("failed to welcome PR %s: %v", channel, err)
+					delete(welcomed, channel) // retry next cycle
+				}
+			}
+		}
+	}
+}
+
+// resolveScope returns the explicit GITHUB_REPO scope when set, and otherwise
 // discovers every repository the credentials can reach: the installation's
 // granted repos in App mode, the token user's accessible repos in PAT mode.
-// Archived repositories are skipped — they cannot receive new PRs, so watching
-// them only burns API budget.
-func reposToWatch(ctx context.Context, bot *botbooter.Bot) ([]repoRef, error) {
+// Archived repositories are skipped — they cannot receive new PRs. Owners
+// dedupe into user:/org: search qualifiers, chunked under the query length
+// cap.
+func resolveScope(ctx context.Context, bot *botbooter.Bot) (watchScope, error) {
 	if repo := os.Getenv("GITHUB_REPO"); repo != "" {
 		owner, name, ok := strings.Cut(repo, "/")
 		if !ok || owner == "" || name == "" {
-			return nil, fmt.Errorf(`GITHUB_REPO must be "owner/name", got %q`, repo)
+			return watchScope{}, fmt.Errorf(`GITHUB_REPO must be "owner/name", got %q`, repo)
 		}
-		return []repoRef{{owner, name}}, nil
+		return watchScope{
+			qualifiers: []string{"repo:" + repo},
+			allowed:    map[string]bool{repo: true},
+		}, nil
 	}
 
 	client := github.Client(bot)
 	appMode := os.Getenv("GITHUB_PRIVATE_KEY_FILE") != ""
-	var out []repoRef
+	scope := watchScope{allowed: map[string]bool{}}
+	var owners []string // insertion-ordered for stable qualifiers
+	seenOwner := map[string]bool{}
 	page := 1
 	for {
 		var repos []*gogithub.Repository
@@ -145,72 +226,53 @@ func reposToWatch(ctx context.Context, bot *botbooter.Bot) ([]repoRef, error) {
 				&gogithub.RepositoryListByAuthenticatedUserOptions{ListOptions: gogithub.ListOptions{PerPage: 100, Page: page}})
 		}
 		if err != nil {
-			return nil, fmt.Errorf("discover repositories: %w", err)
+			return watchScope{}, fmt.Errorf("discover repositories: %w", err)
 		}
 		for _, r := range repos {
 			if r.GetArchived() {
 				continue
 			}
-			out = append(out, repoRef{r.GetOwner().GetLogin(), r.GetName()})
+			scope.allowed[r.GetFullName()] = true
 			log.Printf("discovered %s", r.GetFullName())
+			qualifier := "user:" + r.GetOwner().GetLogin()
+			if r.GetOwner().GetType() == "Organization" {
+				qualifier = "org:" + r.GetOwner().GetLogin()
+			}
+			if !seenOwner[qualifier] {
+				seenOwner[qualifier] = true
+				owners = append(owners, qualifier)
+			}
 		}
 		if resp.NextPage == 0 {
-			return out, nil
+			break
 		}
 		page = resp.NextPage
 	}
+	scope.qualifiers = chunkQualifiers(owners)
+	return scope, nil
 }
 
-// watchPullRequests polls the repo's newest open PRs and welcomes each one
-// created after startup, exactly once. It reads through the bot's own API
-// client and replies through the bot's Send path, so auth (PAT or App) and
-// rate-limit handling stay in one place.
-func watchPullRequests(ctx context.Context, bot *botbooter.Bot, owner, name string, every time.Duration) {
-	client := github.Client(bot)
-	since := time.Now()
-	welcomed := map[int]bool{}
-
-	ticker := time.NewTicker(every)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		// Newest-first with a small page: one API call per cycle, and a PR
-		// older than `since` ends the scan for this page.
-		prs, _, err := client.PullRequests.List(ctx, owner, name, &gogithub.PullRequestListOptions{
-			State:       "open",
-			Sort:        "created",
-			Direction:   "desc",
-			ListOptions: gogithub.ListOptions{PerPage: 10},
-		})
-		if err != nil {
-			log.Printf("list pull requests: %v", err)
-			continue
-		}
-
-		for _, pr := range prs {
-			if pr.GetCreatedAt().Time.Before(since) {
-				break
-			}
-			num := pr.GetNumber()
-			if welcomed[num] || pr.GetUser().GetType() == "Bot" {
-				continue
-			}
-			welcomed[num] = true
-
-			log.Printf("new PR #%d by %s: %q", num, pr.GetUser().GetLogin(), pr.GetTitle())
-			channel := owner + "/" + name + "#" + strconv.Itoa(num)
-			welcome := fmt.Sprintf("👋 Thanks for opening this pull request, @%s! Someone will review it soon. (Reply `echo <text>` to test the comment bot.)", pr.GetUser().GetLogin())
-			if err := bot.SendMessageContext(ctx, channel, welcome); err != nil {
-				log.Printf("failed to welcome PR #%d: %v", num, err)
-				delete(welcomed, num) // retry next cycle
-			}
+// chunkQualifiers space-joins owner qualifiers into as few search queries as
+// fit the query length cap; qualifiers of one kind OR together in GitHub
+// search, so each chunk is a single query.
+func chunkQualifiers(owners []string) []string {
+	var chunks []string
+	current := ""
+	for _, o := range owners {
+		switch {
+		case current == "":
+			current = o
+		case len(current)+1+len(o) > maxQualifierChars:
+			chunks = append(chunks, current)
+			current = o
+		default:
+			current += " " + o
 		}
 	}
+	if current != "" {
+		chunks = append(chunks, current)
+	}
+	return chunks
 }
 
 func newBot() (*botbooter.Bot, error) {
