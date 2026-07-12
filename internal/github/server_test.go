@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -105,6 +106,30 @@ func TestHandleWebhook_DispatchesComment(t *testing.T) {
 	raw, ok := RawEvent(got[0])
 	asserts.True(t, ok, "raw event present")
 	asserts.False(t, raw.Event.GetIssue().IsPullRequest(), "plain issue comment")
+}
+
+// GitHub's default webhook content type is application/x-www-form-urlencoded,
+// which wraps the JSON in a payload= form field; the signature covers the raw
+// form-encoded body. The adapter must accept both content types.
+func TestHandleWebhook_FormEncodedPayload(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	var got []*core.Message
+	done := make(chan struct{}, 1)
+	w := httptest.NewRecorder()
+
+	body := "payload=" + url.QueryEscape(issueCommentCreated)
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
+	r.Header.Set("X-GitHub-Event", "issue_comment")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+	r.Header.Set("X-Hub-Signature-256", sign("hook-secret", []byte(body)))
+
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, done))
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, w.Code, http.StatusOK, "authentic form-encoded request should be 200")
+	asserts.Equal(t, len(got), 1, "one message dispatched")
+	asserts.Equal(t, got[0].Content, "/deploy staging", "content")
 }
 
 func TestHandleWebhook_PRComment(t *testing.T) {

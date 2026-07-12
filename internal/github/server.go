@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	gogithub "github.com/google/go-github/v88/github"
@@ -32,6 +34,19 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	if err := gogithub.ValidateSignature(r.Header.Get(signatureHeader), payload, []byte(a.cfg.WebhookSecret)); err != nil {
 		w.WriteHeader(http.StatusForbidden)
 		return
+	}
+
+	// GitHub's default webhook content type wraps the JSON in a payload= form
+	// field; the signature above covers the raw form-encoded body, so unwrap
+	// only after it verifies.
+	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct == "application/x-www-form-urlencoded" {
+		form, err := url.ParseQuery(string(payload))
+		if err != nil {
+			a.log().Warn("github: discarding webhook with unparseable form body", "error", err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		payload = []byte(form.Get("payload"))
 	}
 
 	if gogithub.WebHookType(r) != "issue_comment" {
