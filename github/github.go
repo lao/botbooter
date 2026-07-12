@@ -1,9 +1,11 @@
-// Package github exposes the GitHub constructor, the raw-event accessor, and
+// Package github exposes the GitHub constructor, the raw-event accessors, and
 // the Config/Message types for botbooter. Import it for a GitHub issue-ops bot:
 // the adapter receives issue and PR comments over an issue_comment webhook and
-// replies as issue comments through the GitHub REST API. A GitHub-only binary
-// pulls in go-github and ghinstallation but never compiles discordgo, slack-go
-// or go-telegram.
+// replies as issue comments through the GitHub REST API. Emoji reactions have
+// no webhook, so OnReaction is fed by an opt-in poller over each
+// Config.ReactionPollRepos entry's newest comments. A GitHub-only binary pulls
+// in go-github and ghinstallation but never compiles discordgo, slack-go or
+// go-telegram.
 package github
 
 import (
@@ -19,6 +21,17 @@ type Config = githubint.Config
 // Message is the typed raw payload of an inbound issue_comment event.
 type Message = githubint.Message
 
+// ReactionPayload is the typed raw payload of a polled emoji reaction: the
+// reaction and the issue comment it was added to. GitHub sends no webhook for
+// reactions, so the adapter discovers them by polling when
+// [Config].ReactionPollRepos is set.
+type ReactionPayload = githubint.ReactionPayload
+
+// ReactionStore dedups polled reactions across cycles; see
+// [Config].ReactionStore. The default is in-process — provide a persistent
+// implementation (with [Config].ReactionLookback) to survive restarts.
+type ReactionStore = githubint.ReactionStore
+
 // ErrMissingConfig is returned by [New] when a required [Config] field is empty.
 var ErrMissingConfig = githubint.ErrMissingConfig
 
@@ -28,6 +41,11 @@ var ErrAmbiguousAuth = githubint.ErrAmbiguousAuth
 // ErrBadChannelID is returned by a GitHub bot's Send when the channel ID is not
 // "owner/repo#number". Branch it with errors.Is.
 var ErrBadChannelID = githubint.ErrBadChannelID
+
+// ErrBadReactionConfig is returned by [New] when a reaction-polling [Config]
+// field is malformed: a ReactionPollRepos entry that is not "owner/name", or a
+// negative ReactionPollInterval or ReactionLookback.
+var ErrBadReactionConfig = githubint.ErrBadReactionConfig
 
 // New creates a GitHub bot. It runs an inbound webhook HTTP server at cfg.Addr,
 // so put a TLS-terminating proxy in front and register the public HTTPS URL as
@@ -42,6 +60,13 @@ func New(cfg Config) (*botbooter.Bot, error) {
 // whether m originated from GitHub.
 func RawEvent(m *botbooter.Message) (*Message, bool) {
 	return githubint.RawEvent(m)
+}
+
+// RawReaction returns the typed reaction payload carried on r, reporting
+// whether r originated from GitHub. RawReaction(r).Reaction.GetContent gives
+// the bare REST content name ("+1", "hooray") behind the unicode Emoji.
+func RawReaction(r *botbooter.Reaction) (*ReactionPayload, bool) {
+	return githubint.RawReaction(r)
 }
 
 // Client returns the underlying go-github client, or nil if b is not a GitHub
