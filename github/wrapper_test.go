@@ -48,3 +48,20 @@ func TestRawEvent(t *testing.T) {
 	asserts.True(t, ok, "raw event present")
 	asserts.Equal(t, got, want, "raw event")
 }
+
+func TestNewBadReactionConfig(t *testing.T) {
+	_, err := New(Config{Token: "ghp_x", WebhookSecret: "s", Addr: "127.0.0.1:0",
+		ReactionPollRepos: []string{"not-owner-slash-name"}})
+
+	asserts.ErrorIs(t, err, ErrBadReactionConfig, "malformed poll repo")
+}
+
+func TestRawReaction(t *testing.T) {
+	want := &ReactionPayload{}
+	got, ok := RawReaction(&botbooter.Reaction{Raw: want})
+	asserts.True(t, ok, "raw reaction present")
+	asserts.Equal(t, got, want, "raw reaction")
+
+	_, ok = RawReaction(&botbooter.Reaction{Raw: "not a github reaction"})
+	asserts.False(t, ok, "foreign raw payload rejected")
+}

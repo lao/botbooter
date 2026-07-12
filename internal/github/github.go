@@ -11,7 +11,8 @@
 //
 // Implementation split (mirrors Teams): github.go (config, auth wiring,
 // accessors), server.go (webhook lifecycle), send.go (replies), message.go
-// (payload mapping).
+// (payload mapping), reactions.go (opt-in polled reaction ingress — GitHub
+// sends no webhook for reactions).
 package github
 
 import (
@@ -48,6 +49,11 @@ var ErrMissingConfig = errors.New("github: missing required config field")
 // ErrAmbiguousAuth is returned by New when both PAT and App auth are configured.
 var ErrAmbiguousAuth = errors.New("github: configure either Token or AppID/InstallationID/PrivateKey, not both")
 
+// ErrBadReactionConfig is returned by New when a reaction-polling Config field
+// is malformed: a ReactionPollRepos entry that is not "owner/name", or a
+// negative ReactionPollInterval or ReactionLookback.
+var ErrBadReactionConfig = errors.New("github: invalid reaction polling config")
+
 // Config configures a GitHub bot. Exactly one auth mode must be set: Token
 // (PAT mode) or the AppID/InstallationID/PrivateKey triple (App mode).
 type Config struct {
@@ -79,11 +85,35 @@ type Config struct {
 	// token-refreshing transport, and other fields (Jar, CheckRedirect) are
 	// ignored.
 	HTTPClient *http.Client
+
+	// ReactionPollRepos lists repositories ("owner/name") whose newest issue
+	// comments are polled for emoji reactions, because GitHub sends no webhook
+	// for them. Empty (the default) disables polling and OnReaction never
+	// fires. Coverage is deliberately partial — only reactions on each repo's
+	// newest comments are seen — and each listed repo costs at least one API
+	// request per poll cycle.
+	ReactionPollRepos []string
+	// ReactionPollInterval is the delay between reaction poll cycles; it
+	// defaults to 30 seconds and is also the reaction delivery latency.
+	ReactionPollInterval time.Duration
+	// ReactionStore dedups reactions across poll cycles; it defaults to an
+	// in-process store, so a restart forgets what was already handled. Provide
+	// a persistent implementation together with ReactionLookback to catch
+	// reactions added while the bot was down.
+	ReactionStore ReactionStore
+	// ReactionLookback widens the dispatch window: a reaction is dispatched
+	// only if the store has not seen it and it was created after (connect time
+	// - ReactionLookback). The zero default dispatches only reactions added
+	// while connected.
+	ReactionLookback time.Duration
 }
 
 type adapter struct {
 	cfg    Config
 	client *gogithub.Client
+	// pollRepos is cfg.ReactionPollRepos parsed once at New; empty means
+	// reaction polling is disabled and Connect starts no poller.
+	pollRepos []repoRef
 
 	mu sync.Mutex
 	// selfID identifies the bot's own account for reply-loop prevention in
@@ -178,6 +208,21 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if !strings.HasPrefix(cfg.Path, "/") {
 		cfg.Path = "/" + cfg.Path
 	}
+	pollRepos, err := parsePollRepos(cfg.ReactionPollRepos)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ReactionPollInterval < 0 || cfg.ReactionLookback < 0 {
+		return nil, fmt.Errorf("%w: ReactionPollInterval and ReactionLookback must not be negative", ErrBadReactionConfig)
+	}
+	if cfg.ReactionPollInterval == 0 {
+		cfg.ReactionPollInterval = defaultReactionPollInterval
+	}
+	// The store outlives connections on purpose: a reconnect keeps its seen
+	// set, so reactions handled before the reconnect are not re-dispatched.
+	if cfg.ReactionStore == nil && len(pollRepos) > 0 {
+		cfg.ReactionStore = newMemoryReactionStore()
+	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -188,7 +233,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 		baseTransport = http.DefaultTransport
 	}
 
-	a := &adapter{cfg: cfg}
+	a := &adapter{cfg: cfg, pollRepos: pollRepos}
 	if patMode {
 		client, err := gogithub.NewClient(
 			gogithub.WithHTTPClient(cfg.HTTPClient),

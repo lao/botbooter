@@ -21,7 +21,7 @@
 //	go run ./_examples/reactions whatsapp   # Cloud API flavor: reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
 //	go run ./_examples/reactions whatsmeow  # WhatsApp Web flavor: no credentials; scan the QR on first run (optional WA_MEOW_DB)
 //	go run ./_examples/reactions teams      # reads TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (and optional TEAMS_APP_TENANT_ID, TEAMS_PATH)
-//	go run ./_examples/reactions github     # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR (and optional GITHUB_PATH)
+//	go run ./_examples/reactions github     # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR / GITHUB_REPO (and optional GITHUB_PATH, GITHUB_POLL_SECONDS)
 //
 // Per-platform setup gotchas for reactions to actually arrive:
 //   - Slack: subscribe the app to the reaction_added Events API event and grant
@@ -38,8 +38,12 @@
 //   - Teams: the adapter does not surface reaction events yet, so the echo
 //     command works but OnReaction never fires.
 //   - GitHub: the platform sends no webhook for reactions at all (a
-//     long-requested feature GitHub has not shipped), so the echo command works
-//     but OnReaction can never fire — a platform limitation, not an adapter gap.
+//     long-requested feature GitHub has not shipped), so the adapter polls
+//     instead — an opt-in: set GITHUB_REPO ("owner/name") to poll that repo's
+//     newest issue comments (Config.ReactionPollRepos). Reactions arrive within
+//     the poll interval (GITHUB_POLL_SECONDS, default 30), only for the newest
+//     comments, and only while the bot is running. Without GITHUB_REPO the echo
+//     command works but OnReaction never fires.
 //
 // Emoji renders as-is on its origin platform: a unicode character on most
 // platforms, a colon-wrapped shortname (":thumbsup:") on Slack, "<:name:id>"
@@ -56,6 +60,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/lao/botbooter"
@@ -154,12 +159,26 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Path:        os.Getenv("TEAMS_PATH"), // optional; defaults to /api/messages
 		})
 	case "github":
-		fmt.Fprintln(os.Stderr, "note: GitHub sends no webhook for reactions, so OnReaction can never fire; the echo command still works.")
 		cfg := github.Config{
 			Token:         os.Getenv("GITHUB_TOKEN"),
 			WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
 			Addr:          os.Getenv("GITHUB_ADDR"),
 			Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
+		}
+		// GitHub has no reaction webhook; the adapter polls instead, opt-in per
+		// repository. Without GITHUB_REPO the bot still echoes, but OnReaction
+		// never fires.
+		if repo := os.Getenv("GITHUB_REPO"); repo != "" {
+			cfg.ReactionPollRepos = []string{repo}
+			if s := os.Getenv("GITHUB_POLL_SECONDS"); s != "" {
+				n, err := strconv.Atoi(s)
+				if err != nil || n <= 0 {
+					return nil, fmt.Errorf("parse GITHUB_POLL_SECONDS %q", s)
+				}
+				cfg.ReactionPollInterval = time.Duration(n) * time.Second
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "note: set GITHUB_REPO (\"owner/name\") to poll that repo for reactions; without it OnReaction never fires.")
 		}
 		if keyFile := os.Getenv("GITHUB_PRIVATE_KEY_FILE"); keyFile != "" {
 			key, err := os.ReadFile(keyFile)

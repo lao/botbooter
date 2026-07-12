@@ -82,7 +82,12 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 // Discord adapters) or this bot's own account (the check that matters in PAT
 // mode, where its comments arrive as a plain User).
 func (a *adapter) isSelfOrBot(event *gogithub.IssueCommentEvent) bool {
-	user := event.GetComment().GetUser()
+	return a.isSelfOrBotUser(event.GetComment().GetUser())
+}
+
+// isSelfOrBotUser is the user-level check behind isSelfOrBot, shared with the
+// reaction poller so both ingress paths drop the same authors.
+func (a *adapter) isSelfOrBotUser(user *gogithub.User) bool {
 	if user.GetType() == "Bot" {
 		return true
 	}
@@ -150,6 +155,14 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 			a.mu.Lock()
 			a.selfID = selfID
 			a.mu.Unlock()
+		}
+		// The reaction poller starts after self-identity resolves so its very
+		// first cycle can filter the bot's own reactions, and only when repos
+		// are configured. It stops with ctx like the teardown watcher below;
+		// its dispatches ride detachedCtx + inflight, so Disconnect's drain
+		// covers reaction handlers exactly like webhook dispatch.
+		if len(a.pollRepos) > 0 {
+			go a.pollReactions(ctx, detachedCtx, deps, time.Now().Add(-a.cfg.ReactionLookback))
 		}
 		serve(srv, ln, deps.Done)
 	}()
