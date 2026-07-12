@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -297,6 +298,16 @@ func TestConnect_SelfIdentityFailureIsFatal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("identity failure never surfaced via deps.Done")
 	}
+
+	// Serve never runs on this path, so the ln.Close in the serve goroutine is
+	// the only thing that releases the listener — pin that it actually did.
+	a.mu.Lock()
+	addr := a.boundAddr
+	a.mu.Unlock()
+	if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		_ = conn.Close()
+		t.Fatal("listener still accepting connections after identity failure")
+	}
 }
 
 // Connect must return before the self-identity round-trip completes: core
@@ -336,9 +347,20 @@ func TestConnect_DoesNotBlockOnSelfResolution(t *testing.T) {
 
 // App mode needs no self-identity lookup: every App-authored comment arrives
 // with user type "Bot" and is dropped wholesale, so Connect must bind and
-// serve without a single GitHub API round-trip.
+// serve without a single GitHub API round-trip. All outbound API traffic is
+// rerouted to a counting server so a regression to calling resolveSelf (or any
+// other Connect-path API call) trips the zero-requests assertion.
 func TestConnect_AppModeSkipsSelfResolution(t *testing.T) {
-	a, err := newAdapter(appConfig(t))
+	var apiCalls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := appConfig(t)
+	cfg.HTTPClient = &http.Client{Transport: rewriteTransport{host: srv.Listener.Addr().String()}}
+	a, err := newAdapter(cfg)
 	asserts.NoError(t, err, "new App adapter")
 
 	asserts.NoError(t, a.Connect(context.Background(), core.AdapterDeps{
@@ -346,10 +368,57 @@ func TestConnect_AppModeSkipsSelfResolution(t *testing.T) {
 	}), "connect in App mode")
 	defer func() { _ = a.Disconnect() }()
 
+	// Resolution would be asynchronous; give a regressed lookup a moment to fire.
+	time.Sleep(50 * time.Millisecond)
+
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	asserts.Equal(t, a.selfID, int64(0), "App mode relies on the Bot-type filter, not selfID")
-	asserts.True(t, a.boundAddr != "", "listener bound without any API round-trip")
+	selfID, boundAddr := a.selfID, a.boundAddr
+	a.mu.Unlock()
+	asserts.Equal(t, selfID, int64(0), "App mode relies on the Bot-type filter, not selfID")
+	asserts.True(t, boundAddr != "", "listener bound")
+	asserts.Equal(t, apiCalls.Load(), int64(0), "App-mode Connect must make no GitHub API round-trip")
+}
+
+// A non-default cfg.Path must actually route: the webhook lands on the custom
+// route and the default route no longer exists.
+func TestConnect_CustomPathRoutes(t *testing.T) {
+	srv := selfIdentityServer(t)
+	defer srv.Close()
+
+	cfg := patConfig()
+	cfg.Path = "/hooks/gh"
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "new adapter")
+	a.client = testClient(t, srv)
+
+	var got []*core.Message
+	dispatched := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := captureDeps(&got, dispatched)
+	deps.Done = func(error) {}
+	deps.Disconnect = func() error { return nil }
+	asserts.NoError(t, a.Connect(ctx, deps), "connect")
+	defer func() { _ = a.Disconnect() }()
+
+	a.mu.Lock()
+	addr := a.boundAddr
+	a.mu.Unlock()
+	post := func(path string) int {
+		r, err := http.NewRequest(http.MethodPost, "http://"+addr+path, strings.NewReader(issueCommentCreated))
+		asserts.NoError(t, err, "build request")
+		r.Header.Set("X-GitHub-Event", "issue_comment")
+		r.Header.Set("X-Hub-Signature-256", sign("hook-secret", []byte(issueCommentCreated)))
+		resp, err := http.DefaultClient.Do(r)
+		asserts.NoError(t, err, "deliver webhook")
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	asserts.Equal(t, post("/hooks/gh"), http.StatusOK, "custom path serves the webhook")
+	awaitDispatch(t, dispatched, 1)
+	asserts.Equal(t, len(got), 1, "delivery on the custom path dispatched")
+	asserts.Equal(t, post("/webhook"), http.StatusNotFound, "default path is not registered")
 }
 
 func TestDisconnect_IdempotentAndClears(t *testing.T) {
@@ -466,6 +535,55 @@ func TestDisconnect_CancelsDetachedCtx(t *testing.T) {
 
 	asserts.NoError(t, a.Disconnect(), "disconnect")
 	asserts.ErrorIs(t, dispatchCtx.Err(), context.Canceled, "detached ctx canceled by Disconnect")
+}
+
+// Disconnect must cancel the detached context only AFTER the drain window: the
+// whole design ("an acked message is processed rather than dropped") collapses
+// if the cancel lands first, because an in-flight handler would see a dead ctx
+// mid-reply. A dispatch that is still running when Disconnect starts must
+// observe a live context through to completion.
+func TestDisconnect_DrainsBeforeCancelingDetachedCtx(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	ctxErrAtEnd := make(chan error, 1)
+	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
+		Dispatch: func(c context.Context, _ *core.Message) {
+			entered <- struct{}{}
+			time.Sleep(100 * time.Millisecond) // still in flight when Disconnect runs
+			ctxErrAtEnd <- c.Err()
+		},
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	})
+	defer srv.Close()
+	defer cancel()
+
+	// Drive one real delivery through the bound server so dispatch runs on the
+	// connection's detached context.
+	a.mu.Lock()
+	addr := a.boundAddr
+	a.mu.Unlock()
+	r, err := http.NewRequest(http.MethodPost, "http://"+addr+"/webhook", strings.NewReader(issueCommentCreated))
+	asserts.NoError(t, err, "build request")
+	r.Header.Set("X-GitHub-Event", "issue_comment")
+	r.Header.Set("X-Hub-Signature-256", sign("hook-secret", []byte(issueCommentCreated)))
+	resp, err := http.DefaultClient.Do(r)
+	asserts.NoError(t, err, "deliver webhook")
+	_ = resp.Body.Close()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch to start")
+	}
+
+	asserts.NoError(t, a.Disconnect(), "disconnect during in-flight dispatch")
+
+	select {
+	case dispatchErr := <-ctxErrAtEnd:
+		asserts.NoError(t, dispatchErr, "in-flight dispatch kept a live detached ctx until it finished (drain before cancel)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch to finish")
+	}
 }
 
 func TestAttachments_AlwaysNil(t *testing.T) {

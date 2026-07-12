@@ -485,8 +485,9 @@ ignores its own comments and all other bots' (any `Bot`-typed author), so two
 bots can never reply-loop each other.
 
 `Message.ChannelID` is `owner/repo#number`, so replies land on the same issue
-or PR; `github.RawEvent(m)` returns the full `*github.IssueCommentEvent`
-(check `.Event.GetIssue().IsPullRequest()` to tell PRs from issues), and
+or PR; `github.RawEvent(m)` returns a `*github.Message` whose `Event` field
+carries the full `*gogithub.IssueCommentEvent` (check
+`.Event.GetIssue().IsPullRequest()` to tell PRs from issues), and
 `github.Client(bot)` exposes the authenticated go-github client for anything
 beyond commenting — labels, reactions, checks. `github.Addr(bot)` reports the
 bound address when you bind `:0`.
@@ -576,6 +577,7 @@ Two options carry the anchor:
 | **WhatsApp (Cloud API)** | `m.ID` | a **quote message id** | `context.message_id` (a quoted reply) | plain send (no `context`) |
 | **WhatsApp (Web / whatsmeow)** | — (options ignored) | — | — | always a plain channel send (quoted replies are a possible follow-up) |
 | **Teams** | — (options ignored) | — | — | always a plain channel send |
+| **GitHub** | — (options ignored) | — | — | always a plain issue comment (issue comment threads are flat — a reply already lands in the conversation) |
 | **CLI** | — (options ignored) | — | — | always a plain channel send |
 
 The reply anchor assumes you send to the message's **own channel**; e.g. a
@@ -607,7 +609,7 @@ pre-computed id.
 ### Fallback & errors
 
 A send degrades to a plain channel message when the adapter ignores the options
-(Teams, CLI) **or** the anchor resolves to nothing — it never fails just because
+(Teams, GitHub, CLI) **or** the anchor resolves to nothing — it never fails just because
 a message can't be threaded. The one loud exception is an explicit
 `WithThreadID` that a platform can't use (an id that isn't a positive message id
 on Telegram), which returns an error rather than silently dropping. `Reply` returns an error only
