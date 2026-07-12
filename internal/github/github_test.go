@@ -5,6 +5,8 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/lao/botbooter/internal/asserts"
@@ -115,6 +117,22 @@ func TestClient_GitHubBot(t *testing.T) {
 
 	asserts.NoError(t, err, "new GitHub bot")
 	asserts.NotNil(t, Client(bot), "client for a GitHub bot")
+}
+
+func TestLog_DefaultBeforeConnect(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	asserts.True(t, a.log() == slog.Default(), "default logger before Connect")
+}
+
+func TestLog_PrefersConnectLogger(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	custom := slog.New(slog.NewTextHandler(io.Discard, nil))
+	a.mu.Lock()
+	a.logger = custom
+	a.mu.Unlock()
+	asserts.True(t, a.log() == custom, "logger handed over at Connect wins")
 }
 
 func TestClient_NotGitHubBot(t *testing.T) {

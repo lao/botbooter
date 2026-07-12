@@ -53,6 +53,21 @@ const (
 	pingEvent = `{"zen": "Design for failure.", "hook_id": 1}`
 )
 
+// failingListener makes Serve return err immediately, exercising the serve
+// error filter without a real socket (mirrors the Teams adapter's test).
+type failingListener struct {
+	err error
+}
+
+func (l failingListener) Accept() (net.Conn, error) { return nil, l.err }
+func (failingListener) Close() error                { return nil }
+func (failingListener) Addr() net.Addr              { return testAddr("failing") }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "test" }
+func (a testAddr) String() string { return string(a) }
+
 // sign returns the X-Hub-Signature-256 header value for body under secret.
 func sign(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -608,6 +623,42 @@ func TestDisconnect_DrainsBeforeCancelingDetachedCtx(t *testing.T) {
 		asserts.NoError(t, dispatchErr, "in-flight dispatch kept a live detached ctx until it finished (drain before cancel)")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for dispatch to finish")
+	}
+}
+
+// A signed but unparseable form-encoded body must be acked (the delivery is
+// authentic — a 4xx would make GitHub mark the hook as failing) and dropped.
+func TestHandleWebhook_UnparseableFormBody(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	var got []*core.Message
+	w := httptest.NewRecorder()
+
+	body := "payload=%zz" // invalid URL escape: ParseQuery fails
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
+	r.Header.Set("X-GitHub-Event", "issue_comment")
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Hub-Signature-256", sign("hook-secret", []byte(body)))
+
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusOK, "authentic-but-unparseable form body still acks 200")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+func TestServe_ReportsUnexpectedError(t *testing.T) {
+	want := errors.New("accept failed")
+	done := make(chan error, 1)
+
+	serve(&http.Server{}, failingListener{err: want}, func(err error) {
+		done <- err
+	})
+
+	select {
+	case got := <-done:
+		asserts.ErrorIs(t, got, want, "unexpected serve error should be reported")
+	default:
+		t.Fatal("serve returned without reporting the listener error")
 	}
 }
 

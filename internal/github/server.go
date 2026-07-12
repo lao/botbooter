@@ -151,9 +151,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 			a.selfID = selfID
 			a.mu.Unlock()
 		}
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			deps.Done(err)
-		}
+		serve(srv, ln, deps.Done)
 	}()
 
 	// Tear down when the run context is canceled; identity-compare so a stale
@@ -169,6 +167,15 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	}()
 
 	return nil
+}
+
+// serve runs srv on ln and reports any unexpected termination — anything but
+// the ErrServerClosed of a clean Shutdown — to done. Split out so the error
+// filter is unit-testable with a failing listener (mirrors the Teams adapter).
+func serve(srv *http.Server, ln net.Listener, done func(error)) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		done(err)
+	}
 }
 
 // resolveSelf resolves the bot's own account for reply-loop prevention in PAT
