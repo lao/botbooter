@@ -8,6 +8,7 @@ require (
 	github.com/google/go-github/v88 v88.0.0
 	github.com/joho/godotenv v1.5.1
 	github.com/lao/botbooter v0.0.0-00010101000000-000000000000
+	modernc.org/sqlite v1.53.0
 )
 
 require (
@@ -47,6 +48,5 @@ require (
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.53.0 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )
