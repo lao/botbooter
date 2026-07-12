@@ -14,8 +14,22 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
+// rewriteTransport reroutes every request to the test server without touching
+// anything else, so a test can drive the adapter's own client — auth transport
+// chain and all — instead of rebuilding one and vouching for itself.
+type rewriteTransport struct{ host string }
+
+func (rt rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.URL.Scheme = "http"
+	req.URL.Host = rt.host
+	return http.DefaultTransport.RoundTrip(req)
+}
+
 // TestSend_PATAuthorizationHeader asserts the PAT wiring: the client built by
-// newAdapter must send the token on outbound calls.
+// newAdapter must send the token on outbound calls. The adapter's own client is
+// used unmodified (only the wire is redirected), so dropping WithAuthToken from
+// newAdapter's PAT branch fails this test.
 func TestSend_PATAuthorizationHeader(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,20 +39,39 @@ func TestSend_PATAuthorizationHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, err := newAdapter(patConfig())
+	cfg := patConfig()
+	cfg.HTTPClient = &http.Client{Transport: rewriteTransport{host: srv.Listener.Addr().String()}}
+	a, err := newAdapter(cfg)
 	asserts.NoError(t, err, "new adapter")
-	// Rebuild the adapter's own client against the test server, preserving its
-	// auth transport chain.
-	client, err := gogithub.NewClient(
-		gogithub.WithHTTPClient(a.cfg.HTTPClient),
-		gogithub.WithAuthToken(a.cfg.Token),
-		gogithub.WithURLs(gogithub.Ptr(srv.URL+"/"), gogithub.Ptr(srv.URL+"/")),
-	)
-	asserts.NoError(t, err, "repoint client")
-	a.client = client
 
 	asserts.NoError(t, a.Send(context.Background(), "lao/botbooter#42", "hi", core.SendOptions{}), "send")
 	asserts.True(t, strings.Contains(gotAuth, "ghp_test"), "Authorization carries the PAT, got "+gotAuth)
+}
+
+// TestSend_AppInstallationToken asserts the App wiring end to end: the
+// ghinstallation transport built by newAdapter must exchange the App JWT for an
+// installation token and send that token on the comment call.
+func TestSend_AppInstallationToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "access_tokens") {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token": "ghs_installation_token", "expires_at": "2100-01-01T00:00:00Z"}`))
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id": 1}`))
+	}))
+	defer srv.Close()
+
+	cfg := appConfig(t)
+	cfg.HTTPClient = &http.Client{Transport: rewriteTransport{host: srv.Listener.Addr().String()}}
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "new adapter")
+
+	asserts.NoError(t, a.Send(context.Background(), "lao/botbooter#42", "hi", core.SendOptions{}), "send")
+	asserts.True(t, strings.Contains(gotAuth, "ghs_installation_token"), "Authorization carries the installation token, got "+gotAuth)
 }
 
 func TestParseChannelID(t *testing.T) {
