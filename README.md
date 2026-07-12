@@ -7,9 +7,9 @@
 [![Releases](https://img.shields.io/github/v/release/lao/botbooter.svg?include_prereleases&color=blue)](https://github.com/lao/botbooter/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
-Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, Microsoft Teams, or stdin.
+Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, Microsoft Teams, a GitHub issue or PR comment, or stdin.
 
 > ⚠️ **Not production ready.** botbooter is pre-1.0 and under active development. The
 > public API may change without notice, and it has not been hardened or battle-tested for
@@ -18,7 +18,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
@@ -72,6 +72,7 @@ go run ./_examples/basic telegram   # uses TELEGRAM_BOT_TOKEN
 go run ./_examples/basic whatsapp   # WhatsApp Cloud API flavor: uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
 go run ./_examples/basic whatsmeow  # WhatsApp Web flavor: no credentials — scan the QR on first run (+ optional WA_MEOW_DB)
 go run ./_examples/basic teams      # uses TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (+ optional TEAMS_APP_TENANT_ID / TEAMS_PATH)
+go run ./_examples/basic github     # uses GITHUB_TOKEN / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR (+ optional GITHUB_PATH)
 ```
 
 ## Concepts
@@ -89,6 +90,7 @@ Import `botbooter` for the shared types plus the one `botbooter/<platform>` pack
 | `cloud.New(cfg cloud.Config)` | `(*Bot, error)` | WhatsApp, Meta Cloud API flavor (`botbooter/whatsapp/cloud`); runs an inbound webhook HTTP server. |
 | `whatsmeow.New(cfg whatsmeow.Config)` | `(*Bot, error)` | WhatsApp, Web-protocol flavor (`botbooter/whatsapp/whatsmeow`); QR-links to a phone, no Meta account needed. |
 | `teams.New(cfg teams.Config)` | `(*Bot, error)` | Azure Bot Framework; runs an inbound webhook HTTP server. |
+| `github.New(cfg github.Config)` | `(*Bot, error)` | Issue/PR comments via `issue_comment` webhook; PAT or GitHub App auth. |
 
 WhatsApp comes in **two flavors selected by import path** — `whatsapp/cloud` (official Meta Cloud API: Business account, webhook + public HTTPS URL, no third-party deps) and `whatsapp/whatsmeow` (unofficial WhatsApp Web multidevice protocol via [whatsmeow](https://github.com/tulir/whatsmeow): pair by QR code like WhatsApp Web, session persisted in a local SQLite file — `Config.DBPath`, default `botbooter-whatsapp-meow.db` in the working directory — no Meta account or webhook). Only the flavor you import is compiled into your binary.
 
@@ -142,7 +144,7 @@ bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botboote
 
 For a raw, platform-specific anchor there's **`botbooter.WithThreadID(id)`** — the adapter uses the string verbatim (a Slack `thread_ts`, or a reply/quote message id elsewhere) and it wins over `InReplyTo`. You own platform-correctness with it. Per-platform anchor semantics, the precedence and fallback rules, and how `ReplyToID` vs `ID` are chosen are documented in [_docs/platforms.md](_docs/platforms.md#threaded-replies).
 
-Fallback is automatic and safe: **Teams** and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send — a send never fails just because a message can't be threaded. `Reply` returns an error only when the bot has no adapter or `m` is `nil`.
+Fallback is automatic and safe: **Teams**, **GitHub** (issue comment threads are flat — a reply already lands in the conversation) and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send — a send never fails just because a message can't be threaded. `Reply` returns an error only when the bot has no adapter or `m` is `nil`.
 
 ### Attachments
 
@@ -153,7 +155,7 @@ for _, a := range attachments {
 }
 ```
 
-`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp Cloud API). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp Cloud API resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram).
+`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp Cloud API). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp Cloud API resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram). GitHub comments carry markdown rather than an upload channel, so `GetAttachments` returns none there.
 
 WhatsApp Web (whatsmeow) media is end-to-end encrypted and has no URL at all — fetch and decrypt the bytes with `whatsmeow.Download(ctx, bot, a)`.
 
@@ -190,13 +192,14 @@ if ev, ok := slack.RawEvent(m); ok {
 	_ = ev.ThreadTimeStamp // anything on the raw *slackevents.MessageEvent
 }
 
-// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, cloud.RawMessage (WhatsApp Cloud API), whatsmeow.RawMessage (WhatsApp Web), teams.RawMessage, cli.RawData.
+// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, cloud.RawMessage (WhatsApp Cloud API), whatsmeow.RawMessage (WhatsApp Web), teams.RawMessage, github.RawEvent, cli.RawData.
 // Underlying client per platform (WhatsApp Cloud API and Teams have none — they speak REST over plain HTTP):
 client := slack.Client(bot)        // *slack.Client (nil if not a Slack bot)
 sock := slack.SocketClient(bot)    // *socketmode.Client (nil if not a Slack bot)
 session := discord.Session(bot)    // *discordgo.Session
 tg := telegram.Client(bot)         // *bot.Bot
 wa := whatsmeow.Client(bot)        // *whatsmeow.Client (WhatsApp Web flavor)
+gh := github.Client(bot)           // *go-github Client — labels, reactions, checks, anything beyond replies
 ```
 
 ### Lifecycle
@@ -228,6 +231,7 @@ documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 | WhatsApp (Cloud API) | Cloud API token + phone-number id + app secret + verify token + bind addr | [_docs/platforms.md](_docs/platforms.md#whatsapp) |
 | WhatsApp (Web / whatsmeow) | nothing — scan a QR code from WhatsApp > Linked devices on first run | [_docs/platforms.md](_docs/platforms.md#whatsapp-web-whatsmeow) |
 | Microsoft Teams | Azure Bot app id + password (+ optional tenant id) + bind addr | [_docs/platforms.md](_docs/platforms.md#microsoft-teams) |
+| GitHub | PAT **or** App (id + installation id + private key) + webhook secret + bind addr | [_docs/platforms.md](_docs/platforms.md#github) |
 | CLI | nothing (local stdin/stdout) | [_docs/platforms.md](_docs/platforms.md#cli) |
 
 ## Development
@@ -263,7 +267,7 @@ Alternatives:
 
 ## Roadmap
 
-- [x] Slack, Discord, Telegram, WhatsApp, Microsoft Teams and CLI adapters
+- [x] Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub and CLI adapters
 - [x] Middleware and attachment abstraction
 - [x] Unify attachment URL retrieval for all implementations
 - [ ] WeChat, Mastodon adapters

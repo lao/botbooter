@@ -41,6 +41,7 @@ jobs:
           # Run the webhook drain-timing regression tests (otherwise skipped).
           BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST: "1"
           BOTBOOTER_TEAMS_DRAIN_TIMING_TEST: "1"
+          BOTBOOTER_GITHUB_DRAIN_TIMING_TEST: "1"
         run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
       - name: Upload coverage to Codecov
         if: ${{ env.CODECOV_TOKEN != '' }}

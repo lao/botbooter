@@ -1,15 +1,17 @@
 // Package botbooter holds the platform-agnostic shared types for building chat
 // bots that behave the same way across Slack, Discord, Telegram, WhatsApp,
-// Microsoft Teams and a local CLI.
+// Microsoft Teams, GitHub and a local CLI.
 //
 // This package is SDK-free: it imports no platform SDK and only re-exports the
 // shared types from internal/core. Construct a bot from one of the per-platform
 // packages — botbooter/slack, botbooter/discord, botbooter/telegram,
-// botbooter/whatsapp/cloud, botbooter/whatsapp/whatsmeow, botbooter/teams or
-// botbooter/cli — each of which pulls in only its own platform SDK (WhatsApp
-// Cloud API and Teams speak REST APIs over plain HTTP and need none), then drive
-// it through the shared types re-exported here. A bot that uses one platform
-// never compiles the other platforms' SDKs into its binary.
+// botbooter/whatsapp/cloud, botbooter/whatsapp/whatsmeow, botbooter/teams,
+// botbooter/github or botbooter/cli — each of which pulls in only its own
+// platform SDK (WhatsApp Cloud API and Teams speak REST APIs over plain HTTP
+// and need none; GitHub pulls google/go-github plus bradleyfalzon/ghinstallation
+// for GitHub App auth), then drive it through the shared types re-exported here.
+// A bot that uses one platform never compiles the other platforms' SDKs into
+// its binary.
 //
 // WhatsApp comes in two flavors selected by import path: whatsapp/cloud (Meta
 // Cloud API webhook, needs a Meta Business account and a public HTTPS URL) and
@@ -40,6 +42,7 @@ const (
 	// WhatsMeowBotType is the WhatsApp Web (whatsmeow) flavor; WhatsAppBotType is
 	// the Meta Cloud API flavor.
 	WhatsMeowBotType = core.WhatsMeowBotType
+	GitHubBotType    = core.GitHubBotType
 )
 
 type (

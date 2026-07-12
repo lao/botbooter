@@ -21,6 +21,7 @@
 //	go run ./_examples/reactions whatsapp   # Cloud API flavor: reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
 //	go run ./_examples/reactions whatsmeow  # WhatsApp Web flavor: no credentials; scan the QR on first run (optional WA_MEOW_DB)
 //	go run ./_examples/reactions teams      # reads TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (and optional TEAMS_APP_TENANT_ID, TEAMS_PATH)
+//	go run ./_examples/reactions github     # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR (and optional GITHUB_PATH)
 //
 // Per-platform setup gotchas for reactions to actually arrive:
 //   - Slack: subscribe the app to the reaction_added Events API event and grant
@@ -36,6 +37,9 @@
 //     egress yet, so ReplyToMessage falls back to a plain send).
 //   - Teams: the adapter does not surface reaction events yet, so the echo
 //     command works but OnReaction never fires.
+//   - GitHub: the platform sends no webhook for reactions at all (a
+//     long-requested feature GitHub has not shipped), so the echo command works
+//     but OnReaction can never fire — a platform limitation, not an adapter gap.
 //
 // Emoji renders as-is on its origin platform: a unicode character on most
 // platforms, a colon-wrapped shortname (":thumbsup:") on Slack, "<:name:id>"
@@ -49,6 +53,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -56,6 +61,7 @@ import (
 	"github.com/lao/botbooter"
 	"github.com/lao/botbooter/cli"
 	"github.com/lao/botbooter/discord"
+	"github.com/lao/botbooter/github"
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
@@ -147,10 +153,34 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Addr:        os.Getenv("TEAMS_ADDR"),
 			Path:        os.Getenv("TEAMS_PATH"), // optional; defaults to /api/messages
 		})
+	case "github":
+		fmt.Fprintln(os.Stderr, "note: GitHub sends no webhook for reactions, so OnReaction can never fire; the echo command still works.")
+		cfg := github.Config{
+			Token:         os.Getenv("GITHUB_TOKEN"),
+			WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+			Addr:          os.Getenv("GITHUB_ADDR"),
+			Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
+		}
+		if keyFile := os.Getenv("GITHUB_PRIVATE_KEY_FILE"); keyFile != "" {
+			key, err := os.ReadFile(keyFile)
+			if err != nil {
+				return nil, fmt.Errorf("read GITHUB_PRIVATE_KEY_FILE: %w", err)
+			}
+			appID, err := strconv.ParseInt(os.Getenv("GITHUB_APP_ID"), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parse GITHUB_APP_ID: %w", err)
+			}
+			installationID, err := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parse GITHUB_INSTALLATION_ID: %w", err)
+			}
+			cfg.AppID, cfg.InstallationID, cfg.PrivateKey = appID, installationID, key
+		}
+		return github.New(cfg)
 	case "cli":
 		fmt.Fprintln(os.Stderr, "CLI has no reactions; run with slack, discord, telegram, whatsapp or whatsmeow to see OnReaction fire.")
 		return cli.New(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github or cli)", botType)
 	}
 }

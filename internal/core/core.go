@@ -36,6 +36,7 @@ const (
 	WhatsAppBotType
 	TeamsBotType
 	WhatsMeowBotType
+	GitHubBotType
 )
 
 // String returns the lowercase platform name for t, or "BotType(n)" for an
@@ -56,6 +57,8 @@ func (t BotType) String() string {
 		return "teams"
 	case WhatsMeowBotType:
 		return "whatsmeow"
+	case GitHubBotType:
+		return "github"
 	default:
 		return fmt.Sprintf("BotType(%d)", int(t))
 	}
@@ -233,26 +236,38 @@ type Bot struct {
 // fresh one and Disconnect drops it, so nothing from a prior connection can
 // leak into a successor across disconnect→reconnect races.
 type connection struct {
-	cancel  context.CancelFunc
-	done    chan error    // adapter reports event-loop termination here
-	runDone chan struct{} // closed exactly once when this connection tears down
-	once    sync.Once
-	discErr error // adapter.Disconnect result, recorded once and shared by all callers
-	adapter Adapter
+	cancel   context.CancelFunc
+	done     chan error    // adapter reports event-loop termination here
+	runDone  chan struct{} // closed exactly once when this connection tears down
+	once     sync.Once
+	discOnce sync.Once // scopes adapter.Disconnect to exactly one true teardown
+	discErr  error     // adapter.Disconnect result, recorded once and shared by all true callers
+	adapter  Adapter
 }
 
 // teardown cancels the run context and closes runDone exactly once. It runs the
 // adapter's Disconnect only when disconnectAdapter is true; a superseded
 // connection passes false so it can never disconnect the shared adapter a newer
 // connection now owns.
+//
+// The adapter call sits under its own discOnce, NOT the runDone once: c.cancel
+// wakes adapter ctx-watchers whose deps.Disconnect arrives as a superseded
+// (false) teardown, and if that consumed a shared once first it would swallow
+// the true caller's adapter Disconnect entirely. A false teardown never touches
+// discOnce, while concurrent true callers (b.conn is uninstalled only after
+// teardown returns, so more than one caller can observe itself current)
+// collapse into one adapter Disconnect — the losers block until the winner
+// finishes and share its error via discErr.
 func (c *connection) teardown(disconnectAdapter bool) error {
 	c.cancel()
-	c.once.Do(func() {
-		close(c.runDone)
-		if disconnectAdapter {
-			c.discErr = c.adapter.Disconnect()
-		}
-	})
+	c.once.Do(func() { close(c.runDone) })
+	if !disconnectAdapter {
+		return nil
+	}
+	if c.adapter == nil {
+		return ErrUnknownBotType
+	}
+	c.discOnce.Do(func() { c.discErr = c.adapter.Disconnect() })
 	return c.discErr
 }
 

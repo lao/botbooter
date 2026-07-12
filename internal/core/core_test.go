@@ -25,6 +25,7 @@ func TestBotType_String(t *testing.T) {
 	asserts.Equal(t, TelegramBotType.String(), "telegram", "Telegram string")
 	asserts.Equal(t, WhatsAppBotType.String(), "whatsapp", "WhatsApp string")
 	asserts.Equal(t, TeamsBotType.String(), "teams", "Teams string")
+	asserts.Equal(t, GitHubBotType.String(), "github", "GitHub string")
 	asserts.Equal(t, BotType(999).String(), "BotType(999)", "unknown string")
 }
 
@@ -323,6 +324,17 @@ func TestBot_GetAttachments_UnknownBotType(t *testing.T) {
 
 	asserts.ErrorIs(t, err, ErrUnknownBotType, "GetAttachments with unknown bot type")
 	asserts.Equal(t, len(attachments), 0, "Attachments should be empty for unknown bot type")
+}
+
+// teardown's adapter-nil branch is defensive (Connect never installs a
+// connection without an adapter), so exercise it directly.
+func TestConnection_TeardownNilAdapter(t *testing.T) {
+	_, cancel := context.WithCancel(context.Background())
+	c := &connection{cancel: cancel, runDone: make(chan struct{})}
+
+	err := c.teardown(true)
+
+	asserts.ErrorIs(t, err, ErrUnknownBotType, "teardown with no adapter")
 }
 
 func TestBot_GetAttachments_NilMessage(t *testing.T) {

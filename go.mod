@@ -2,10 +2,16 @@ module github.com/lao/botbooter
 
 go 1.25.0
 
+// Pinned to the latest 1.25 patch release so CI (setup-go reads this file) and
+// govulncheck run against a stdlib with all published fixes applied.
+toolchain go1.25.11
+
 require (
+	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/bwmarrin/discordgo v0.27.1
 	github.com/go-telegram/bot v1.21.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/go-github/v88 v88.0.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/slack-go/slack v0.12.1
 	go.mau.fi/whatsmeow v0.0.0-20260622185415-5f04eac6dbbb
@@ -19,6 +25,8 @@ require (
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elliotchance/orderedmap/v3 v3.1.0 // indirect
+	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
+	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

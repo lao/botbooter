@@ -43,6 +43,17 @@ func TestIsolationDeps(t *testing.T) {
 		// full versioned module path matches the other constants and how
 		// `go list -deps` emits it.
 		jwtv5 = "github.com/golang-jwt/jwt/v5"
+		// gogithubSDK and ghinstall are version-agnostic substrings: go-github
+		// cuts majors often (currently v88) and ghinstallation pins its own
+		// go-github major, so a fully versioned path would miss a future bump.
+		gogithubSDK = "github.com/google/go-github"
+		ghinstall   = "github.com/bradleyfalzon/ghinstallation"
+		// jwtv4 is what ghinstallation (v2.19.0) actually pulls in — confirmed via
+		// `go mod graph` — not jwtv5. It is a different major than Teams' jwtv5
+		// and the two must never be confused: the github row expects jwtv4 present
+		// and jwtv5 absent, and every other row asserts jwtv4 absent so a direct
+		// jwt/v4 import cannot sneak into a non-github closure.
+		jwtv4 = "github.com/golang-jwt/jwt/v4"
 		// The whatsmeow WhatsApp flavor's stack (the whatsmeow SDK and its pure-Go
 		// SQLite session store) must stay confined to whatsapp/whatsmeow — in
 		// particular it must never leak into the Cloud API flavor, whose selling
@@ -55,21 +66,24 @@ func TestIsolationDeps(t *testing.T) {
 	// also assert directly on the first-party internal/<platform> build paths:
 	// each public package must contain only its own platform's internal package.
 	const internalBase = "github.com/lao/botbooter/internal/"
-	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp/cloud", "whatsapp/whatsmeow", "teams"}
+	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp/cloud", "whatsapp/whatsmeow", "teams", "github"}
 	cases := []struct {
 		pkg         string
 		absent      []string
 		present     []string
 		internalOwn string // the one internal/<platform> its closure may contain ("" = none)
 	}{
-		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite}, nil, ""},
-		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite}, nil, "cli"},
-		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite}, []string{slackgo}, "slack"},
-		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite}, []string{discordgo}, "discord"},
-		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5, whatsmeowSDK, moderncSQLite}, []string{gotelegram}, "telegram"},
-		{"github.com/lao/botbooter/whatsapp/cloud", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite}, nil, "whatsapp/cloud"},
-		{"github.com/lao/botbooter/whatsapp/whatsmeow", []string{discordgo, slackgo, gotelegram, jwtv5}, []string{whatsmeowSDK, moderncSQLite}, "whatsapp/whatsmeow"},
-		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram, whatsmeowSDK, moderncSQLite}, []string{jwtv5}, "teams"},
+		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, nil, ""},
+		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, nil, "cli"},
+		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{slackgo}, "slack"},
+		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{discordgo}, "discord"},
+		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{gotelegram}, "telegram"},
+		{"github.com/lao/botbooter/whatsapp/cloud", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, nil, "whatsapp/cloud"},
+		{"github.com/lao/botbooter/whatsapp/whatsmeow", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4}, []string{whatsmeowSDK, moderncSQLite}, "whatsapp/whatsmeow"},
+		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{jwtv5}, "teams"},
+		// The github row's closure legitimately contains jwtv4 (pulled in by
+		// ghinstallation) but must not contain jwtv5, which is Teams' own major.
+		{"github.com/lao/botbooter/github", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite}, []string{gogithubSDK, ghinstall, jwtv4}, "github"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.pkg, func(t *testing.T) {
