@@ -51,7 +51,7 @@ var ErrAmbiguousAuth = errors.New("github: configure either Token or AppID/Insta
 
 // ErrBadReactionConfig is returned by New when a reaction-polling Config field
 // is malformed: a ReactionPollRepos entry that is not "owner/name", or a
-// negative ReactionPollInterval or ReactionLookback.
+// negative ReactionPollInterval.
 var ErrBadReactionConfig = errors.New("github: invalid reaction polling config")
 
 // Config configures a GitHub bot. Exactly one auth mode must be set: Token
@@ -100,17 +100,10 @@ type Config struct {
 	ReactionPollRepos []string
 	// ReactionPollInterval is the delay between reaction poll cycles; it
 	// defaults to 30 seconds and is also the reaction delivery latency.
+	// Reaction dedup across cycles is in-process only: a restart forgets what
+	// was handled, and only reactions added while connected are dispatched, so
+	// reactions added while the bot was down are missed.
 	ReactionPollInterval time.Duration
-	// ReactionStore dedups reactions across poll cycles; it defaults to an
-	// in-process store, so a restart forgets what was already handled. Provide
-	// a persistent implementation together with ReactionLookback to catch
-	// reactions added while the bot was down.
-	ReactionStore ReactionStore
-	// ReactionLookback widens the dispatch window: a reaction is dispatched
-	// only if the store has not seen it and it was created after (connect time
-	// - ReactionLookback). The zero default dispatches only reactions added
-	// while connected.
-	ReactionLookback time.Duration
 }
 
 type adapter struct {
@@ -119,6 +112,10 @@ type adapter struct {
 	// pollRepos is cfg.ReactionPollRepos parsed once at New; empty means
 	// reaction polling is disabled and Connect starts no poller.
 	pollRepos []repoRef
+	// reactions dedups polled reactions across cycles. Allocated at New only
+	// when polling is on, and shared across reconnects on purpose: a reaction
+	// handled before a reconnect is not re-dispatched after it.
+	reactions *reactionStore
 
 	mu sync.Mutex
 	// selfID identifies the bot's own account for reply-loop prevention in
@@ -217,16 +214,11 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.ReactionPollInterval < 0 || cfg.ReactionLookback < 0 {
-		return nil, fmt.Errorf("%w: ReactionPollInterval and ReactionLookback must not be negative", ErrBadReactionConfig)
+	if cfg.ReactionPollInterval < 0 {
+		return nil, fmt.Errorf("%w: ReactionPollInterval must not be negative", ErrBadReactionConfig)
 	}
 	if cfg.ReactionPollInterval == 0 {
 		cfg.ReactionPollInterval = defaultReactionPollInterval
-	}
-	// The store outlives connections on purpose: a reconnect keeps its seen
-	// set, so reactions handled before the reconnect are not re-dispatched.
-	if cfg.ReactionStore == nil && len(pollRepos) > 0 {
-		cfg.ReactionStore = newMemoryReactionStore()
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -239,6 +231,9 @@ func newAdapter(cfg Config) (*adapter, error) {
 	}
 
 	a := &adapter{cfg: cfg, pollRepos: pollRepos}
+	if len(pollRepos) > 0 {
+		a.reactions = newReactionStore()
+	}
 	if patMode {
 		client, err := gogithub.NewClient(
 			gogithub.WithHTTPClient(cfg.HTTPClient),

@@ -196,3 +196,9 @@ REST API (override `client.BaseURL`); `asserts` style; race-clean. Cases:
    (snapshot at Connect), and the GitHub adapter starts no poller — and spends
    no API requests — when it is false, even with `ReactionPollRepos` set. This
    supersedes the original "No `core` diff" success criterion.
+6. (2026-07-21) Reaction dedup is in-memory only for v1: the pluggable
+   `ReactionStore` interface and `Config.ReactionStore`/`Config.ReactionLookback`
+   are dropped in favor of an unexported in-process store hardwired at `New`.
+   Lookback goes with the store — without persistence it only replays recent
+   reactions on every restart. This supersedes the store/lookback design above;
+   re-introduce the seam if a persistent-store consumer ever materializes.

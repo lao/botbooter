@@ -472,13 +472,12 @@ bot, err := github.New(github.Config{
 
 Optional `github.Config` fields: `Path` (webhook route, default `/webhook`),
 `HTTPClient` (the outbound API client; defaults to a 30-second timeout), and the
-reaction-polling group — `ReactionPollRepos` (opt-in; empty disables polling,
+reaction-polling pair — `ReactionPollRepos` (opt-in; empty disables polling,
 and the poller only starts when an `OnReaction` handler is registered before
-the bot connects),
-`ReactionPollInterval` (default 30s), `ReactionStore` (dedup across cycles;
-default in-process) and `ReactionLookback` (widens the dispatch window for
-persistent stores). See the reactions example and CLAUDE.md for the polling
-contract.
+the bot connects) and `ReactionPollInterval` (default 30s). Reaction dedup is
+in-process only, and only reactions added while the bot is connected are
+dispatched — reactions added while it was down are missed. See the reactions
+example and CLAUDE.md for the polling contract.
 
 #### Step 3, Expose the local server
 

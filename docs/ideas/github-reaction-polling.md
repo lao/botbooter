@@ -17,6 +17,8 @@ optional-capability path every other reaction-bearing adapter uses.
 > Superseded in part (2026-07-21): the poller additionally requires an `OnReaction`
 > handler registered before connect, which did add a small `core` seam
 > (`AdapterDeps.HasReactionHandlers`) — see the spec's Resolved Decision 5.
+> Also superseded (2026-07-21): the pluggable `ReactionStore` + `ReactionLookback`
+> below shipped as an unexported in-memory store only — see Resolved Decision 6.
 
 ```go
 // Config additions

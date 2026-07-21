@@ -3,7 +3,6 @@ package github
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -96,36 +95,11 @@ func testReaction(id int64, content string, userID int64, userType string, creat
 	}
 }
 
-// recordingStore is a ReactionStore that logs MarkSeen calls and can be forced
-// to fail.
-type recordingStore struct {
-	mu    sync.Mutex
-	calls []int64
-	seen  map[int64]struct{}
-	err   error
-}
-
-func (s *recordingStore) MarkSeen(_ context.Context, id int64) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls = append(s.calls, id)
-	if s.err != nil {
-		return false, s.err
-	}
-	if s.seen == nil {
-		s.seen = make(map[int64]struct{})
-	}
-	if _, ok := s.seen[id]; ok {
-		return false, nil
-	}
-	s.seen[id] = struct{}{}
-	return true, nil
-}
-
-func (s *recordingStore) callCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.calls)
+// storeSize reports how many reaction IDs the adapter's dedup store holds.
+func storeSize(a *adapter) int {
+	a.reactions.mu.Lock()
+	defer a.reactions.mu.Unlock()
+	return len(a.reactions.seen)
 }
 
 func pollConfig() Config {
@@ -189,7 +163,6 @@ func TestNewAdapter_ReactionConfigValidation(t *testing.T) {
 		{"EmptyName", func(c *Config) { c.ReactionPollRepos = []string{"lao/"} }},
 		{"ExtraSlash", func(c *Config) { c.ReactionPollRepos = []string{"lao/botbooter/extra"} }},
 		{"NegativeInterval", func(c *Config) { c.ReactionPollInterval = -time.Second }},
-		{"NegativeLookback", func(c *Config) { c.ReactionLookback = -time.Second }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,7 +178,7 @@ func TestNewAdapter_ReactionDefaults(t *testing.T) {
 	a, err := newAdapter(pollConfig())
 	asserts.NoError(t, err, "valid poll config")
 	asserts.Equal(t, a.cfg.ReactionPollInterval, defaultReactionPollInterval, "default interval")
-	asserts.NotNil(t, a.cfg.ReactionStore, "default in-memory store when polling is on")
+	asserts.True(t, a.reactions != nil, "in-memory store allocated when polling is on")
 	asserts.Equal(t, len(a.pollRepos), 1, "one parsed repo")
 	asserts.Equal(t, a.pollRepos[0], testRepo, "parsed owner/name")
 }
@@ -228,7 +201,7 @@ func TestNewAdapter_NoPollingByDefault(t *testing.T) {
 	a, err := newAdapter(patConfig())
 	asserts.NoError(t, err, "plain config")
 	asserts.Equal(t, len(a.pollRepos), 0, "no poll repos")
-	asserts.True(t, a.cfg.ReactionStore == nil, "no store allocated when polling is off")
+	asserts.True(t, a.reactions == nil, "no store allocated when polling is off")
 }
 
 func TestPollRepoOnce_DispatchesNewReaction(t *testing.T) {
@@ -276,10 +249,7 @@ func TestPollRepoOnce_CutoffSkipsAndSparesStore(t *testing.T) {
 	}
 	srv := httptest.NewServer(api.handler(t))
 	defer srv.Close()
-	store := &recordingStore{}
-	cfg := pollConfig()
-	cfg.ReactionStore = store
-	a := pollAdapter(t, cfg, srv)
+	a := pollAdapter(t, pollConfig(), srv)
 
 	var mu sync.Mutex
 	var got []*core.Reaction
@@ -292,7 +262,7 @@ func TestPollRepoOnce_CutoffSkipsAndSparesStore(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "pre-cutoff reaction not dispatched")
-	asserts.Equal(t, store.callCount(), 0, "pre-cutoff reaction never reaches the store")
+	asserts.Equal(t, storeSize(a), 0, "pre-cutoff reaction never enters the store")
 }
 
 func TestPollRepoOnce_SeenReactionNotRedispatched(t *testing.T) {
@@ -375,34 +345,6 @@ func TestPollRepoOnce_BotAndSelfReactorsDropped(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "bot-type and self reactors are dropped")
-}
-
-// A failing store skips its reaction conservatively: a reaction the store may
-// already know must not risk a second reply.
-func TestPollRepoOnce_StoreErrorSkipsDispatch(t *testing.T) {
-	api := &fakeAPI{
-		comments:  []*gogithub.IssueComment{testComment(9001, 42, 1)},
-		reactions: map[int64][]*gogithub.Reaction{9001: {testReaction(1, "+1", 42, "User", time.Now())}},
-	}
-	srv := httptest.NewServer(api.handler(t))
-	defer srv.Close()
-	store := &recordingStore{err: errors.New("store down")}
-	cfg := pollConfig()
-	cfg.ReactionStore = store
-	a := pollAdapter(t, cfg, srv)
-
-	var mu sync.Mutex
-	var got []*core.Reaction
-	err := a.pollRepoOnce(context.Background(), context.Background(),
-		reactionCaptureDeps(&mu, &got, nil), testRepo,
-		map[int64]int{}, map[int64]int{}, time.Now().Add(-time.Hour))
-	asserts.NoError(t, err, "a store failure is logged, not a cycle error")
-	drainInflight(t, a)
-
-	mu.Lock()
-	defer mu.Unlock()
-	asserts.Equal(t, len(got), 0, "reaction skipped on store error")
-	asserts.Equal(t, store.callCount(), 1, "store was consulted")
 }
 
 // A comment whose reactions failed to list must be retried next cycle: its
@@ -567,14 +509,15 @@ func TestPollReactions_SurvivesErrorsAndStopsOnCancel(t *testing.T) {
 // through deps, and dies with the run context.
 func TestConnect_StartsReactionPoller(t *testing.T) {
 	api := &fakeAPI{
-		comments:  []*gogithub.IssueComment{testComment(9001, 42, 1)},
-		reactions: map[int64][]*gogithub.Reaction{9001: {testReaction(1, "hooray", 42, "User", time.Now())}},
+		comments: []*gogithub.IssueComment{testComment(9001, 42, 1)},
+		// Created in the future so the fixture cannot predate the connect-time
+		// cutoff by the nanoseconds between now and Connect below.
+		reactions: map[int64][]*gogithub.Reaction{9001: {testReaction(1, "hooray", 42, "User", time.Now().Add(time.Hour))}},
 	}
 	srv := httptest.NewServer(api.handler(t))
 	defer srv.Close()
 	cfg := pollConfig()
 	cfg.ReactionPollInterval = 5 * time.Millisecond
-	cfg.ReactionLookback = time.Hour // the fixture reaction predates Connect by nanoseconds
 	a := pollAdapter(t, cfg, srv)
 
 	var mu sync.Mutex

@@ -26,37 +26,32 @@ const (
 	reactionsPerComment = 100
 )
 
-// ReactionStore records which reaction IDs a bot has already handled, so a
-// poll cycle dispatches each reaction at most once. MarkSeen is an atomic
-// check-and-set: it records id and reports whether it was fresh (unseen until
-// now). Implementations must be safe for concurrent use. Reaction IDs are
-// globally unique across GitHub, so one store serves all polled repositories.
-// The default store is in-process; provide a persistent implementation
-// (together with Config.ReactionLookback) to survive restarts.
-type ReactionStore interface {
-	MarkSeen(ctx context.Context, id int64) (fresh bool, err error)
-}
-
-// memoryReactionStore is the default in-process ReactionStore. Its seen set
-// grows one int64 per dispatched reaction and is never pruned — negligible at
-// poller rates, and the cutoff keeps pre-connect history out entirely.
-type memoryReactionStore struct {
+// reactionStore records which reaction IDs the bot has already handled, so a
+// poll cycle dispatches each reaction at most once. It is in-process only (a
+// restart forgets what was handled; the connect-time cutoff is what prevents
+// replay). Its seen set grows one int64 per dispatched reaction and is never
+// pruned — negligible at poller rates, and the cutoff keeps pre-connect
+// history out entirely. Reaction IDs are globally unique across GitHub, so
+// one store serves all polled repositories.
+type reactionStore struct {
 	mu   sync.Mutex
 	seen map[int64]struct{}
 }
 
-func newMemoryReactionStore() *memoryReactionStore {
-	return &memoryReactionStore{seen: make(map[int64]struct{})}
+func newReactionStore() *reactionStore {
+	return &reactionStore{seen: make(map[int64]struct{})}
 }
 
-func (s *memoryReactionStore) MarkSeen(_ context.Context, id int64) (bool, error) {
+// markSeen is an atomic check-and-set: it records id and reports whether it
+// was fresh (unseen until now).
+func (s *reactionStore) markSeen(id int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.seen[id]; ok {
-		return false, nil
+		return false
 	}
 	s.seen[id] = struct{}{}
-	return true, nil
+	return true
 }
 
 // reactionEmoji maps the REST API's reaction content names to the unicode
@@ -214,8 +209,7 @@ func (a *adapter) pollRepoOnce(ctx, dispatchCtx context.Context, deps core.Adapt
 }
 
 // dispatchCommentReactions lists one comment's reactions and dispatches the
-// ones not yet handled. A failing store skips its reaction conservatively: not
-// dispatching a reaction the store may already know beats replying to it twice.
+// ones not yet handled.
 func (a *adapter) dispatchCommentReactions(ctx, dispatchCtx context.Context, deps core.AdapterDeps, repo repoRef, comment *gogithub.IssueComment, cutoff time.Time) error {
 	issue, err := issueNumber(comment)
 	if err != nil {
@@ -228,7 +222,7 @@ func (a *adapter) dispatchCommentReactions(ctx, dispatchCtx context.Context, dep
 	}
 	for _, reaction := range reactions {
 		// Cutoff first, store second: reactions from before the window are
-		// never inserted into the store, which keeps persistent stores from
+		// never inserted into the store, which keeps its seen set from
 		// accumulating history the cutoff already excludes.
 		if !reaction.GetCreatedAt().After(cutoff) {
 			continue
@@ -236,12 +230,7 @@ func (a *adapter) dispatchCommentReactions(ctx, dispatchCtx context.Context, dep
 		if a.isSelfOrBotUser(reaction.GetUser()) {
 			continue
 		}
-		fresh, err := a.cfg.ReactionStore.MarkSeen(ctx, reaction.GetID())
-		if err != nil {
-			a.log().Warn("github: reaction store MarkSeen failed; skipping reaction", "reaction_id", reaction.GetID(), "error", err)
-			continue
-		}
-		if !fresh {
+		if !a.reactions.markSeen(reaction.GetID()) {
 			continue
 		}
 		r := toReaction(repo, issue, comment, reaction)

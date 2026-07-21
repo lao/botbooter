@@ -29,11 +29,6 @@ type Message = githubint.Message
 // [Config].ReactionPollRepos is set.
 type ReactionPayload = githubint.ReactionPayload
 
-// ReactionStore dedups polled reactions across cycles; see
-// [Config].ReactionStore. The default is in-process — provide a persistent
-// implementation (with [Config].ReactionLookback) to survive restarts.
-type ReactionStore = githubint.ReactionStore
-
 // ErrMissingConfig is returned by [New] when a required [Config] field is empty.
 var ErrMissingConfig = githubint.ErrMissingConfig
 
@@ -46,7 +41,7 @@ var ErrBadChannelID = githubint.ErrBadChannelID
 
 // ErrBadReactionConfig is returned by [New] when a reaction-polling [Config]
 // field is malformed: a ReactionPollRepos entry that is not "owner/name", or a
-// negative ReactionPollInterval or ReactionLookback.
+// negative ReactionPollInterval.
 var ErrBadReactionConfig = githubint.ErrBadReactionConfig
 
 // New creates a GitHub bot. It runs an inbound webhook HTTP server at cfg.Addr,

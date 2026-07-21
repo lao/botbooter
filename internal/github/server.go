@@ -136,8 +136,8 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 
 	// Snapshot the reaction cutoff now, not when the poller goroutine starts:
 	// the poller waits behind self-identity resolution (a GitHub round-trip),
-	// and the documented contract is "connect time - ReactionLookback".
-	reactionCutoff := time.Now().Add(-a.cfg.ReactionLookback)
+	// and the documented contract is "only reactions added while connected".
+	reactionCutoff := time.Now()
 
 	go func() {
 		// Self-identity resolves here, off the Connect path: adapter.Connect
