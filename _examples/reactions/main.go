@@ -146,6 +146,55 @@ func splitRepos(env string) []string {
 	return repos
 }
 
+// newGitHubBot wires the GITHUB_* environment into github.Config. It is the
+// one platform whose setup outgrew its switch case: reaction polling is
+// opt-in (GITHUB_REPO) with its own interval knobs, and auth is either a PAT
+// (GITHUB_TOKEN) or an App key triple (GITHUB_PRIVATE_KEY_FILE et al).
+func newGitHubBot() (*botbooter.Bot, error) {
+	cfg := github.Config{
+		Token:         os.Getenv("GITHUB_TOKEN"),
+		WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		Addr:          os.Getenv("GITHUB_ADDR"),
+		Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
+	}
+	// GitHub has no reaction webhook; the adapter polls instead, opt-in per
+	// repository. Without any repo in GITHUB_REPO the bot still echoes,
+	// but OnReaction never fires.
+	cfg.ReactionPollRepos = splitRepos(os.Getenv("GITHUB_REPO"))
+	if len(cfg.ReactionPollRepos) > 0 {
+		if s := os.Getenv("GITHUB_POLL_SECONDS"); s != "" {
+			n, err := strconv.Atoi(s)
+			if err != nil || n <= 0 {
+				return nil, fmt.Errorf("parse GITHUB_POLL_SECONDS %q", s)
+			}
+			cfg.ReactionPollInterval = time.Duration(n) * time.Second
+		}
+		noAuto, err := autoIntervalDisabled(os.Getenv("GITHUB_POLL_AUTO_INTERVAL"))
+		if err != nil {
+			return nil, err
+		}
+		cfg.ReactionPollNoAutoInterval = noAuto
+	} else {
+		fmt.Fprintln(os.Stderr, "note: set GITHUB_REPO (comma-separated \"owner/name\" or \"owner/*\" entries) to poll for reactions; without it OnReaction never fires.")
+	}
+	if keyFile := os.Getenv("GITHUB_PRIVATE_KEY_FILE"); keyFile != "" {
+		key, err := os.ReadFile(keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read GITHUB_PRIVATE_KEY_FILE: %w", err)
+		}
+		appID, err := strconv.ParseInt(os.Getenv("GITHUB_APP_ID"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse GITHUB_APP_ID: %w", err)
+		}
+		installationID, err := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse GITHUB_INSTALLATION_ID: %w", err)
+		}
+		cfg.AppID, cfg.InstallationID, cfg.PrivateKey = appID, installationID, key
+	}
+	return github.New(cfg)
+}
+
 // autoIntervalDisabled parses GITHUB_POLL_AUTO_INTERVAL. Unset means the
 // default: let the adapter raise the poll interval automatically when the repo
 // count would exceed its API request budget. "off" disables that (the adapter
@@ -197,48 +246,7 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Path:        os.Getenv("TEAMS_PATH"), // optional; defaults to /api/messages
 		})
 	case "github":
-		cfg := github.Config{
-			Token:         os.Getenv("GITHUB_TOKEN"),
-			WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
-			Addr:          os.Getenv("GITHUB_ADDR"),
-			Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
-		}
-		// GitHub has no reaction webhook; the adapter polls instead, opt-in per
-		// repository. Without any repo in GITHUB_REPO the bot still echoes,
-		// but OnReaction never fires.
-		cfg.ReactionPollRepos = splitRepos(os.Getenv("GITHUB_REPO"))
-		if len(cfg.ReactionPollRepos) > 0 {
-			if s := os.Getenv("GITHUB_POLL_SECONDS"); s != "" {
-				n, err := strconv.Atoi(s)
-				if err != nil || n <= 0 {
-					return nil, fmt.Errorf("parse GITHUB_POLL_SECONDS %q", s)
-				}
-				cfg.ReactionPollInterval = time.Duration(n) * time.Second
-			}
-			noAuto, err := autoIntervalDisabled(os.Getenv("GITHUB_POLL_AUTO_INTERVAL"))
-			if err != nil {
-				return nil, err
-			}
-			cfg.ReactionPollNoAutoInterval = noAuto
-		} else {
-			fmt.Fprintln(os.Stderr, "note: set GITHUB_REPO (comma-separated \"owner/name\" or \"owner/*\" entries) to poll for reactions; without it OnReaction never fires.")
-		}
-		if keyFile := os.Getenv("GITHUB_PRIVATE_KEY_FILE"); keyFile != "" {
-			key, err := os.ReadFile(keyFile)
-			if err != nil {
-				return nil, fmt.Errorf("read GITHUB_PRIVATE_KEY_FILE: %w", err)
-			}
-			appID, err := strconv.ParseInt(os.Getenv("GITHUB_APP_ID"), 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse GITHUB_APP_ID: %w", err)
-			}
-			installationID, err := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse GITHUB_INSTALLATION_ID: %w", err)
-			}
-			cfg.AppID, cfg.InstallationID, cfg.PrivateKey = appID, installationID, key
-		}
-		return github.New(cfg)
+		return newGitHubBot()
 	case "cli":
 		fmt.Fprintln(os.Stderr, "CLI has no reactions; run with slack, discord, telegram, whatsapp or whatsmeow to see OnReaction fire.")
 		return cli.New(os.Stdin, os.Stdout), nil
