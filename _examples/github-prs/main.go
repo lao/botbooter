@@ -25,8 +25,9 @@
 // sees) — skipping archived ones, which cannot receive new PRs.
 //
 // The watch itself is one Search API query per cycle regardless of repo count
-// (GITHUB_PR_POLL_SECONDS, default 30): "is:pr created:>=<cutoff>" scoped by
-// user:/org: qualifiers built from the discovered owners. Search tokens are
+// (GITHUB_PR_POLL_SECONDS, default 30), paginated only when a cycle's window
+// overflows one page: "is:pr created:>=<cutoff>" scoped by user:/org:
+// qualifiers built from the discovered owners. Search tokens are
 // NOT scoped to what the credentials can reach (an installation token searches
 // all of GitHub), so results are also filtered against the discovered repo
 // set; that filter is what keeps a user:-qualifier match on a non-granted repo
@@ -114,7 +115,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	scope, err := resolveScope(ctx, bot)
+	// Bound discovery so a stalled network call fails the startup instead of
+	// hanging it; the watch loop bounds its own cycles the same way.
+	discCtx, discCancel := context.WithTimeout(ctx, time.Minute)
+	scope, err := resolveScope(discCtx, bot)
+	discCancel()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -158,34 +163,46 @@ func watchPullRequests(ctx context.Context, bot *botbooter.Bot, scope watchScope
 		if cutoff.Before(since) {
 			cutoff = since
 		}
+		// Bound the cycle by the poll interval so one stalled network call
+		// cannot block the loop indefinitely; whatever it cut off is re-found
+		// next cycle through the searchLag overlap.
+		cycleCtx, cancel := context.WithTimeout(ctx, every)
 		for _, qualifier := range scope.qualifiers {
 			query := fmt.Sprintf("is:pr created:>=%s %s", cutoff.UTC().Format("2006-01-02T15:04:05Z"), qualifier)
-			res, _, err := client.Search.Issues(ctx, query, &gogithub.SearchOptions{
+			opts := &gogithub.SearchOptions{
 				Sort:        "created",
 				Order:       "desc",
 				ListOptions: gogithub.ListOptions{PerPage: 50},
-			})
-			if err != nil {
-				log.Printf("search pull requests: %v", err)
-				continue
 			}
-
-			for _, pr := range res.Issues {
-				repo := strings.TrimPrefix(pr.GetRepositoryURL(), "https://api.github.com/repos/")
-				channel := repo + "#" + strconv.Itoa(pr.GetNumber())
-				if !scope.allowed[repo] || welcomed[channel] || pr.GetUser().GetType() == "Bot" {
-					continue
+			for {
+				res, resp, err := client.Search.Issues(cycleCtx, query, opts)
+				if err != nil {
+					log.Printf("search pull requests: %v", err)
+					break
 				}
-				welcomed[channel] = true
 
-				log.Printf("new PR %s by %s: %q", channel, pr.GetUser().GetLogin(), pr.GetTitle())
-				welcome := fmt.Sprintf("👋 Thanks for opening this pull request, @%s! Someone will review it soon. (Reply `echo <text>` to test the comment bot.)", pr.GetUser().GetLogin())
-				if err := bot.SendMessageContext(ctx, channel, welcome); err != nil {
-					log.Printf("failed to welcome PR %s: %v", channel, err)
-					delete(welcomed, channel) // retry next cycle
+				for _, pr := range res.Issues {
+					repo := strings.TrimPrefix(pr.GetRepositoryURL(), "https://api.github.com/repos/")
+					channel := repo + "#" + strconv.Itoa(pr.GetNumber())
+					if !scope.allowed[repo] || welcomed[channel] || pr.GetUser().GetType() == "Bot" {
+						continue
+					}
+					welcomed[channel] = true
+
+					log.Printf("new PR %s by %s: %q", channel, pr.GetUser().GetLogin(), pr.GetTitle())
+					welcome := fmt.Sprintf("👋 Thanks for opening this pull request, @%s! Someone will review it soon. (Reply `echo <text>` to test the comment bot.)", pr.GetUser().GetLogin())
+					if err := bot.SendMessageContext(cycleCtx, channel, welcome); err != nil {
+						log.Printf("failed to welcome PR %s: %v", channel, err)
+						delete(welcomed, channel) // retry next cycle
+					}
 				}
+				if resp.NextPage == 0 {
+					break
+				}
+				opts.Page = resp.NextPage
 			}
 		}
+		cancel()
 	}
 }
 

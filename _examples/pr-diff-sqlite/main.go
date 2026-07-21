@@ -129,17 +129,22 @@ func watch(ctx context.Context, client *gogithub.Client, db *sql.DB, owner, name
 		case <-ticker.C:
 		}
 
-		for _, pr := range newPullRequests(ctx, client, owner, name, since) {
+		// Bound the cycle by the poll interval so one stalled network or DB
+		// call cannot block the loop indefinitely; a cut-off archive is
+		// retried next cycle like any other failed fetch.
+		cycleCtx, cancel := context.WithTimeout(ctx, every)
+		for _, pr := range newPullRequests(cycleCtx, client, owner, name, since) {
 			if pr.GetDraft() || archived[pr.GetNumber()] {
 				continue
 			}
-			if err := archive(ctx, client, db, owner, name, pr); err != nil {
+			if err := archive(cycleCtx, client, db, owner, name, pr); err != nil {
 				log.Printf("archive %s/%s#%d: %v", owner, name, pr.GetNumber(), err)
 				continue
 			}
 			archived[pr.GetNumber()] = true
 			log.Printf("archived %s/%s#%d %q by %s", owner, name, pr.GetNumber(), pr.GetTitle(), pr.GetUser().GetLogin())
 		}
+		cancel()
 	}
 }
 
