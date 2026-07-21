@@ -176,7 +176,8 @@ REST API (override `client.BaseURL`); `asserts` style; race-clean. Cases:
       `bot.OnReaction` within one poll interval (proven by hermetic test).
 - [ ] Zero-config `github.New` behavior byte-identical to today (no poller goroutine).
 - [ ] Steady-state API cost: 1 list call per repo per cycle when no counts changed.
-- [ ] No `core` diff; no new module requirements; isolation tests untouched and green.
+- [ ] No `core` diff; no new module requirements; isolation tests updated for the
+      new package's deps and green.
 - [ ] `make all` green (fmt, vet incl. _examples, lint, test-race).
 - [ ] `_examples/reactions github` works with `GITHUB_REPO` set; `_examples/github-reactions` removed.
 - [ ] CLAUDE.md reactions paragraph updated (GitHub: polled, opt-in, added-only).
@@ -190,3 +191,8 @@ REST API (override `client.BaseURL`); `asserts` style; race-clean. Cases:
 3. Typed Raw carrier is named `ReactionPayload`.
 4. Verified: go-github v88 `Reaction` carries `CreatedAt *Timestamp` — the cutoff
    design is implementable as specced.
+5. (2026-07-21) The poller additionally requires an `OnReaction` handler
+   registered before connect: `core.AdapterDeps` gained `HasReactionHandlers`
+   (snapshot at Connect), and the GitHub adapter starts no poller — and spends
+   no API requests — when it is false, even with `ReactionPollRepos` set. This
+   supersedes the original "No `core` diff" success criterion.

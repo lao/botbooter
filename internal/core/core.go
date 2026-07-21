@@ -204,13 +204,19 @@ func resolveSendOptions(opts ...SendOption) SendOptions {
 // AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot,
 // plus the Bot's logger so adapter diagnostics route through the same sink.
 // DispatchReaction is optional: adapters on platforms without reaction events
-// simply never call it.
+// simply never call it. HasReactionHandlers reports whether any OnReaction
+// handler was registered before Connect, so an adapter whose reaction ingress
+// costs something (the GitHub poller pays API requests per cycle) can skip the
+// work nobody consumes; push-based adapters may ignore it — dispatching to
+// zero handlers is free. Handlers registered after Connect do not flip it: the
+// snapshot follows the register-before-Connect contract.
 type AdapterDeps struct {
-	Dispatch         func(ctx context.Context, m *Message)
-	DispatchReaction func(ctx context.Context, r *Reaction)
-	Done             func(err error)
-	Disconnect       func() error
-	Logger           *slog.Logger // always non-nil
+	Dispatch            func(ctx context.Context, m *Message)
+	DispatchReaction    func(ctx context.Context, r *Reaction)
+	HasReactionHandlers bool
+	Done                func(err error)
+	Disconnect          func() error
+	Logger              *slog.Logger // always non-nil
 }
 
 // Bot is the platform-agnostic chat bot. Register handlers and middleware
@@ -316,9 +322,13 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 }
 
 // OnReaction registers h to run whenever a user adds an emoji reaction, on the
-// platforms that surface reaction events (Slack, Discord, Telegram, WhatsApp).
-// Handlers are not regex-matched — branch on Reaction.Emoji inside the handler —
-// and, unlike message dispatch, reactions bypass the Middleware chain.
+// platforms that surface reaction events (Slack, Discord, Telegram, WhatsApp,
+// GitHub). Handlers are not regex-matched — branch on Reaction.Emoji inside the
+// handler — and, unlike message dispatch, reactions bypass the Middleware chain.
+// Register before Connect: adapters whose reaction ingress costs something
+// decide at Connect whether to run it ([AdapterDeps].HasReactionHandlers) — on
+// GitHub, a handler registered only after Connect means no reaction poller
+// starts and OnReaction never fires for that connection.
 func (b *Bot) OnReaction(h ReactionHandler) {
 	b.reactionHandlers = append(b.reactionHandlers, h)
 }
@@ -382,11 +392,12 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// prior connection writes into its own dead channel and never touches the
 	// shared adapter.
 	deps := AdapterDeps{
-		Dispatch:         b.dispatch,
-		DispatchReaction: b.dispatchReaction,
-		Done:             func(err error) { c.done <- err },
-		Disconnect:       func() error { return b.disconnectConn(c) },
-		Logger:           b.log(),
+		Dispatch:            b.dispatch,
+		DispatchReaction:    b.dispatchReaction,
+		HasReactionHandlers: len(b.reactionHandlers) > 0,
+		Done:                func(err error) { c.done <- err },
+		Disconnect:          func() error { return b.disconnectConn(c) },
+		Logger:              b.log(),
 	}
 
 	// adapter.Connect is non-blocking by contract. Holding b.mu across it — and

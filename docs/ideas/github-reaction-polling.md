@@ -14,6 +14,10 @@ Move the polling pattern from `_examples/github-reactions` into `internal/github
 `core` changes: the poller feeds the existing `deps.DispatchReaction` seam, the same
 optional-capability path every other reaction-bearing adapter uses.
 
+> Superseded in part (2026-07-21): the poller additionally requires an `OnReaction`
+> handler registered before connect, which did add a small `core` seam
+> (`AdapterDeps.HasReactionHandlers`) — see the spec's Resolved Decision 5.
+
 ```go
 // Config additions
 ReactionPollRepos    []string      // "owner/name"; empty = no polling (default)

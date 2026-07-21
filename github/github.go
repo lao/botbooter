@@ -3,7 +3,9 @@
 // the adapter receives issue and PR comments over an issue_comment webhook and
 // replies as issue comments through the GitHub REST API. Emoji reactions have
 // no webhook, so OnReaction is fed by an opt-in poller over each
-// Config.ReactionPollRepos entry's newest comments. A GitHub-only binary pulls
+// Config.ReactionPollRepos entry's newest comments; the poller runs only when
+// both repos are listed and an OnReaction handler was registered before the
+// bot connects. A GitHub-only binary pulls
 // in go-github and ghinstallation but never compiles discordgo, slack-go or
 // go-telegram.
 package github

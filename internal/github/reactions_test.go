@@ -142,11 +142,13 @@ func pollAdapter(t *testing.T, cfg Config, srv *httptest.Server) *adapter {
 	return a
 }
 
-// reactionCaptureDeps mirrors captureDeps for the reaction ingress path. The
-// mutex matters: each reaction dispatches on its own goroutine.
+// reactionCaptureDeps mirrors captureDeps for the reaction ingress path,
+// modeling a bot with an OnReaction handler registered (HasReactionHandlers).
+// The mutex matters: each reaction dispatches on its own goroutine.
 func reactionCaptureDeps(mu *sync.Mutex, got *[]*core.Reaction, done chan struct{}) core.AdapterDeps {
 	return core.AdapterDeps{
-		Dispatch: func(context.Context, *core.Message) {},
+		Dispatch:            func(context.Context, *core.Message) {},
+		HasReactionHandlers: true,
 		DispatchReaction: func(_ context.Context, r *core.Reaction) {
 			mu.Lock()
 			*got = append(*got, r)
@@ -590,4 +592,40 @@ func TestConnect_StartsReactionPoller(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	asserts.Equal(t, len(got), 1, "store dedups across the poller's cycles")
+}
+
+// Repos listed but no OnReaction handler registered before Connect: the poller
+// must not start at all — polling costs API requests every cycle, and nobody
+// consumes the dispatches.
+func TestConnect_NoReactionHandlersSkipsPoller(t *testing.T) {
+	api := &fakeAPI{
+		comments:  []*gogithub.IssueComment{testComment(9001, 42, 1)},
+		reactions: map[int64][]*gogithub.Reaction{9001: {testReaction(1, "+1", 42, "User", time.Now())}},
+	}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollInterval = time.Millisecond
+	a := pollAdapter(t, cfg, srv)
+
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		DispatchReaction: func(context.Context, *core.Reaction) {
+			t.Error("poller dispatched with no reaction handler registered")
+		},
+		// HasReactionHandlers deliberately unset: no OnReaction was registered.
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "connect")
+	defer func() { _ = a.Disconnect() }()
+
+	// Identity resolution precedes any poller start; a wrongly-started poller
+	// at a 1ms interval would list comments many times over this window.
+	waitForSelfID(t, a, 777)
+	time.Sleep(20 * time.Millisecond)
+	commentLists, _ := api.counts()
+	asserts.Equal(t, commentLists, 0, "no poll cycle ran without a reaction handler")
 }

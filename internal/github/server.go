@@ -158,10 +158,13 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		}
 		// The reaction poller starts after self-identity resolves so its very
 		// first cycle can filter the bot's own reactions, and only when repos
-		// are configured. It stops with ctx like the teardown watcher below;
+		// are configured AND an OnReaction handler is registered — polling
+		// costs API requests every cycle, so a bot nobody is listening on
+		// must not pay for it. It stops with ctx like the teardown watcher below;
 		// its dispatches ride detachedCtx + inflight, so Disconnect's drain
-		// covers reaction handlers exactly like webhook dispatch.
-		if len(a.pollRepos) > 0 {
+		// covers reaction handlers like webhook dispatch (see pollReactions
+		// for the one caveat).
+		if len(a.pollRepos) > 0 && deps.HasReactionHandlers {
 			go a.pollReactions(ctx, detachedCtx, deps, time.Now().Add(-a.cfg.ReactionLookback))
 		}
 		serve(srv, ln, deps.Done)

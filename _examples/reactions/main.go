@@ -2,8 +2,9 @@
 //
 // Like _examples/basic it runs a SINGLE bot, chosen by the first argument, so the
 // example stays focused on the one thing it shows: a bot.OnReaction handler that
-// fires uniformly across Slack, Discord, Telegram and WhatsApp (both flavors)
-// and replies, threaded under the reacted message, via bot.ReplyToMessage.
+// fires uniformly across Slack, Discord, Telegram, WhatsApp (both flavors) and
+// GitHub (polled, opt-in — see the gotchas below) and replies, threaded under
+// the reacted message, via bot.ReplyToMessage.
 //
 // Like _examples/basic it logs every inbound message (middleware) and every
 // unmatched command, so connectivity can be verified in stages: (1) send any
@@ -40,7 +41,9 @@
 //   - GitHub: the platform sends no webhook for reactions at all (a
 //     long-requested feature GitHub has not shipped), so the adapter polls
 //     instead — an opt-in: set GITHUB_REPO ("owner/name") to poll that repo's
-//     newest issue comments (Config.ReactionPollRepos). Reactions arrive within
+//     newest issue comments (Config.ReactionPollRepos); the poller only starts
+//     when an OnReaction handler is registered before the bot runs (this
+//     example always registers one). Reactions arrive within
 //     the poll interval (GITHUB_POLL_SECONDS, default 30), only for the newest
 //     comments, and only while the bot is running. Without GITHUB_REPO the echo
 //     command works but OnReaction never fires.

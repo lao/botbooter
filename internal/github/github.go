@@ -89,9 +89,13 @@ type Config struct {
 	// ReactionPollRepos lists repositories ("owner/name") whose newest issue
 	// comments are polled for emoji reactions, because GitHub sends no webhook
 	// for them. Empty (the default) disables polling and OnReaction never
-	// fires. Coverage is deliberately partial — only reactions on each repo's
+	// fires. The poller also requires an OnReaction handler registered before
+	// the bot connects — with repos listed but no handler, no poller starts
+	// and no API requests are spent. Coverage is deliberately partial — only reactions on each repo's
 	// newest comments are seen — and each listed repo costs at least one API
-	// request per poll cycle.
+	// request per poll cycle (worst case ~11, when every window comment's
+	// reaction count changed); size ReactionPollInterval against the token's
+	// rate limit when listing many or busy repos.
 	ReactionPollRepos []string
 	// ReactionPollInterval is the delay between reaction poll cycles; it
 	// defaults to 30 seconds and is also the reaction delivery latency.
