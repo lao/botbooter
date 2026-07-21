@@ -210,6 +210,19 @@ func TestNewAdapter_ReactionDefaults(t *testing.T) {
 	asserts.Equal(t, a.pollRepos[0], testRepo, "parsed owner/name")
 }
 
+// Duplicate ReactionPollRepos entries must collapse to one: the store would
+// suppress double dispatch anyway, but each copy would still cost its own API
+// requests every cycle.
+func TestNewAdapter_DuplicatePollReposCollapse(t *testing.T) {
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"lao/botbooter", "lao/botbooter", "lao/other"}
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "duplicates are not a config error")
+	asserts.Equal(t, len(a.pollRepos), 2, "duplicate collapsed")
+	asserts.Equal(t, a.pollRepos[0], testRepo, "first entry kept")
+	asserts.Equal(t, a.pollRepos[1], repoRef{owner: "lao", name: "other"}, "distinct entry kept")
+}
+
 // Zero-config bots must not pay for the feature: no parsed repos, no store.
 func TestNewAdapter_NoPollingByDefault(t *testing.T) {
 	a, err := newAdapter(patConfig())

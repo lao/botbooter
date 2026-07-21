@@ -134,6 +134,11 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.logger = deps.Logger
 	a.mu.Unlock()
 
+	// Snapshot the reaction cutoff now, not when the poller goroutine starts:
+	// the poller waits behind self-identity resolution (a GitHub round-trip),
+	// and the documented contract is "connect time - ReactionLookback".
+	reactionCutoff := time.Now().Add(-a.cfg.ReactionLookback)
+
 	go func() {
 		// Self-identity resolves here, off the Connect path: adapter.Connect
 		// is non-blocking by contract (core holds the bot lock across it), so
@@ -165,7 +170,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		// covers reaction handlers like webhook dispatch (see pollReactions
 		// for the one caveat).
 		if len(a.pollRepos) > 0 && deps.HasReactionHandlers {
-			go a.pollReactions(ctx, detachedCtx, deps, time.Now().Add(-a.cfg.ReactionLookback))
+			go a.pollReactions(ctx, detachedCtx, deps, reactionCutoff)
 		}
 		serve(srv, ln, deps.Done)
 	}()

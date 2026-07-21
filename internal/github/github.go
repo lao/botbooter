@@ -95,7 +95,8 @@ type Config struct {
 	// newest comments are seen — and each listed repo costs at least one API
 	// request per poll cycle (worst case ~11, when every window comment's
 	// reaction count changed); size ReactionPollInterval against the token's
-	// rate limit when listing many or busy repos.
+	// rate limit when listing many or busy repos. Duplicate entries collapse
+	// to one.
 	ReactionPollRepos []string
 	// ReactionPollInterval is the delay between reaction poll cycles; it
 	// defaults to 30 seconds and is also the reaction delivery latency.

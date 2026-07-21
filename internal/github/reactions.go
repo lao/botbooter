@@ -93,14 +93,22 @@ type repoRef struct{ owner, name string }
 func (r repoRef) String() string { return r.owner + "/" + r.name }
 
 // parsePollRepos validates ReactionPollRepos entries into owner/name pairs.
+// Duplicates collapse to one entry: the store would suppress double dispatch
+// anyway, but each copy would still cost its own API requests every cycle.
 func parsePollRepos(entries []string) ([]repoRef, error) {
 	repos := make([]repoRef, 0, len(entries))
+	seen := make(map[repoRef]struct{}, len(entries))
 	for _, entry := range entries {
 		owner, name, ok := strings.Cut(entry, "/")
 		if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 			return nil, fmt.Errorf(`%w: ReactionPollRepos entry %q must be "owner/name"`, ErrBadReactionConfig, entry)
 		}
-		repos = append(repos, repoRef{owner: owner, name: name})
+		ref := repoRef{owner: owner, name: name}
+		if _, dup := seen[ref]; dup {
+			continue
+		}
+		seen[ref] = struct{}{}
+		repos = append(repos, ref)
 	}
 	return repos, nil
 }
