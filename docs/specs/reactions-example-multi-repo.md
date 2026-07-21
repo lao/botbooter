@@ -47,15 +47,19 @@ example adds no validation of its own.
 
 ## Testing Strategy
 
-No example tests exist (examples are exercised by `go vet ./_examples/...` in
-`make all` and by live smoke runs); keep it that way. Library-side list
-handling (multiple repos, duplicate collapse, validation) is already covered
-by `internal/github` tests.
+(Amended after the spec gate: tests were requested.) The parsing lives in a
+pure helper `splitRepos` with a table test in
+`_examples/reactions/main_test.go` (single, list, trim+drop-empties,
+all-empty→nil, unset→nil). `_examples` is its own module, so a new
+`test-examples` Makefile target (mirroring `vet-examples`) runs its tests and
+joins `make all`. Library-side list handling (multiple repos, duplicate
+collapse, validation) is already covered by `internal/github` tests.
 
 ## Boundaries
 
-- Always: `make all` before done; keep the change inside `_examples/reactions`.
-- Ask first: renaming the env var, adding example tests, touching the library.
+- Always: `make all` before done; keep the change inside `_examples/reactions`
+  (plus the `test-examples` Makefile target the amended testing strategy adds).
+- Ask first: renaming the env var, touching the library.
 - Never: change `Config.ReactionPollRepos` semantics; commit secrets from
   `_examples/.env`.
 

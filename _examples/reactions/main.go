@@ -127,6 +127,21 @@ func main() {
 	}
 }
 
+// splitRepos parses GITHUB_REPO's comma-separated "owner/name" entries.
+// Entries are trimmed — the library's format check would accept a leading
+// space as part of the owner and silently poll the wrong repo — and empties
+// dropped, so an all-empty value behaves like an unset variable. Format
+// validation itself is github.New's job (ErrBadReactionConfig).
+func splitRepos(env string) []string {
+	var repos []string
+	for _, repo := range strings.Split(env, ",") {
+		if repo = strings.TrimSpace(repo); repo != "" {
+			repos = append(repos, repo)
+		}
+	}
+	return repos
+}
+
 func requestedBotType(args []string) string {
 	if len(args) > 1 {
 		return strings.ToLower(args[1])
@@ -170,16 +185,9 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
 		}
 		// GitHub has no reaction webhook; the adapter polls instead, opt-in per
-		// repository. GITHUB_REPO takes one or more comma-separated "owner/name"
-		// entries; entries are trimmed here (a leading space would survive the
-		// library's format check as part of the owner) while format errors are
-		// left to github.New's validation. Without any repo the bot still
-		// echoes, but OnReaction never fires.
-		for _, repo := range strings.Split(os.Getenv("GITHUB_REPO"), ",") {
-			if repo = strings.TrimSpace(repo); repo != "" {
-				cfg.ReactionPollRepos = append(cfg.ReactionPollRepos, repo)
-			}
-		}
+		// repository. Without any repo in GITHUB_REPO the bot still echoes,
+		// but OnReaction never fires.
+		cfg.ReactionPollRepos = splitRepos(os.Getenv("GITHUB_REPO"))
 		if len(cfg.ReactionPollRepos) > 0 {
 			if s := os.Getenv("GITHUB_POLL_SECONDS"); s != "" {
 				n, err := strconv.Atoi(s)
