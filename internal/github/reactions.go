@@ -24,6 +24,24 @@ const (
 	// reactionsPerComment caps the reaction listing to one page; a comment
 	// with more reactions than this loses the tail.
 	reactionsPerComment = 100
+
+	// reactionPollBudgetPerHour is the poller's share of the API rate limit:
+	// 3000 of a PAT's 5000 core requests per hour, leaving headroom for
+	// discovery pages, changed-count detail requests (worst case ~11 per repo
+	// per cycle), the bot's own replies and the consumer's other API use via
+	// Client. Steady-state poll cost is one request per repo per cycle, so the
+	// budget caps repos/interval — see effectiveInterval.
+	reactionPollBudgetPerHour = 3000
+
+	// discoveryRefreshCycles is how many poll cycles a wildcard owner's
+	// discovered repo list is reused before it is re-listed, so new
+	// repositories are picked up without paying discovery requests every
+	// cycle.
+	discoveryRefreshCycles = 10
+
+	// reposPerDiscoveryPage is the page size for wildcard repo discovery; 100
+	// is the API maximum, so discovery costs ~1 request per 100 repos.
+	reposPerDiscoveryPage = 100
 )
 
 // reactionStore records which reaction IDs the bot has already handled, so a
@@ -87,16 +105,27 @@ type repoRef struct{ owner, name string }
 
 func (r repoRef) String() string { return r.owner + "/" + r.name }
 
-// parsePollRepos validates ReactionPollRepos entries into owner/name pairs.
-// Duplicates collapse to one entry: the store would suppress double dispatch
-// anyway, but each copy would still cost its own API requests every cycle.
-func parsePollRepos(entries []string) ([]repoRef, error) {
-	repos := make([]repoRef, 0, len(entries))
+// parsePollRepos validates ReactionPollRepos entries into explicit owner/name
+// pairs and wildcard owners ("owner/*" — poll every repo of that owner).
+// Duplicates of either kind collapse to one entry: the store would suppress
+// double dispatch anyway, but each copy would still cost its own API requests
+// every cycle. "*" is only special as the whole name; a name merely containing
+// it stays a literal repo name for the API to reject.
+func parsePollRepos(entries []string) (repos []repoRef, wildcardOwners []string, err error) {
 	seen := make(map[repoRef]struct{}, len(entries))
+	seenOwners := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		owner, name, ok := strings.Cut(entry, "/")
 		if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-			return nil, fmt.Errorf(`%w: ReactionPollRepos entry %q must be "owner/name"`, ErrBadReactionConfig, entry)
+			return nil, nil, fmt.Errorf(`%w: ReactionPollRepos entry %q must be "owner/name" or "owner/*"`, ErrBadReactionConfig, entry)
+		}
+		if name == "*" {
+			if _, dup := seenOwners[owner]; dup {
+				continue
+			}
+			seenOwners[owner] = struct{}{}
+			wildcardOwners = append(wildcardOwners, owner)
+			continue
 		}
 		ref := repoRef{owner: owner, name: name}
 		if _, dup := seen[ref]; dup {
@@ -105,7 +134,162 @@ func parsePollRepos(entries []string) ([]repoRef, error) {
 		seen[ref] = struct{}{}
 		repos = append(repos, ref)
 	}
-	return repos, nil
+	return repos, wildcardOwners, nil
+}
+
+// mergeRepos joins explicit and discovered repos, dropping duplicates so a
+// repo both listed explicitly and matched by a wildcard is polled once.
+func mergeRepos(explicit, discovered []repoRef) []repoRef {
+	out := make([]repoRef, 0, len(explicit)+len(discovered))
+	seen := make(map[repoRef]struct{}, len(explicit)+len(discovered))
+	for _, refs := range [][]repoRef{explicit, discovered} {
+		for _, ref := range refs {
+			if _, dup := seen[ref]; dup {
+				continue
+			}
+			seen[ref] = struct{}{}
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+// effectiveInterval sizes the poll interval against the API request budget.
+// Steady-state cost is one request per repo per cycle, so the smallest
+// budget-fitting interval is repos*3600/budget seconds (rounded up). It
+// returns the interval to poll at and whether the configured interval would
+// exceed the budget (the caller's cue to warn): under budget the configured
+// interval stands; over budget it is raised to fit, unless auto-raising is
+// disabled (Config.ReactionPollNoAutoInterval), in which case the configured
+// interval stands anyway and only the warning remains.
+func effectiveInterval(repos int, configured time.Duration, noAuto bool) (time.Duration, bool) {
+	seconds := (repos*3600 + reactionPollBudgetPerHour - 1) / reactionPollBudgetPerHour
+	minInterval := time.Duration(seconds) * time.Second
+	if minInterval <= configured {
+		return configured, false
+	}
+	if noAuto {
+		return configured, true
+	}
+	return minInterval, true
+}
+
+// budgetState is the (repo count, effective interval) pair the poller last
+// warned about, so the budget warning fires when the situation changes, not
+// every cycle.
+type budgetState struct {
+	repos    int
+	interval time.Duration
+}
+
+// pollInterval returns the interval for the coming cycle and emits the budget
+// warning on transitions: entering the over-budget state, or staying in it
+// with a different repo count or interval. Dropping back under budget resets
+// warned so a later re-entry warns again.
+func (a *adapter) pollInterval(repos int, warned *budgetState) time.Duration {
+	interval, exceeded := effectiveInterval(repos, a.cfg.ReactionPollInterval, a.cfg.ReactionPollNoAutoInterval)
+	if !exceeded {
+		*warned = budgetState{}
+		return interval
+	}
+	state := budgetState{repos: repos, interval: interval}
+	if *warned != state {
+		*warned = state
+		if a.cfg.ReactionPollNoAutoInterval {
+			a.log().Warn("github: reaction polling exceeds the API request budget and automatic interval adjustment is disabled",
+				"repos", repos, "interval", interval, "budget_requests_per_hour", reactionPollBudgetPerHour)
+		} else {
+			a.log().Warn("github: reaction polling would exceed the API request budget; automatically raising the poll interval",
+				"repos", repos, "configured_interval", a.cfg.ReactionPollInterval, "effective_interval", interval)
+		}
+	}
+	return interval
+}
+
+// discoverRepos resolves the wildcard owners into concrete repositories.
+// Archived repos are skipped — reactions are locked on them, so polling would
+// be pure waste. In App mode the installation's repo set (which already
+// scopes what the App can see) is listed once and filtered per owner; in PAT
+// mode each owner is listed directly — the authenticated user's own repos
+// (private included) when the owner is the bot itself, otherwise the owner's
+// public repos.
+func (a *adapter) discoverRepos(ctx context.Context) ([]repoRef, error) {
+	if a.cfg.Token == "" {
+		return a.discoverInstallationRepos(ctx)
+	}
+	var out []repoRef
+	for _, owner := range a.wildcardOwners {
+		repos, err := a.listOwnerRepos(ctx, owner)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, repos...)
+	}
+	return out, nil
+}
+
+func (a *adapter) discoverInstallationRepos(ctx context.Context) ([]repoRef, error) {
+	var out []repoRef
+	page := 1
+	for {
+		list, resp, err := a.client.Apps.ListRepos(ctx, &gogithub.ListOptions{PerPage: reposPerDiscoveryPage, Page: page})
+		if err != nil {
+			return nil, fmt.Errorf("list installation repos: %w", err)
+		}
+		for _, repo := range list.Repositories {
+			if repo.GetArchived() {
+				continue
+			}
+			for _, owner := range a.wildcardOwners {
+				if strings.EqualFold(repo.GetOwner().GetLogin(), owner) {
+					out = append(out, repoRef{owner: repo.GetOwner().GetLogin(), name: repo.GetName()})
+					break
+				}
+			}
+		}
+		if resp.NextPage == 0 {
+			return out, nil
+		}
+		page = resp.NextPage
+	}
+}
+
+func (a *adapter) listOwnerRepos(ctx context.Context, owner string) ([]repoRef, error) {
+	a.mu.Lock()
+	self := a.selfLogin
+	a.mu.Unlock()
+	var out []repoRef
+	page := 1
+	for {
+		var repos []*gogithub.Repository
+		var resp *gogithub.Response
+		var err error
+		if self != "" && strings.EqualFold(owner, self) {
+			// The bot's own repos: /users/{owner}/repos would hide private
+			// ones, so use the authenticated-user listing, owner-affiliated.
+			repos, resp, err = a.client.Repositories.ListByAuthenticatedUser(ctx, &gogithub.RepositoryListByAuthenticatedUserOptions{
+				Affiliation: "owner",
+				ListOptions: gogithub.ListOptions{PerPage: reposPerDiscoveryPage, Page: page},
+			})
+		} else {
+			repos, resp, err = a.client.Repositories.ListByUser(ctx, owner, &gogithub.RepositoryListByUserOptions{
+				ListOptions: gogithub.ListOptions{PerPage: reposPerDiscoveryPage, Page: page},
+			})
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list repos of %s: %w", owner, err)
+		}
+		for _, repo := range repos {
+			if repo.GetArchived() {
+				continue
+			}
+			out = append(out, repoRef{owner: repo.GetOwner().GetLogin(), name: repo.GetName()})
+		}
+		if resp.NextPage == 0 {
+			return out, nil
+		}
+		page = resp.NextPage
+	}
 }
 
 // issueNumber extracts the issue number from a comment's API issue URL
@@ -140,8 +324,11 @@ func toReaction(repo repoRef, issue int, comment *gogithub.IssueComment, reactio
 
 // pollReactions is the reaction ingress loop, one goroutine per connection.
 // GitHub sends no webhook for reactions, so it diffs each polled repo's newest
-// comments every ReactionPollInterval and dispatches reactions that pass the
-// cutoff, the self/bot filter and the store's freshness check. ctx is the
+// comments every cycle and dispatches reactions that pass the cutoff, the
+// self/bot filter and the store's freshness check. The polled set is the
+// explicit ReactionPollRepos entries plus the wildcard owners' discovered
+// repos; the cycle interval is ReactionPollInterval, raised when the repo
+// count would blow the API request budget (see pollInterval). ctx is the
 // connection's run context and is the only thing that stops the loop; poll
 // failures are logged and retried next cycle, never fatal — the webhook half
 // of the adapter keeps serving. Dispatch runs on dispatchCtx (the connection's
@@ -157,11 +344,31 @@ func (a *adapter) pollReactions(ctx, dispatchCtx context.Context, deps core.Adap
 	// It is rebuilt every cycle so comments that scroll out of the window do
 	// not accumulate.
 	counts := make(map[int64]int)
-	ticker := time.NewTicker(a.cfg.ReactionPollInterval)
-	defer ticker.Stop()
-	for {
+	// discovered holds the wildcard owners' resolved repos, refreshed every
+	// discoveryRefreshCycles cycles. A failed refresh keeps the previous set
+	// (empty until the first refresh succeeds) — explicit repos are unaffected
+	// and the next refresh retries.
+	var discovered []repoRef
+	var warned budgetState
+	for cycle := 0; ; cycle++ {
+		if len(a.wildcardOwners) > 0 && cycle%discoveryRefreshCycles == 0 {
+			repos, err := a.discoverRepos(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				a.log().Warn("github: reaction repo discovery failed", "error", err)
+			} else {
+				discovered = repos
+			}
+		}
+		repos := mergeRepos(a.pollRepos, discovered)
+		// The interval is recomputed every cycle because discovery moves the
+		// repo count; pollInterval warns when the budget forces (or, with
+		// auto-adjust disabled, would force) a longer interval than configured.
+		interval := a.pollInterval(len(repos), &warned)
 		next := make(map[int64]int, len(counts))
-		for _, repo := range a.pollRepos {
+		for _, repo := range repos {
 			if err := a.pollRepoOnce(ctx, dispatchCtx, deps, repo, counts, next, cutoff); err != nil {
 				if ctx.Err() != nil {
 					return
@@ -170,10 +377,12 @@ func (a *adapter) pollReactions(ctx, dispatchCtx context.Context, deps core.Adap
 			}
 		}
 		counts = next
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }

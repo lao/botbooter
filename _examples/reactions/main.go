@@ -22,7 +22,7 @@
 //	go run ./_examples/reactions whatsapp   # Cloud API flavor: reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
 //	go run ./_examples/reactions whatsmeow  # WhatsApp Web flavor: no credentials; scan the QR on first run (optional WA_MEOW_DB)
 //	go run ./_examples/reactions teams      # reads TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (and optional TEAMS_APP_TENANT_ID, TEAMS_PATH)
-//	go run ./_examples/reactions github     # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR / GITHUB_REPO (comma-separated "owner/name" list; and optional GITHUB_PATH, GITHUB_POLL_SECONDS)
+//	go run ./_examples/reactions github     # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR / GITHUB_REPO (comma-separated "owner/name" or "owner/*" list; and optional GITHUB_PATH, GITHUB_POLL_SECONDS, GITHUB_POLL_AUTO_INTERVAL)
 //
 // Per-platform setup gotchas for reactions to actually arrive:
 //   - Slack: subscribe the app to the reaction_added Events API event and grant
@@ -41,13 +41,17 @@
 //   - GitHub: the platform sends no webhook for reactions at all (a
 //     long-requested feature GitHub has not shipped), so the adapter polls
 //     instead — an opt-in: set GITHUB_REPO to one or more comma-separated
-//     "owner/name" entries ("lao/botbooter,lao/other") to poll each repo's
+//     "owner/name" entries ("lao/botbooter,lao/other"), or "owner/*" to poll
+//     every repo of that owner ("lao/*"), feeding each repo's
 //     newest issue comments (Config.ReactionPollRepos); the poller only starts
 //     when an OnReaction handler is registered before the bot runs (this
 //     example always registers one). Reactions arrive within
 //     the poll interval (GITHUB_POLL_SECONDS, default 30), only for the newest
-//     comments, and only while the bot is running. Without GITHUB_REPO the echo
-//     command works but OnReaction never fires.
+//     comments, and only while the bot is running. When the repo count at that
+//     interval would exceed the adapter's API request budget it warns and
+//     raises the interval automatically; GITHUB_POLL_AUTO_INTERVAL=off keeps
+//     the configured interval instead (the warning still logs). Without
+//     GITHUB_REPO the echo command works but OnReaction never fires.
 //
 // Emoji renders as-is on its origin platform: a unicode character on most
 // platforms, a colon-wrapped shortname (":thumbsup:") on Slack, "<:name:id>"
@@ -142,6 +146,21 @@ func splitRepos(env string) []string {
 	return repos
 }
 
+// autoIntervalDisabled parses GITHUB_POLL_AUTO_INTERVAL. Unset means the
+// default: let the adapter raise the poll interval automatically when the repo
+// count would exceed its API request budget. "off" disables that (the adapter
+// still warns); an unrecognized value is a startup error, matching
+// GITHUB_POLL_SECONDS strictness.
+func autoIntervalDisabled(env string) (bool, error) {
+	switch strings.ToLower(env) {
+	case "", "on", "true", "1":
+		return false, nil
+	case "off", "false", "0":
+		return true, nil
+	}
+	return false, fmt.Errorf("parse GITHUB_POLL_AUTO_INTERVAL %q (want on/off)", env)
+}
+
 func requestedBotType(args []string) string {
 	if len(args) > 1 {
 		return strings.ToLower(args[1])
@@ -196,8 +215,13 @@ func newBot(botType string) (*botbooter.Bot, error) {
 				}
 				cfg.ReactionPollInterval = time.Duration(n) * time.Second
 			}
+			noAuto, err := autoIntervalDisabled(os.Getenv("GITHUB_POLL_AUTO_INTERVAL"))
+			if err != nil {
+				return nil, err
+			}
+			cfg.ReactionPollNoAutoInterval = noAuto
 		} else {
-			fmt.Fprintln(os.Stderr, "note: set GITHUB_REPO (comma-separated \"owner/name\" entries) to poll for reactions; without it OnReaction never fires.")
+			fmt.Fprintln(os.Stderr, "note: set GITHUB_REPO (comma-separated \"owner/name\" or \"owner/*\" entries) to poll for reactions; without it OnReaction never fires.")
 		}
 		if keyFile := os.Getenv("GITHUB_PRIVATE_KEY_FILE"); keyFile != "" {
 			key, err := os.ReadFile(keyFile)

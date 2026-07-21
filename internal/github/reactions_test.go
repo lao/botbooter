@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,17 +21,23 @@ import (
 )
 
 // fakeAPI is a hermetic stand-in for the GitHub REST endpoints the reaction
-// poller hits: the repo-wide comment list, per-comment reactions, and /user
-// for PAT self-resolution during Connect. Call counters let tests pin the
-// poller's API cost.
+// poller hits: comment lists (any repo), per-comment reactions, the three
+// wildcard repo-discovery listings, and /user for PAT self-resolution during
+// Connect. Call counters let tests pin the poller's API cost.
 type fakeAPI struct {
-	mu            sync.Mutex
-	comments      []*gogithub.IssueComment
-	reactions     map[int64][]*gogithub.Reaction
-	commentLists  int
-	reactionLists int
-	hits          int // every request, including failed ones
-	fail          bool
+	mu                 sync.Mutex
+	comments           []*gogithub.IssueComment // served for every repo's comment list
+	reactions          map[int64][]*gogithub.Reaction
+	ownerRepos         map[string][]*gogithub.Repository // /users/{owner}/repos
+	authedRepos        []*gogithub.Repository            // /user/repos
+	installRepos       []*gogithub.Repository            // /installation/repositories
+	commentLists       int
+	commentListsByRepo map[string]int // "owner/name" -> list calls
+	reactionLists      int
+	repoLists          int
+	hits               int // every request, including failed ones
+	fail               bool
+	failRepoLists      bool // fail only the discovery listings
 }
 
 func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
@@ -42,11 +49,36 @@ func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		repoList := func(write func()) {
+			f.repoLists++
+			if f.failRepoLists {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			write()
+		}
 		switch {
 		case r.URL.Path == "/user":
 			_, _ = w.Write([]byte(`{"id": 777, "login": "botbooter-bot"}`))
-		case r.URL.Path == "/repos/lao/botbooter/issues/comments":
+		case r.URL.Path == "/user/repos":
+			repoList(func() { writeJSON(t, w, f.authedRepos) })
+		case r.URL.Path == "/installation/repositories":
+			repoList(func() {
+				writeJSON(t, w, &gogithub.ListRepositories{
+					TotalCount:   gogithub.Ptr(len(f.installRepos)),
+					Repositories: f.installRepos,
+				})
+			})
+		case strings.HasPrefix(r.URL.Path, "/users/") && strings.HasSuffix(r.URL.Path, "/repos"):
+			owner := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/users/"), "/repos")
+			repoList(func() { writeJSON(t, w, f.ownerRepos[owner]) })
+		case strings.HasSuffix(r.URL.Path, "/issues/comments"):
 			f.commentLists++
+			parts := strings.Split(r.URL.Path, "/") // "", "repos", owner, name, ...
+			if f.commentListsByRepo == nil {
+				f.commentListsByRepo = make(map[string]int)
+			}
+			f.commentListsByRepo[parts[2]+"/"+parts[3]]++
 			writeJSON(t, w, f.comments)
 		case strings.HasSuffix(r.URL.Path, "/reactions"):
 			f.reactionLists++
@@ -59,6 +91,18 @@ func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}
+}
+
+func (f *fakeAPI) repoListCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.repoLists
+}
+
+func (f *fakeAPI) commentListsFor(repo string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.commentListsByRepo[repo]
 }
 
 func writeJSON(t *testing.T, w http.ResponseWriter, v any) {
@@ -79,6 +123,14 @@ func testComment(id int64, issue, totalReactions int) *gogithub.IssueComment {
 		ID:        gogithub.Ptr(id),
 		IssueURL:  gogithub.Ptr(fmt.Sprintf("https://api.github.com/repos/lao/botbooter/issues/%d", issue)),
 		Reactions: &gogithub.Reactions{TotalCount: gogithub.Ptr(totalReactions)},
+	}
+}
+
+func testRepository(owner, name string, archived bool) *gogithub.Repository {
+	return &gogithub.Repository{
+		Name:     gogithub.Ptr(name),
+		Owner:    &gogithub.User{Login: gogithub.Ptr(owner)},
+		Archived: gogithub.Ptr(archived),
 	}
 }
 
@@ -162,6 +214,7 @@ func TestNewAdapter_ReactionConfigValidation(t *testing.T) {
 		{"EmptyOwner", func(c *Config) { c.ReactionPollRepos = []string{"/botbooter"} }},
 		{"EmptyName", func(c *Config) { c.ReactionPollRepos = []string{"lao/"} }},
 		{"ExtraSlash", func(c *Config) { c.ReactionPollRepos = []string{"lao/botbooter/extra"} }},
+		{"WildcardEmptyOwner", func(c *Config) { c.ReactionPollRepos = []string{"/*"} }},
 		{"NegativeInterval", func(c *Config) { c.ReactionPollInterval = -time.Second }},
 	}
 	for _, tc := range cases {
@@ -474,6 +527,7 @@ func TestPollReactions_SurvivesErrorsAndStopsOnCancel(t *testing.T) {
 	defer srv.Close()
 	cfg := pollConfig()
 	cfg.ReactionPollInterval = time.Millisecond
+	cfg.ReactionPollNoAutoInterval = true // a 1ms cycle blows the budget; keep the test fast
 	a := pollAdapter(t, cfg, srv)
 	a.mu.Lock()
 	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil)) // one warn per ms would drown the test output
@@ -518,6 +572,7 @@ func TestConnect_StartsReactionPoller(t *testing.T) {
 	defer srv.Close()
 	cfg := pollConfig()
 	cfg.ReactionPollInterval = 5 * time.Millisecond
+	cfg.ReactionPollNoAutoInterval = true // a 5ms cycle blows the budget; keep the test fast
 	a := pollAdapter(t, cfg, srv)
 
 	var mu sync.Mutex
@@ -584,4 +639,250 @@ func TestConnect_NoReactionHandlersSkipsPoller(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	commentLists, _ := api.counts()
 	asserts.Equal(t, commentLists, 0, "no poll cycle ran without a reaction handler")
+}
+
+func TestParsePollRepos_Wildcards(t *testing.T) {
+	repos, owners, err := parsePollRepos([]string{"lao/*", "lao/botbooter", "lao/*", "other/*", "lao/a*"})
+	asserts.NoError(t, err, "wildcards parse")
+	asserts.Equal(t, len(repos), 2, "explicit entries kept")
+	asserts.Equal(t, repos[0], testRepo, "explicit entry")
+	asserts.Equal(t, repos[1], repoRef{owner: "lao", name: "a*"}, "star inside a name stays a literal repo name")
+	asserts.Equal(t, len(owners), 2, "duplicate wildcard collapsed")
+	asserts.Equal(t, owners[0], "lao", "first wildcard owner")
+	asserts.Equal(t, owners[1], "other", "distinct wildcard owner")
+}
+
+func TestNewAdapter_WildcardConfig(t *testing.T) {
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"lao/*"}
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "wildcard-only config")
+	asserts.Equal(t, len(a.pollRepos), 0, "no explicit repos")
+	asserts.Equal(t, len(a.wildcardOwners), 1, "one wildcard owner")
+	asserts.True(t, a.reactions != nil, "store allocated for wildcard-only polling")
+	asserts.True(t, a.pollingConfigured(), "wildcard-only config counts as polling")
+}
+
+func TestMergeRepos_DedupsAndKeepsOrder(t *testing.T) {
+	other := repoRef{owner: "lao", name: "other"}
+	got := mergeRepos([]repoRef{testRepo}, []repoRef{other, testRepo, other})
+	asserts.Equal(t, len(got), 2, "duplicates dropped")
+	asserts.Equal(t, got[0], testRepo, "explicit entries first")
+	asserts.Equal(t, got[1], other, "discovered entry kept once")
+}
+
+func TestEffectiveInterval(t *testing.T) {
+	cases := []struct {
+		name       string
+		repos      int
+		configured time.Duration
+		noAuto     bool
+		want       time.Duration
+		exceeded   bool
+	}{
+		{"NoRepos", 0, 30 * time.Second, false, 30 * time.Second, false},
+		{"ExactBudgetFit", 25, 30 * time.Second, false, 30 * time.Second, false}, // 25 repos * 120 cycles/h = 3000 exactly
+		{"CeilRoundsUp", 26, 30 * time.Second, false, 32 * time.Second, true},    // 26*3600/3000 = 31.2s -> 32s
+		{"RaisedToFit", 100, 30 * time.Second, false, 120 * time.Second, true},
+		{"ConfiguredAlreadyFits", 100, 300 * time.Second, false, 300 * time.Second, false},
+		{"NoAutoKeepsConfigured", 100, 30 * time.Second, true, 30 * time.Second, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, exceeded := effectiveInterval(tc.repos, tc.configured, tc.noAuto)
+			asserts.Equal(t, got, tc.want, "interval")
+			asserts.Equal(t, exceeded, tc.exceeded, "budget exceeded flag")
+		})
+	}
+}
+
+// The budget warning must fire on transitions only — entering the over-budget
+// state, or staying in it with a changed repo count — never every cycle, and
+// again after recovering and re-entering.
+func TestPollInterval_WarnsOnTransitionsOnly(t *testing.T) {
+	a, err := newAdapter(pollConfig())
+	asserts.NoError(t, err, "adapter")
+	var buf bytes.Buffer
+	a.mu.Lock()
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	a.mu.Unlock()
+	warns := func() int { return strings.Count(buf.String(), "level=WARN") }
+
+	var warned budgetState
+	asserts.Equal(t, a.pollInterval(100, &warned), 120*time.Second, "interval raised")
+	asserts.Equal(t, warns(), 1, "entering over-budget warns")
+	a.pollInterval(100, &warned)
+	asserts.Equal(t, warns(), 1, "steady over-budget state does not re-warn")
+	a.pollInterval(200, &warned)
+	asserts.Equal(t, warns(), 2, "changed repo count re-warns")
+	asserts.Equal(t, a.pollInterval(1, &warned), defaultReactionPollInterval, "under budget uses configured interval")
+	asserts.Equal(t, warns(), 2, "recovery does not warn")
+	a.pollInterval(100, &warned)
+	asserts.Equal(t, warns(), 3, "re-entering over-budget warns again")
+	asserts.True(t, strings.Contains(buf.String(), "automatically raising"), "warning names the auto-raise")
+}
+
+// With auto-interval disabled the configured interval is honored and the
+// warning says adjustment is off.
+func TestPollInterval_NoAutoWarnsButKeepsInterval(t *testing.T) {
+	cfg := pollConfig()
+	cfg.ReactionPollNoAutoInterval = true
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "adapter")
+	var buf bytes.Buffer
+	a.mu.Lock()
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	a.mu.Unlock()
+
+	var warned budgetState
+	asserts.Equal(t, a.pollInterval(100, &warned), defaultReactionPollInterval, "configured interval kept")
+	asserts.True(t, strings.Contains(buf.String(), "disabled"), "warning says auto-adjust is disabled")
+}
+
+// PAT mode, wildcard owner that is not the bot itself: discovery lists the
+// owner's public repos and skips archived ones.
+func TestDiscoverRepos_OwnerListing(t *testing.T) {
+	api := &fakeAPI{ownerRepos: map[string][]*gogithub.Repository{"octo": {
+		testRepository("octo", "alpha", false),
+		testRepository("octo", "attic", true),
+	}}}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"octo/*"}
+	a := pollAdapter(t, cfg, srv)
+
+	got, err := a.discoverRepos(context.Background())
+	asserts.NoError(t, err, "discovery")
+	asserts.Equal(t, len(got), 1, "archived repo skipped")
+	asserts.Equal(t, got[0], repoRef{owner: "octo", name: "alpha"}, "discovered repo")
+}
+
+// PAT mode, wildcard owner that IS the bot (case-insensitive): discovery must
+// use the authenticated-user listing, which sees private repos.
+func TestDiscoverRepos_SelfOwnerUsesAuthenticatedListing(t *testing.T) {
+	api := &fakeAPI{authedRepos: []*gogithub.Repository{testRepository("botbooter-bot", "private-repo", false)}}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"Botbooter-Bot/*"}
+	a := pollAdapter(t, cfg, srv)
+	a.mu.Lock()
+	a.selfLogin = "botbooter-bot"
+	a.mu.Unlock()
+
+	got, err := a.discoverRepos(context.Background())
+	asserts.NoError(t, err, "discovery")
+	asserts.Equal(t, len(got), 1, "one repo discovered via /user/repos")
+	asserts.Equal(t, got[0], repoRef{owner: "botbooter-bot", name: "private-repo"}, "private repo visible")
+}
+
+// App mode: discovery lists the installation's repos and filters them to the
+// wildcard owners, skipping archived.
+func TestDiscoverRepos_AppModeListsInstallation(t *testing.T) {
+	api := &fakeAPI{installRepos: []*gogithub.Repository{
+		testRepository("lao", "one", false),
+		testRepository("someone-else", "two", false),
+		testRepository("lao", "attic", true),
+	}}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := appConfig(t)
+	cfg.ReactionPollRepos = []string{"lao/*"}
+	a := pollAdapter(t, cfg, srv)
+
+	got, err := a.discoverRepos(context.Background())
+	asserts.NoError(t, err, "discovery")
+	asserts.Equal(t, len(got), 1, "other owners and archived repos filtered out")
+	asserts.Equal(t, got[0], repoRef{owner: "lao", name: "one"}, "installation repo matching the wildcard")
+}
+
+// waitUntil polls cond until it holds or the deadline passes.
+func waitUntil(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting: " + msg)
+}
+
+// End-to-end through the poll loop: wildcard-discovered repos are polled,
+// archived ones are not, and discovery is refreshed after
+// discoveryRefreshCycles cycles.
+func TestPollReactions_DiscoversPollsAndRefreshes(t *testing.T) {
+	api := &fakeAPI{
+		comments: []*gogithub.IssueComment{testComment(9001, 42, 0)},
+		ownerRepos: map[string][]*gogithub.Repository{"octo": {
+			testRepository("octo", "alpha", false),
+			testRepository("octo", "attic", true),
+		}},
+	}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"octo/*"}
+	cfg.ReactionPollInterval = time.Millisecond
+	cfg.ReactionPollNoAutoInterval = true // a 1ms cycle blows the budget; keep the test fast
+	a := pollAdapter(t, cfg, srv)
+	a.mu.Lock()
+	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil)) // silence the budget warning
+	a.mu.Unlock()
+
+	deps := core.AdapterDeps{
+		DispatchReaction: func(context.Context, *core.Reaction) { t.Error("zero-count comment must not dispatch") },
+		Done:             func(error) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		a.pollReactions(ctx, context.Background(), deps, time.Now())
+		close(stopped)
+	}()
+
+	// A second discovery listing proves the refresh cadence recurs.
+	waitUntil(t, func() bool { return api.repoListCount() >= 2 }, "discovery refreshed")
+	cancel()
+	<-stopped
+
+	asserts.True(t, api.commentListsFor("octo/alpha") >= 1, "discovered repo polled")
+	asserts.Equal(t, api.commentListsFor("octo/attic"), 0, "archived repo never polled")
+}
+
+// Discovery failure must not take down polling of explicit repos; the poller
+// logs, keeps going, and retries discovery at the next refresh.
+func TestPollReactions_DiscoveryFailureKeepsExplicitRepos(t *testing.T) {
+	api := &fakeAPI{
+		comments:      []*gogithub.IssueComment{testComment(9001, 42, 0)},
+		failRepoLists: true,
+	}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"lao/botbooter", "missing/*"}
+	cfg.ReactionPollInterval = time.Millisecond
+	cfg.ReactionPollNoAutoInterval = true // a 1ms cycle blows the budget; keep the test fast
+	a := pollAdapter(t, cfg, srv)
+	a.mu.Lock()
+	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil)) // discovery warns every refresh
+	a.mu.Unlock()
+
+	deps := core.AdapterDeps{
+		DispatchReaction: func(context.Context, *core.Reaction) { t.Error("zero-count comment must not dispatch") },
+		Done:             func(error) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		a.pollReactions(ctx, context.Background(), deps, time.Now())
+		close(stopped)
+	}()
+
+	waitUntil(t, func() bool { return api.commentListsFor("lao/botbooter") >= 2 }, "explicit repo polled across cycles")
+	waitUntil(t, func() bool { return api.repoListCount() >= 2 }, "failed discovery retried")
+	cancel()
+	<-stopped
 }

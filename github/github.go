@@ -40,8 +40,8 @@ var ErrAmbiguousAuth = githubint.ErrAmbiguousAuth
 var ErrBadChannelID = githubint.ErrBadChannelID
 
 // ErrBadReactionConfig is returned by [New] when a reaction-polling [Config]
-// field is malformed: a ReactionPollRepos entry that is not "owner/name", or a
-// negative ReactionPollInterval.
+// field is malformed: a ReactionPollRepos entry that is not "owner/name" or
+// the wildcard "owner/*", or a negative ReactionPollInterval.
 var ErrBadReactionConfig = githubint.ErrBadReactionConfig
 
 // New creates a GitHub bot. It runs an inbound webhook HTTP server at cfg.Addr,

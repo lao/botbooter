@@ -50,8 +50,8 @@ var ErrMissingConfig = errors.New("github: missing required config field")
 var ErrAmbiguousAuth = errors.New("github: configure either Token or AppID/InstallationID/PrivateKey, not both")
 
 // ErrBadReactionConfig is returned by New when a reaction-polling Config field
-// is malformed: a ReactionPollRepos entry that is not "owner/name", or a
-// negative ReactionPollInterval.
+// is malformed: a ReactionPollRepos entry that is not "owner/name" or the
+// wildcard "owner/*", or a negative ReactionPollInterval.
 var ErrBadReactionConfig = errors.New("github: invalid reaction polling config")
 
 // Config configures a GitHub bot. Exactly one auth mode must be set: Token
@@ -86,32 +86,48 @@ type Config struct {
 	// ignored.
 	HTTPClient *http.Client
 
-	// ReactionPollRepos lists repositories ("owner/name") whose newest issue
-	// comments are polled for emoji reactions, because GitHub sends no webhook
-	// for them. Empty (the default) disables polling and OnReaction never
-	// fires. The poller also requires an OnReaction handler registered before
-	// the bot connects — with repos listed but no handler, no poller starts
-	// and no API requests are spent. Coverage is deliberately partial — only reactions on each repo's
-	// newest comments are seen — and each listed repo costs at least one API
-	// request per poll cycle (worst case ~11, when every window comment's
-	// reaction count changed); size ReactionPollInterval against the token's
-	// rate limit when listing many or busy repos. Duplicate entries collapse
-	// to one.
+	// ReactionPollRepos lists repositories whose newest issue comments are
+	// polled for emoji reactions, because GitHub sends no webhook for them.
+	// An entry is either explicit ("owner/name") or a wildcard ("owner/*"):
+	// every repository of that owner the credentials can see, minus archived
+	// ones — the authenticated user's own repos (private included) in PAT
+	// mode when the owner is the bot itself, that owner's public repos
+	// otherwise, and the installation's repos in App mode. Wildcards are
+	// re-resolved every ~10 poll cycles, so new repositories are picked up
+	// without a restart. Empty (the default) disables polling and OnReaction
+	// never fires. The poller also requires an OnReaction handler registered
+	// before the bot connects — with repos listed but no handler, no poller
+	// starts and no API requests are spent. Coverage is deliberately partial
+	// — only reactions on each repo's newest comments are seen — and each
+	// polled repo costs at least one API request per poll cycle (worst case
+	// ~11, when every window comment's reaction count changed). Duplicate
+	// entries collapse to one.
 	ReactionPollRepos []string
 	// ReactionPollInterval is the delay between reaction poll cycles; it
 	// defaults to 30 seconds and is also the reaction delivery latency.
-	// Reaction dedup across cycles is in-process only: a restart forgets what
-	// was handled, and only reactions added while connected are dispatched, so
-	// reactions added while the bot was down are missed.
+	// When the polled repo count at this interval would exceed the poller's
+	// API request budget (3000 requests/hour), the adapter logs a warning and
+	// automatically raises the effective interval to fit — unless
+	// ReactionPollNoAutoInterval is set. Reaction dedup across cycles is
+	// in-process only: a restart forgets what was handled, and only reactions
+	// added while connected are dispatched, so reactions added while the bot
+	// was down are missed.
 	ReactionPollInterval time.Duration
+	// ReactionPollNoAutoInterval disables the automatic raising of the
+	// effective poll interval when the polled repo count would exceed the API
+	// request budget. The over-budget warning is still logged; the configured
+	// ReactionPollInterval is honored and the rate limit may be exhausted.
+	ReactionPollNoAutoInterval bool
 }
 
 type adapter struct {
 	cfg    Config
 	client *gogithub.Client
-	// pollRepos is cfg.ReactionPollRepos parsed once at New; empty means
-	// reaction polling is disabled and Connect starts no poller.
-	pollRepos []repoRef
+	// pollRepos and wildcardOwners are cfg.ReactionPollRepos parsed once at
+	// New: explicit "owner/name" entries and "owner/*" wildcard owners. Both
+	// empty means reaction polling is disabled and Connect starts no poller.
+	pollRepos      []repoRef
+	wildcardOwners []string
 	// reactions dedups polled reactions across cycles. Allocated at New only
 	// when polling is on, and shared across reconnects on purpose: a reaction
 	// handled before a reconnect is not re-dispatched after it.
@@ -123,9 +139,12 @@ type adapter struct {
 	// request is handled, read by the handler under mu; re-resolved on every
 	// PAT-mode Connect, never cleared on Disconnect (stale values are
 	// harmless with no server up). Zero in App mode, where the Bot-type
-	// filter in isSelfOrBot does the job.
-	selfID int64
-	srv    *http.Server
+	// filter in isSelfOrBot does the job. selfLogin is the matching login,
+	// used by wildcard repo discovery to route the bot's own owner through
+	// the authenticated-user listing (which sees private repos).
+	selfID    int64
+	selfLogin string
+	srv       *http.Server
 	// boundAddr is the listener's resolved address, so a cfg.Addr of ":0" is
 	// recoverable via Addr. Set with srv, cleared with it.
 	boundAddr string
@@ -138,6 +157,12 @@ type adapter struct {
 	// logger is the Bot's logger handed over at Connect; read via log().
 	logger   *slog.Logger
 	inflight atomic.Int64
+}
+
+// pollingConfigured reports whether ReactionPollRepos named anything to poll,
+// explicitly or by wildcard.
+func (a *adapter) pollingConfigured() bool {
+	return len(a.pollRepos) > 0 || len(a.wildcardOwners) > 0
 }
 
 // log returns the Bot's logger handed over at Connect, or slog.Default()
@@ -210,7 +235,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if !strings.HasPrefix(cfg.Path, "/") {
 		cfg.Path = "/" + cfg.Path
 	}
-	pollRepos, err := parsePollRepos(cfg.ReactionPollRepos)
+	pollRepos, wildcardOwners, err := parsePollRepos(cfg.ReactionPollRepos)
 	if err != nil {
 		return nil, err
 	}
@@ -230,8 +255,8 @@ func newAdapter(cfg Config) (*adapter, error) {
 		baseTransport = http.DefaultTransport
 	}
 
-	a := &adapter{cfg: cfg, pollRepos: pollRepos}
-	if len(pollRepos) > 0 {
+	a := &adapter{cfg: cfg, pollRepos: pollRepos, wildcardOwners: wildcardOwners}
+	if a.pollingConfigured() {
 		a.reactions = newReactionStore()
 	}
 	if patMode {
