@@ -105,6 +105,11 @@ type repoRef struct{ owner, name string }
 
 func (r repoRef) String() string { return r.owner + "/" + r.name }
 
+// repoRefOf maps an API repository to its poll reference.
+func repoRefOf(repo *gogithub.Repository) repoRef {
+	return repoRef{owner: repo.GetOwner().GetLogin(), name: repo.GetName()}
+}
+
 // parsePollRepos validates ReactionPollRepos entries into explicit owner/name
 // pairs and wildcard owners ("owner/*" — poll every repo of that owner).
 // Duplicates of either kind collapse to one entry: the store would suppress
@@ -237,15 +242,10 @@ func (a *adapter) discoverInstallationRepos(ctx context.Context) ([]repoRef, err
 			return nil, fmt.Errorf("list installation repos: %w", err)
 		}
 		for _, repo := range list.Repositories {
-			if repo.GetArchived() {
+			if repo.GetArchived() || !a.isWildcardOwner(repo.GetOwner().GetLogin()) {
 				continue
 			}
-			for _, owner := range a.wildcardOwners {
-				if strings.EqualFold(repo.GetOwner().GetLogin(), owner) {
-					out = append(out, repoRef{owner: repo.GetOwner().GetLogin(), name: repo.GetName()})
-					break
-				}
-			}
+			out = append(out, repoRefOf(repo))
 		}
 		if resp.NextPage == 0 {
 			return out, nil
@@ -254,19 +254,31 @@ func (a *adapter) discoverInstallationRepos(ctx context.Context) ([]repoRef, err
 	}
 }
 
+// isWildcardOwner reports whether login matches one of the configured
+// "owner/*" wildcard owners (GitHub logins are case-insensitive).
+func (a *adapter) isWildcardOwner(login string) bool {
+	for _, owner := range a.wildcardOwners {
+		if strings.EqualFold(login, owner) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *adapter) listOwnerRepos(ctx context.Context, owner string) ([]repoRef, error) {
 	a.mu.Lock()
 	self := a.selfLogin
 	a.mu.Unlock()
+	// The bot's own repos: /users/{owner}/repos would hide private ones, so
+	// use the authenticated-user listing, owner-affiliated.
+	selfOwned := self != "" && strings.EqualFold(owner, self)
 	var out []repoRef
 	page := 1
 	for {
 		var repos []*gogithub.Repository
 		var resp *gogithub.Response
 		var err error
-		if self != "" && strings.EqualFold(owner, self) {
-			// The bot's own repos: /users/{owner}/repos would hide private
-			// ones, so use the authenticated-user listing, owner-affiliated.
+		if selfOwned {
 			repos, resp, err = a.client.Repositories.ListByAuthenticatedUser(ctx, &gogithub.RepositoryListByAuthenticatedUserOptions{
 				Affiliation: "owner",
 				ListOptions: gogithub.ListOptions{PerPage: reposPerDiscoveryPage, Page: page},
@@ -283,7 +295,7 @@ func (a *adapter) listOwnerRepos(ctx context.Context, owner string) ([]repoRef, 
 			if repo.GetArchived() {
 				continue
 			}
-			out = append(out, repoRef{owner: repo.GetOwner().GetLogin(), name: repo.GetName()})
+			out = append(out, repoRefOf(repo))
 		}
 		if resp.NextPage == 0 {
 			return out, nil
