@@ -1,13 +1,16 @@
 // Package github is the GitHub adapter for botbooter. It receives issue and PR
 // comments as issue_comment webhook events over an inbound HTTP server and
 // replies by creating issue comments through the GitHub REST API (go-github).
-// It implements core.Adapter.
+// It implements core.Adapter. Optional Config callbacks (OnPullRequest,
+// OnPush) additionally route pull_request and push deliveries on the same
+// webhook endpoint; unset, those deliveries are acked and dropped.
 //
 // Like the WhatsApp and Teams adapters, Connect binds a listener and serves
 // until the run context is canceled; Disconnect shuts it down and drains
 // in-flight dispatch. Bind a local Addr, put a TLS-terminating proxy in front,
 // and register the public HTTPS URL as the repository or App webhook URL
-// (content type application/json, events: issue_comment, with a secret).
+// (content type application/json, events: issue_comment plus pull_request
+// and/or push when the matching callback is set, with a secret).
 //
 // Implementation split (mirrors Teams): github.go (config, auth wiring,
 // accessors), server.go (webhook lifecycle), send.go (replies), message.go
@@ -77,6 +80,24 @@ type Config struct {
 	Addr string
 	// Path is the webhook route; it defaults to /webhook.
 	Path string
+
+	// OnPullRequest, when set, receives pull_request webhook deliveries whose
+	// action is "opened", "reopened" or "synchronize" — the deliveries that
+	// create or change a PR's reviewable content. Other actions, and PRs
+	// authored by any bot or by this bot's own account, are acked and dropped,
+	// mirroring the comment path's reply-loop filter. The callback runs on a
+	// dispatch goroutine covered by Disconnect's drain (same contract as
+	// message dispatch), so it should hand long work off and return promptly.
+	// Nil (the default) keeps the previous behavior: pull_request deliveries
+	// are acked and dropped. The webhook must also be subscribed to the
+	// pull_request event, or GitHub never delivers one.
+	OnPullRequest func(ctx context.Context, event *gogithub.PullRequestEvent)
+
+	// OnPush, when set, receives push webhook deliveries, unfiltered — ref
+	// filtering (e.g. default branch only) is the callback's job. Same
+	// goroutine and drain contract as OnPullRequest. Nil (the default) acks
+	// and drops; the webhook must also be subscribed to the push event.
+	OnPush func(ctx context.Context, event *gogithub.PushEvent)
 
 	// HTTPClient is the base client for outbound GitHub API calls; a default
 	// client with a 30s timeout is used when nil. In App mode only its

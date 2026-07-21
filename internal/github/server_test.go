@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	gogithub "github.com/google/go-github/v88/github"
 	"github.com/lao/botbooter/internal/asserts"
 	"github.com/lao/botbooter/internal/core"
 )
@@ -51,6 +52,40 @@ const (
   "repository": {"full_name": "lao/botbooter"}
 }`
 	pingEvent = `{"zen": "Design for failure.", "hook_id": 1}`
+
+	prOpened = `{
+  "action": "opened",
+  "number": 12,
+  "pull_request": {"number": 12, "title": "Add feature",
+    "user": {"id": 99, "login": "contributor", "type": "User"},
+    "head": {"sha": "abc123"}, "base": {"ref": "main"}},
+  "repository": {"full_name": "lao/botbooter"}
+}`
+	prClosed = `{
+  "action": "closed",
+  "number": 12,
+  "pull_request": {"number": 12, "user": {"id": 99, "login": "contributor", "type": "User"}},
+  "repository": {"full_name": "lao/botbooter"}
+}`
+	prBotAuthored = `{
+  "action": "opened",
+  "number": 13,
+  "pull_request": {"number": 13, "user": {"id": 555, "login": "some-app[bot]", "type": "Bot"}},
+  "repository": {"full_name": "lao/botbooter"}
+}`
+	// PAT-shape self PR: type User, id matching the adapter's selfID.
+	prSelfAuthored = `{
+  "action": "opened",
+  "number": 14,
+  "pull_request": {"number": 14, "user": {"id": 777, "login": "bot-account", "type": "User"}},
+  "repository": {"full_name": "lao/botbooter"}
+}`
+	pushToMain = `{
+  "ref": "refs/heads/main",
+  "before": "abc123", "after": "def456",
+  "repository": {"full_name": "lao/botbooter"},
+  "pusher": {"name": "contributor"}
+}`
 )
 
 // failingListener makes Serve return err immediately, exercising the serve
@@ -691,6 +726,8 @@ func TestHandleWebhook_AckedButDropped(t *testing.T) {
 		}},
 		{"UnknownEvent", "workflow_run", `{"action": "completed"}`, nil},
 		{"MalformedJSON", "issue_comment", `not json{`, nil},
+		{"PullRequestNilCallback", "pull_request", prOpened, nil},
+		{"PushNilCallback", "push", pushToMain, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -711,6 +748,121 @@ func TestHandleWebhook_AckedButDropped(t *testing.T) {
 			asserts.Equal(t, len(got), 0, "nothing dispatched")
 		})
 	}
+}
+
+func TestHandleWebhook_DispatchesPullRequest(t *testing.T) {
+	for _, action := range []string{"opened", "reopened", "synchronize"} {
+		t.Run(action, func(t *testing.T) {
+			payload := strings.Replace(prOpened, `"action": "opened"`, `"action": "`+action+`"`, 1)
+			cfg := patConfig()
+			var got []*gogithub.PullRequestEvent
+			done := make(chan struct{}, 1)
+			cfg.OnPullRequest = func(_ context.Context, event *gogithub.PullRequestEvent) {
+				got = append(got, event)
+				done <- struct{}{}
+			}
+			a, err := newAdapter(cfg)
+			asserts.NoError(t, err, "new adapter")
+			w := httptest.NewRecorder()
+
+			a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "pull_request", payload), core.AdapterDeps{})
+			awaitDispatch(t, done, 1)
+
+			asserts.Equal(t, w.Code, http.StatusOK, "authentic request should be 200")
+			asserts.Equal(t, len(got), 1, "one callback invocation")
+			asserts.Equal(t, got[0].GetAction(), action, "action")
+			asserts.Equal(t, got[0].GetPullRequest().GetHead().GetSHA(), "abc123", "head sha")
+			asserts.Equal(t, got[0].GetRepo().GetFullName(), "lao/botbooter", "repo")
+		})
+	}
+}
+
+func TestHandleWebhook_DispatchesPush(t *testing.T) {
+	cfg := patConfig()
+	var got []*gogithub.PushEvent
+	done := make(chan struct{}, 1)
+	cfg.OnPush = func(_ context.Context, event *gogithub.PushEvent) {
+		got = append(got, event)
+		done <- struct{}{}
+	}
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "new adapter")
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "push", pushToMain), core.AdapterDeps{})
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, w.Code, http.StatusOK, "authentic request should be 200")
+	asserts.Equal(t, len(got), 1, "one callback invocation")
+	asserts.Equal(t, got[0].GetRef(), "refs/heads/main", "ref")
+	asserts.Equal(t, got[0].GetAfter(), "def456", "after sha")
+}
+
+// The pull_request path applies the same drops as the comment path even with a
+// callback registered: non-reviewable actions, bot and self authors, and
+// unparseable payloads all ack 200 without invoking it.
+func TestHandleWebhook_PullRequestDroppedWithCallback(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		prep    func(a *adapter)
+	}{
+		{"ClosedAction", prClosed, nil},
+		{"BotAuthor", prBotAuthored, nil},
+		{"SelfAuthor", prSelfAuthored, func(a *adapter) {
+			a.mu.Lock()
+			a.selfID = 777
+			a.mu.Unlock()
+		}},
+		{"MalformedJSON", `not json{`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := patConfig()
+			var calls atomic.Int64
+			cfg.OnPullRequest = func(context.Context, *gogithub.PullRequestEvent) { calls.Add(1) }
+			a, err := newAdapter(cfg)
+			asserts.NoError(t, err, "new adapter")
+			if tc.prep != nil {
+				tc.prep(a)
+			}
+			w := httptest.NewRecorder()
+
+			a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "pull_request", tc.payload), core.AdapterDeps{})
+
+			asserts.Equal(t, w.Code, http.StatusOK, "dropped events still ack 200")
+			// The callback runs async; a dropped event never schedules it, so
+			// give a stray invocation a moment to appear before asserting.
+			time.Sleep(20 * time.Millisecond)
+			asserts.Equal(t, calls.Load(), int64(0), "callback not invoked")
+		})
+	}
+}
+
+// A running callback holds the inflight counter Disconnect's drain waits on —
+// the same coverage message dispatch gets.
+func TestHandleWebhook_CallbackCoveredByDrain(t *testing.T) {
+	cfg := patConfig()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	cfg.OnPullRequest = func(context.Context, *gogithub.PullRequestEvent) {
+		close(entered)
+		<-release
+	}
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "new adapter")
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "pull_request", prOpened), core.AdapterDeps{})
+	<-entered
+	asserts.Equal(t, a.inflight.Load(), int64(1), "running callback holds the inflight counter")
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for a.inflight.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	asserts.Equal(t, a.inflight.Load(), int64(0), "callback return releases the counter")
 }
 
 func TestDrainDispatch_ContextCancel(t *testing.T) {

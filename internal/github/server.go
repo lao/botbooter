@@ -49,10 +49,19 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 		payload = []byte(form.Get("payload"))
 	}
 
-	if gogithub.WebHookType(r) != "issue_comment" {
+	switch gogithub.WebHookType(r) {
+	case "issue_comment":
+		a.handleIssueComment(dispatchCtx, w, payload, deps)
+	case "pull_request":
+		a.handlePullRequest(dispatchCtx, w, payload)
+	case "push":
+		a.handlePush(dispatchCtx, w, payload)
+	default:
 		w.WriteHeader(http.StatusOK) // ping and other subscribed events are not errors
-		return
 	}
+}
+
+func (a *adapter) handleIssueComment(dispatchCtx context.Context, w http.ResponseWriter, payload []byte, deps core.AdapterDeps) {
 	parsed, err := gogithub.ParseWebHook("issue_comment", payload)
 	if err != nil {
 		a.log().Warn("github: discarding webhook with unparseable body", "error", err)
@@ -66,14 +75,77 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	}
 
 	w.WriteHeader(http.StatusOK)
-	// Dispatch on the detached context: core cancels runCtx *before*
-	// Disconnect's drain waits for this handler, so a reply threaded onto
-	// runCtx would fail mid-drain. The increment lands before Shutdown
-	// returns, so drainDispatch always observes it.
+	a.dispatchAsync(func() { deps.Dispatch(dispatchCtx, toMessage(event)) })
+}
+
+// handlePullRequest routes pull_request deliveries to cfg.OnPullRequest.
+// Parsing happens only when a callback is set, so a nil callback costs the
+// same as an unknown event type. Only actions that create or change the PR's
+// reviewable content pass, and the comment path's reply-loop filter applies
+// to the PR author.
+func (a *adapter) handlePullRequest(dispatchCtx context.Context, w http.ResponseWriter, payload []byte) {
+	callback := a.cfg.OnPullRequest
+	if callback == nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	parsed, err := gogithub.ParseWebHook("pull_request", payload)
+	if err != nil {
+		a.log().Warn("github: discarding webhook with unparseable body", "error", err)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	event, ok := parsed.(*gogithub.PullRequestEvent)
+	if !ok || !reviewableAction(event.GetAction()) || a.isSelfOrBotUser(event.GetPullRequest().GetUser()) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	a.dispatchAsync(func() { callback(dispatchCtx, event) })
+}
+
+// reviewableAction reports whether a pull_request action creates or changes
+// the PR's reviewable content ("synchronize" fires when the head branch gets
+// new commits).
+func reviewableAction(action string) bool {
+	return action == "opened" || action == "reopened" || action == "synchronize"
+}
+
+// handlePush routes push deliveries to cfg.OnPush, unfiltered — ref filtering
+// is the callback's job.
+func (a *adapter) handlePush(dispatchCtx context.Context, w http.ResponseWriter, payload []byte) {
+	callback := a.cfg.OnPush
+	if callback == nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	parsed, err := gogithub.ParseWebHook("push", payload)
+	if err != nil {
+		a.log().Warn("github: discarding webhook with unparseable body", "error", err)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	event, ok := parsed.(*gogithub.PushEvent)
+	if !ok {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	a.dispatchAsync(func() { callback(dispatchCtx, event) })
+}
+
+// dispatchAsync runs f on a dispatch goroutine tracked by the inflight
+// counter. Callers pass work bound to the detached context: core cancels
+// runCtx *before* Disconnect's drain waits for the handler, so work threaded
+// onto runCtx would fail mid-drain. The increment lands before Shutdown
+// returns, so drainDispatch always observes it.
+func (a *adapter) dispatchAsync(f func()) {
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
-		deps.Dispatch(dispatchCtx, toMessage(event))
+		f()
 	}()
 }
 
