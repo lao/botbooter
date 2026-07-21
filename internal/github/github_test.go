@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 
 	"github.com/lao/botbooter/internal/asserts"
@@ -106,6 +107,28 @@ func TestAddr_NotConnected(t *testing.T) {
 	bot, err := New(patConfig())
 	asserts.NoError(t, err, "new GitHub bot")
 	asserts.Equal(t, Addr(bot), "", "Addr is empty before Connect")
+}
+
+// Addr's whole purpose is recovering the OS-assigned port after binding ":0",
+// so exercise that through the accessor, not by reading boundAddr directly.
+func TestAddr_Connected(t *testing.T) {
+	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
+		Done: func(error) {}, Disconnect: func() error { return nil },
+	})
+	defer srv.Close()
+	defer cancel()
+	defer func() { _ = a.Disconnect() }()
+	bot := core.New(core.GitHubBotType, a)
+
+	addr := Addr(bot)
+	asserts.True(t, addr != "", "Addr reports the bound address while connected")
+	_, port, err := net.SplitHostPort(addr)
+	asserts.NoError(t, err, "Addr is host:port")
+	asserts.True(t, port != "" && port != "0", "OS-assigned port recovered")
+
+	waitForSelfID(t, a, 777) // settle async resolution before tearing down
+	asserts.NoError(t, a.Disconnect(), "disconnect")
+	asserts.Equal(t, Addr(bot), "", "Addr empty again after Disconnect")
 }
 
 func TestAddr_NotGitHubBot(t *testing.T) {

@@ -586,6 +586,23 @@ func TestBot_Connect_WiresDispatchReaction(t *testing.T) {
 	asserts.True(t, fired, "dispatching through the wired callback runs OnReaction handlers")
 }
 
+// HasReactionHandlers snapshots registration at Connect, so a pull-based
+// adapter (the GitHub poller) can skip paid ingress no handler consumes.
+func TestBot_Connect_ReportsReactionHandlerRegistration(t *testing.T) {
+	without := &reactionCaptureAdapter{}
+	bot := New(SlackBotType, without)
+	asserts.NoError(t, bot.Connect(context.Background()), "Connect without handlers")
+	t.Cleanup(func() { _ = bot.Disconnect() })
+	asserts.True(t, !without.deps.HasReactionHandlers, "no OnReaction registered → false")
+
+	with := &reactionCaptureAdapter{}
+	bot2 := New(SlackBotType, with)
+	bot2.OnReaction(func(context.Context, *Bot, *Reaction) {})
+	asserts.NoError(t, bot2.Connect(context.Background()), "Connect with a handler")
+	t.Cleanup(func() { _ = bot2.Disconnect() })
+	asserts.True(t, with.deps.HasReactionHandlers, "OnReaction registered before Connect → true")
+}
+
 func TestBot_ReplyToMessage_NilAdapter(t *testing.T) {
 	bot := &Bot{BotType: BotType(999)}
 

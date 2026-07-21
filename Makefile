@@ -1,8 +1,8 @@
-.PHONY: all build test test-race cover lint fmt fmt-examples vet vet-examples vuln run-cli tidy clean
+.PHONY: all build test test-race test-examples cover lint fmt fmt-examples vet vet-examples vuln run-cli tidy clean
 
 # Default target: format, vet, lint and race-test. The lifecycle code is
 # concurrency-heavy, so the pre-commit gate runs the race detector.
-all: fmt fmt-examples vet vet-examples lint test-race
+all: fmt fmt-examples vet vet-examples lint test-race test-examples
 
 build:
 	go build ./...
@@ -12,6 +12,11 @@ test:
 
 test-race:
 	go test -race ./...
+
+# _examples is its own module, so the root ./... never tests it. Examples are
+# mostly wiring exercised by vet, but pure helpers (env parsing) carry tests.
+test-examples:
+	cd _examples && go test ./...
 
 cover:
 	go test -race -covermode=atomic -coverprofile=coverage.txt ./...

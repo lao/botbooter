@@ -462,8 +462,12 @@ func TestConnect_CustomPathRoutes(t *testing.T) {
 }
 
 func TestDisconnect_IdempotentAndClears(t *testing.T) {
+	// A clean Disconnect must never report through deps.Done: Serve's
+	// ErrServerClosed is the expected result of Shutdown, and serve's filter
+	// (server.go) is what keeps it out of the done channel.
 	a, srv, cancel := connectedAdapter(t, core.AdapterDeps{
-		Done: func(error) {}, Disconnect: func() error { return nil },
+		Done:       func(err error) { t.Errorf("deps.Done called on clean Disconnect: %v", err) },
+		Disconnect: func() error { return nil },
 	})
 	defer srv.Close()
 	defer cancel()
