@@ -671,6 +671,27 @@ func TestMergeRepos_DedupsAndKeepsOrder(t *testing.T) {
 	asserts.Equal(t, got[1], other, "discovered entry kept once")
 }
 
+// GitHub owner and repo names are case-insensitive, and discovery returns
+// API-canonical casing while explicit entries carry the user's casing — the
+// merge must not poll the same repo twice over a case mismatch. The
+// first-seen (explicit) form wins, so ChannelID keeps the user's spelling.
+func TestMergeRepos_DedupsCaseInsensitively(t *testing.T) {
+	got := mergeRepos([]repoRef{testRepo}, []repoRef{{owner: "Lao", name: "Botbooter"}})
+	asserts.Equal(t, len(got), 1, "case-variant duplicate dropped")
+	asserts.Equal(t, got[0], testRepo, "explicit spelling kept")
+}
+
+// Same property at parse time: two explicit entries naming one repo in
+// different casing collapse, as do case-variant wildcard owners.
+func TestParsePollRepos_DedupsCaseInsensitively(t *testing.T) {
+	repos, owners, err := parsePollRepos([]string{"lao/botbooter", "Lao/Botbooter", "lao/*", "LAO/*"})
+	asserts.NoError(t, err, "parse")
+	asserts.Equal(t, len(repos), 1, "case-variant explicit duplicate collapsed")
+	asserts.Equal(t, repos[0], testRepo, "first spelling kept")
+	asserts.Equal(t, len(owners), 1, "case-variant wildcard owner collapsed")
+	asserts.Equal(t, owners[0], "lao", "first owner spelling kept")
+}
+
 func TestEffectiveInterval(t *testing.T) {
 	cases := []struct {
 		name       string

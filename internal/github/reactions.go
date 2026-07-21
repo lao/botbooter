@@ -110,11 +110,19 @@ func repoRefOf(repo *gogithub.Repository) repoRef {
 	return repoRef{owner: repo.GetOwner().GetLogin(), name: repo.GetName()}
 }
 
+// key returns r's dedup key. GitHub owner and repo names are case-insensitive,
+// and discovery returns API-canonical casing while config entries carry the
+// user's — folding here keeps a case mismatch from polling one repo twice.
+// The first-seen spelling is what callers keep (it feeds ChannelID).
+func (r repoRef) key() repoRef {
+	return repoRef{owner: strings.ToLower(r.owner), name: strings.ToLower(r.name)}
+}
+
 // parsePollRepos validates ReactionPollRepos entries into explicit owner/name
 // pairs and wildcard owners ("owner/*" — poll every repo of that owner).
-// Duplicates of either kind collapse to one entry: the store would suppress
-// double dispatch anyway, but each copy would still cost its own API requests
-// every cycle. "*" is only special as the whole name; a name merely containing
+// Duplicates of either kind collapse to one entry, case-insensitively (see
+// repoRef.key): the store would suppress double dispatch anyway, but each
+// copy would still cost its own API requests every cycle. "*" is only special as the whole name; a name merely containing
 // it stays a literal repo name for the API to reject.
 func parsePollRepos(entries []string) (repos []repoRef, wildcardOwners []string, err error) {
 	seen := make(map[repoRef]struct{}, len(entries))
@@ -125,18 +133,18 @@ func parsePollRepos(entries []string) (repos []repoRef, wildcardOwners []string,
 			return nil, nil, fmt.Errorf(`%w: ReactionPollRepos entry %q must be "owner/name" or "owner/*"`, ErrBadReactionConfig, entry)
 		}
 		if name == "*" {
-			if _, dup := seenOwners[owner]; dup {
+			if _, dup := seenOwners[strings.ToLower(owner)]; dup {
 				continue
 			}
-			seenOwners[owner] = struct{}{}
+			seenOwners[strings.ToLower(owner)] = struct{}{}
 			wildcardOwners = append(wildcardOwners, owner)
 			continue
 		}
 		ref := repoRef{owner: owner, name: name}
-		if _, dup := seen[ref]; dup {
+		if _, dup := seen[ref.key()]; dup {
 			continue
 		}
-		seen[ref] = struct{}{}
+		seen[ref.key()] = struct{}{}
 		repos = append(repos, ref)
 	}
 	return repos, wildcardOwners, nil
@@ -149,10 +157,10 @@ func mergeRepos(explicit, discovered []repoRef) []repoRef {
 	seen := make(map[repoRef]struct{}, len(explicit)+len(discovered))
 	for _, refs := range [][]repoRef{explicit, discovered} {
 		for _, ref := range refs {
-			if _, dup := seen[ref]; dup {
+			if _, dup := seen[ref.key()]; dup {
 				continue
 			}
-			seen[ref] = struct{}{}
+			seen[ref.key()] = struct{}{}
 			out = append(out, ref)
 		}
 	}
