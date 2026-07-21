@@ -1,9 +1,9 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,17 +21,23 @@ import (
 )
 
 // fakeAPI is a hermetic stand-in for the GitHub REST endpoints the reaction
-// poller hits: the repo-wide comment list, per-comment reactions, and /user
-// for PAT self-resolution during Connect. Call counters let tests pin the
-// poller's API cost.
+// poller hits: comment lists (any repo), per-comment reactions, the three
+// wildcard repo-discovery listings, and /user for PAT self-resolution during
+// Connect. Call counters let tests pin the poller's API cost.
 type fakeAPI struct {
-	mu            sync.Mutex
-	comments      []*gogithub.IssueComment
-	reactions     map[int64][]*gogithub.Reaction
-	commentLists  int
-	reactionLists int
-	hits          int // every request, including failed ones
-	fail          bool
+	mu                 sync.Mutex
+	comments           []*gogithub.IssueComment // served for every repo's comment list
+	reactions          map[int64][]*gogithub.Reaction
+	ownerRepos         map[string][]*gogithub.Repository // /users/{owner}/repos
+	authedRepos        []*gogithub.Repository            // /user/repos
+	installRepos       []*gogithub.Repository            // /installation/repositories
+	commentLists       int
+	commentListsByRepo map[string]int // "owner/name" -> list calls
+	reactionLists      int
+	repoLists          int
+	hits               int // every request, including failed ones
+	fail               bool
+	failRepoLists      bool // fail only the discovery listings
 }
 
 func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
@@ -43,11 +49,36 @@ func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		repoList := func(write func()) {
+			f.repoLists++
+			if f.failRepoLists {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			write()
+		}
 		switch {
 		case r.URL.Path == "/user":
 			_, _ = w.Write([]byte(`{"id": 777, "login": "botbooter-bot"}`))
-		case r.URL.Path == "/repos/lao/botbooter/issues/comments":
+		case r.URL.Path == "/user/repos":
+			repoList(func() { writeJSON(t, w, f.authedRepos) })
+		case r.URL.Path == "/installation/repositories":
+			repoList(func() {
+				writeJSON(t, w, &gogithub.ListRepositories{
+					TotalCount:   gogithub.Ptr(len(f.installRepos)),
+					Repositories: f.installRepos,
+				})
+			})
+		case strings.HasPrefix(r.URL.Path, "/users/") && strings.HasSuffix(r.URL.Path, "/repos"):
+			owner := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/users/"), "/repos")
+			repoList(func() { writeJSON(t, w, f.ownerRepos[owner]) })
+		case strings.HasSuffix(r.URL.Path, "/issues/comments"):
 			f.commentLists++
+			parts := strings.Split(r.URL.Path, "/") // "", "repos", owner, name, ...
+			if f.commentListsByRepo == nil {
+				f.commentListsByRepo = make(map[string]int)
+			}
+			f.commentListsByRepo[parts[2]+"/"+parts[3]]++
 			writeJSON(t, w, f.comments)
 		case strings.HasSuffix(r.URL.Path, "/reactions"):
 			f.reactionLists++
@@ -60,6 +91,18 @@ func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}
+}
+
+func (f *fakeAPI) repoListCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.repoLists
+}
+
+func (f *fakeAPI) commentListsFor(repo string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.commentListsByRepo[repo]
 }
 
 func writeJSON(t *testing.T, w http.ResponseWriter, v any) {
@@ -83,6 +126,14 @@ func testComment(id int64, issue, totalReactions int) *gogithub.IssueComment {
 	}
 }
 
+func testRepository(owner, name string, archived bool) *gogithub.Repository {
+	return &gogithub.Repository{
+		Name:     gogithub.Ptr(name),
+		Owner:    &gogithub.User{Login: gogithub.Ptr(owner)},
+		Archived: gogithub.Ptr(archived),
+	}
+}
+
 func testReaction(id int64, content string, userID int64, userType string, created time.Time) *gogithub.Reaction {
 	return &gogithub.Reaction{
 		ID:      gogithub.Ptr(id),
@@ -96,36 +147,11 @@ func testReaction(id int64, content string, userID int64, userType string, creat
 	}
 }
 
-// recordingStore is a ReactionStore that logs MarkSeen calls and can be forced
-// to fail.
-type recordingStore struct {
-	mu    sync.Mutex
-	calls []int64
-	seen  map[int64]struct{}
-	err   error
-}
-
-func (s *recordingStore) MarkSeen(_ context.Context, id int64) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls = append(s.calls, id)
-	if s.err != nil {
-		return false, s.err
-	}
-	if s.seen == nil {
-		s.seen = make(map[int64]struct{})
-	}
-	if _, ok := s.seen[id]; ok {
-		return false, nil
-	}
-	s.seen[id] = struct{}{}
-	return true, nil
-}
-
-func (s *recordingStore) callCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.calls)
+// storeSize reports how many reaction IDs the adapter's dedup store holds.
+func storeSize(a *adapter) int {
+	a.reactions.mu.Lock()
+	defer a.reactions.mu.Unlock()
+	return len(a.reactions.seen)
 }
 
 func pollConfig() Config {
@@ -142,11 +168,13 @@ func pollAdapter(t *testing.T, cfg Config, srv *httptest.Server) *adapter {
 	return a
 }
 
-// reactionCaptureDeps mirrors captureDeps for the reaction ingress path. The
-// mutex matters: each reaction dispatches on its own goroutine.
+// reactionCaptureDeps mirrors captureDeps for the reaction ingress path,
+// modeling a bot with an OnReaction handler registered (HasReactionHandlers).
+// The mutex matters: each reaction dispatches on its own goroutine.
 func reactionCaptureDeps(mu *sync.Mutex, got *[]*core.Reaction, done chan struct{}) core.AdapterDeps {
 	return core.AdapterDeps{
-		Dispatch: func(context.Context, *core.Message) {},
+		Dispatch:            func(context.Context, *core.Message) {},
+		HasReactionHandlers: true,
 		DispatchReaction: func(_ context.Context, r *core.Reaction) {
 			mu.Lock()
 			*got = append(*got, r)
@@ -160,6 +188,21 @@ func reactionCaptureDeps(mu *sync.Mutex, got *[]*core.Reaction, done chan struct
 	}
 }
 
+// drainInflight settles any dispatch goroutines a poll cycle spawned before a
+// test asserts on them. The inflight increment is synchronous with the spawn,
+// so a "nothing dispatched" assertion after this drain is deterministic: a
+// wrongly-spawned dispatch is waited for and lands in got, instead of racing
+// the assertion and false-passing.
+func drainInflight(t *testing.T, a *adapter) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.drainDispatch(ctx)
+	// drainDispatch returns silently on timeout; a hung dispatch must fail the
+	// test, not let a "nothing dispatched" assertion false-pass.
+	asserts.Equal(t, a.inflight.Load(), int64(0), "dispatch goroutines settled within the drain window")
+}
+
 var testRepo = repoRef{owner: "lao", name: "botbooter"}
 
 func TestNewAdapter_ReactionConfigValidation(t *testing.T) {
@@ -171,8 +214,8 @@ func TestNewAdapter_ReactionConfigValidation(t *testing.T) {
 		{"EmptyOwner", func(c *Config) { c.ReactionPollRepos = []string{"/botbooter"} }},
 		{"EmptyName", func(c *Config) { c.ReactionPollRepos = []string{"lao/"} }},
 		{"ExtraSlash", func(c *Config) { c.ReactionPollRepos = []string{"lao/botbooter/extra"} }},
+		{"WildcardEmptyOwner", func(c *Config) { c.ReactionPollRepos = []string{"/*"} }},
 		{"NegativeInterval", func(c *Config) { c.ReactionPollInterval = -time.Second }},
-		{"NegativeLookback", func(c *Config) { c.ReactionLookback = -time.Second }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -188,9 +231,22 @@ func TestNewAdapter_ReactionDefaults(t *testing.T) {
 	a, err := newAdapter(pollConfig())
 	asserts.NoError(t, err, "valid poll config")
 	asserts.Equal(t, a.cfg.ReactionPollInterval, defaultReactionPollInterval, "default interval")
-	asserts.NotNil(t, a.cfg.ReactionStore, "default in-memory store when polling is on")
+	asserts.True(t, a.reactions != nil, "in-memory store allocated when polling is on")
 	asserts.Equal(t, len(a.pollRepos), 1, "one parsed repo")
 	asserts.Equal(t, a.pollRepos[0], testRepo, "parsed owner/name")
+}
+
+// Duplicate ReactionPollRepos entries must collapse to one: the store would
+// suppress double dispatch anyway, but each copy would still cost its own API
+// requests every cycle.
+func TestNewAdapter_DuplicatePollReposCollapse(t *testing.T) {
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"lao/botbooter", "lao/botbooter", "lao/other"}
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "duplicates are not a config error")
+	asserts.Equal(t, len(a.pollRepos), 2, "duplicate collapsed")
+	asserts.Equal(t, a.pollRepos[0], testRepo, "first entry kept")
+	asserts.Equal(t, a.pollRepos[1], repoRef{owner: "lao", name: "other"}, "distinct entry kept")
 }
 
 // Zero-config bots must not pay for the feature: no parsed repos, no store.
@@ -198,7 +254,7 @@ func TestNewAdapter_NoPollingByDefault(t *testing.T) {
 	a, err := newAdapter(patConfig())
 	asserts.NoError(t, err, "plain config")
 	asserts.Equal(t, len(a.pollRepos), 0, "no poll repos")
-	asserts.True(t, a.cfg.ReactionStore == nil, "no store allocated when polling is off")
+	asserts.True(t, a.reactions == nil, "no store allocated when polling is off")
 }
 
 func TestPollRepoOnce_DispatchesNewReaction(t *testing.T) {
@@ -246,10 +302,7 @@ func TestPollRepoOnce_CutoffSkipsAndSparesStore(t *testing.T) {
 	}
 	srv := httptest.NewServer(api.handler(t))
 	defer srv.Close()
-	store := &recordingStore{}
-	cfg := pollConfig()
-	cfg.ReactionStore = store
-	a := pollAdapter(t, cfg, srv)
+	a := pollAdapter(t, pollConfig(), srv)
 
 	var mu sync.Mutex
 	var got []*core.Reaction
@@ -257,9 +310,12 @@ func TestPollRepoOnce_CutoffSkipsAndSparesStore(t *testing.T) {
 		reactionCaptureDeps(&mu, &got, nil), testRepo,
 		map[int64]int{}, map[int64]int{}, time.Now())
 	asserts.NoError(t, err, "poll cycle")
+	drainInflight(t, a)
 
+	mu.Lock()
+	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "pre-cutoff reaction not dispatched")
-	asserts.Equal(t, store.callCount(), 0, "pre-cutoff reaction never reaches the store")
+	asserts.Equal(t, storeSize(a), 0, "pre-cutoff reaction never enters the store")
 }
 
 func TestPollRepoOnce_SeenReactionNotRedispatched(t *testing.T) {
@@ -281,6 +337,7 @@ func TestPollRepoOnce_SeenReactionNotRedispatched(t *testing.T) {
 	asserts.NoError(t, a.pollRepoOnce(context.Background(), context.Background(), deps, testRepo, map[int64]int{}, map[int64]int{}, cutoff), "first cycle")
 	awaitDispatch(t, done, 1)
 	asserts.NoError(t, a.pollRepoOnce(context.Background(), context.Background(), deps, testRepo, map[int64]int{}, map[int64]int{}, cutoff), "second cycle")
+	drainInflight(t, a)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -336,33 +393,11 @@ func TestPollRepoOnce_BotAndSelfReactorsDropped(t *testing.T) {
 		reactionCaptureDeps(&mu, &got, nil), testRepo,
 		map[int64]int{}, map[int64]int{}, time.Now().Add(-time.Hour))
 	asserts.NoError(t, err, "poll cycle")
+	drainInflight(t, a)
 
+	mu.Lock()
+	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "bot-type and self reactors are dropped")
-}
-
-// A failing store skips its reaction conservatively: a reaction the store may
-// already know must not risk a second reply.
-func TestPollRepoOnce_StoreErrorSkipsDispatch(t *testing.T) {
-	api := &fakeAPI{
-		comments:  []*gogithub.IssueComment{testComment(9001, 42, 1)},
-		reactions: map[int64][]*gogithub.Reaction{9001: {testReaction(1, "+1", 42, "User", time.Now())}},
-	}
-	srv := httptest.NewServer(api.handler(t))
-	defer srv.Close()
-	store := &recordingStore{err: errors.New("store down")}
-	cfg := pollConfig()
-	cfg.ReactionStore = store
-	a := pollAdapter(t, cfg, srv)
-
-	var mu sync.Mutex
-	var got []*core.Reaction
-	err := a.pollRepoOnce(context.Background(), context.Background(),
-		reactionCaptureDeps(&mu, &got, nil), testRepo,
-		map[int64]int{}, map[int64]int{}, time.Now().Add(-time.Hour))
-	asserts.NoError(t, err, "a store failure is logged, not a cycle error")
-
-	asserts.Equal(t, len(got), 0, "reaction skipped on store error")
-	asserts.Equal(t, store.callCount(), 1, "store was consulted")
 }
 
 // A comment whose reactions failed to list must be retried next cycle: its
@@ -406,7 +441,46 @@ func TestPollRepoOnce_MalformedIssueURL(t *testing.T) {
 		reactionCaptureDeps(&mu, &got, nil), testRepo,
 		map[int64]int{}, map[int64]int{}, time.Now().Add(-time.Hour))
 	asserts.Error(t, err, "unparseable issue_url is an error, not a silent bad ChannelID")
+	drainInflight(t, a)
+
+	mu.Lock()
+	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+// A zero-reaction comment — the dominant steady state — must skip the detail
+// request even on its first sighting, and still enter the count cache.
+func TestPollRepoOnce_ZeroCountSkipsDetailCall(t *testing.T) {
+	api := &fakeAPI{comments: []*gogithub.IssueComment{testComment(9001, 42, 0)}}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	a := pollAdapter(t, pollConfig(), srv)
+
+	var mu sync.Mutex
+	var got []*core.Reaction
+	next := map[int64]int{}
+	err := a.pollRepoOnce(context.Background(), context.Background(),
+		reactionCaptureDeps(&mu, &got, nil), testRepo,
+		map[int64]int{}, next, time.Now().Add(-time.Hour))
+	asserts.NoError(t, err, "poll cycle")
+
+	_, reactionLists := api.counts()
+	asserts.Equal(t, reactionLists, 0, "no detail request for a zero-count comment")
+	cached, ok := next[9001]
+	asserts.True(t, ok, "zero count enters the cache")
+	asserts.Equal(t, cached, 0, "cached count is zero")
+}
+
+// issueNumber must reject non-positive numbers, not just unparseable URLs.
+func TestIssueNumber_RejectsNonPositive(t *testing.T) {
+	for _, url := range []string{
+		"https://api.github.com/repos/lao/botbooter/issues/0",
+		"https://api.github.com/repos/lao/botbooter/issues/-1",
+	} {
+		c := &gogithub.IssueComment{IssueURL: gogithub.Ptr(url)}
+		_, err := issueNumber(c)
+		asserts.Error(t, err, url)
+	}
 }
 
 // Reaction dispatch must ride the inflight counter so Disconnect's drain
@@ -453,6 +527,7 @@ func TestPollReactions_SurvivesErrorsAndStopsOnCancel(t *testing.T) {
 	defer srv.Close()
 	cfg := pollConfig()
 	cfg.ReactionPollInterval = time.Millisecond
+	cfg.ReactionPollNoAutoInterval = true // a 1ms cycle blows the budget; keep the test fast
 	a := pollAdapter(t, cfg, srv)
 	a.mu.Lock()
 	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil)) // one warn per ms would drown the test output
@@ -488,14 +563,16 @@ func TestPollReactions_SurvivesErrorsAndStopsOnCancel(t *testing.T) {
 // through deps, and dies with the run context.
 func TestConnect_StartsReactionPoller(t *testing.T) {
 	api := &fakeAPI{
-		comments:  []*gogithub.IssueComment{testComment(9001, 42, 1)},
-		reactions: map[int64][]*gogithub.Reaction{9001: {testReaction(1, "hooray", 42, "User", time.Now())}},
+		comments: []*gogithub.IssueComment{testComment(9001, 42, 1)},
+		// Created in the future so the fixture cannot predate the connect-time
+		// cutoff by the nanoseconds between now and Connect below.
+		reactions: map[int64][]*gogithub.Reaction{9001: {testReaction(1, "hooray", 42, "User", time.Now().Add(time.Hour))}},
 	}
 	srv := httptest.NewServer(api.handler(t))
 	defer srv.Close()
 	cfg := pollConfig()
 	cfg.ReactionPollInterval = 5 * time.Millisecond
-	cfg.ReactionLookback = time.Hour // the fixture reaction predates Connect by nanoseconds
+	cfg.ReactionPollNoAutoInterval = true // a 5ms cycle blows the budget; keep the test fast
 	a := pollAdapter(t, cfg, srv)
 
 	var mu sync.Mutex
@@ -526,4 +603,307 @@ func TestConnect_StartsReactionPoller(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	asserts.Equal(t, len(got), 1, "store dedups across the poller's cycles")
+}
+
+// Repos listed but no OnReaction handler registered before Connect: the poller
+// must not start at all — polling costs API requests every cycle, and nobody
+// consumes the dispatches.
+func TestConnect_NoReactionHandlersSkipsPoller(t *testing.T) {
+	api := &fakeAPI{
+		comments:  []*gogithub.IssueComment{testComment(9001, 42, 1)},
+		reactions: map[int64][]*gogithub.Reaction{9001: {testReaction(1, "+1", 42, "User", time.Now())}},
+	}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollInterval = time.Millisecond
+	a := pollAdapter(t, cfg, srv)
+
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		DispatchReaction: func(context.Context, *core.Reaction) {
+			t.Error("poller dispatched with no reaction handler registered")
+		},
+		// HasReactionHandlers deliberately unset: no OnReaction was registered.
+		Done:       func(error) {},
+		Disconnect: func() error { return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "connect")
+	defer func() { _ = a.Disconnect() }()
+
+	// Identity resolution precedes any poller start; a wrongly-started poller
+	// at a 1ms interval would list comments many times over this window.
+	waitForSelfID(t, a, 777)
+	time.Sleep(20 * time.Millisecond)
+	commentLists, _ := api.counts()
+	asserts.Equal(t, commentLists, 0, "no poll cycle ran without a reaction handler")
+}
+
+func TestParsePollRepos_Wildcards(t *testing.T) {
+	repos, owners, err := parsePollRepos([]string{"lao/*", "lao/botbooter", "lao/*", "other/*", "lao/a*"})
+	asserts.NoError(t, err, "wildcards parse")
+	asserts.Equal(t, len(repos), 2, "explicit entries kept")
+	asserts.Equal(t, repos[0], testRepo, "explicit entry")
+	asserts.Equal(t, repos[1], repoRef{owner: "lao", name: "a*"}, "star inside a name stays a literal repo name")
+	asserts.Equal(t, len(owners), 2, "duplicate wildcard collapsed")
+	asserts.Equal(t, owners[0], "lao", "first wildcard owner")
+	asserts.Equal(t, owners[1], "other", "distinct wildcard owner")
+}
+
+func TestNewAdapter_WildcardConfig(t *testing.T) {
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"lao/*"}
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "wildcard-only config")
+	asserts.Equal(t, len(a.pollRepos), 0, "no explicit repos")
+	asserts.Equal(t, len(a.wildcardOwners), 1, "one wildcard owner")
+	asserts.True(t, a.reactions != nil, "store allocated for wildcard-only polling")
+	asserts.True(t, a.pollingConfigured(), "wildcard-only config counts as polling")
+}
+
+func TestMergeRepos_DedupsAndKeepsOrder(t *testing.T) {
+	other := repoRef{owner: "lao", name: "other"}
+	got := mergeRepos([]repoRef{testRepo}, []repoRef{other, testRepo, other})
+	asserts.Equal(t, len(got), 2, "duplicates dropped")
+	asserts.Equal(t, got[0], testRepo, "explicit entries first")
+	asserts.Equal(t, got[1], other, "discovered entry kept once")
+}
+
+// GitHub owner and repo names are case-insensitive, and discovery returns
+// API-canonical casing while explicit entries carry the user's casing — the
+// merge must not poll the same repo twice over a case mismatch. The
+// first-seen (explicit) form wins, so ChannelID keeps the user's spelling.
+func TestMergeRepos_DedupsCaseInsensitively(t *testing.T) {
+	got := mergeRepos([]repoRef{testRepo}, []repoRef{{owner: "Lao", name: "Botbooter"}})
+	asserts.Equal(t, len(got), 1, "case-variant duplicate dropped")
+	asserts.Equal(t, got[0], testRepo, "explicit spelling kept")
+}
+
+// Same property at parse time: two explicit entries naming one repo in
+// different casing collapse, as do case-variant wildcard owners.
+func TestParsePollRepos_DedupsCaseInsensitively(t *testing.T) {
+	repos, owners, err := parsePollRepos([]string{"lao/botbooter", "Lao/Botbooter", "lao/*", "LAO/*"})
+	asserts.NoError(t, err, "parse")
+	asserts.Equal(t, len(repos), 1, "case-variant explicit duplicate collapsed")
+	asserts.Equal(t, repos[0], testRepo, "first spelling kept")
+	asserts.Equal(t, len(owners), 1, "case-variant wildcard owner collapsed")
+	asserts.Equal(t, owners[0], "lao", "first owner spelling kept")
+}
+
+func TestEffectiveInterval(t *testing.T) {
+	cases := []struct {
+		name       string
+		repos      int
+		configured time.Duration
+		noAuto     bool
+		want       time.Duration
+		exceeded   bool
+	}{
+		{"NoRepos", 0, 30 * time.Second, false, 30 * time.Second, false},
+		{"ExactBudgetFit", 25, 30 * time.Second, false, 30 * time.Second, false}, // 25 repos * 120 cycles/h = 3000 exactly
+		{"CeilRoundsUp", 26, 30 * time.Second, false, 32 * time.Second, true},    // 26*3600/3000 = 31.2s -> 32s
+		{"RaisedToFit", 100, 30 * time.Second, false, 120 * time.Second, true},
+		{"ConfiguredAlreadyFits", 100, 300 * time.Second, false, 300 * time.Second, false},
+		{"NoAutoKeepsConfigured", 100, 30 * time.Second, true, 30 * time.Second, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, exceeded := effectiveInterval(tc.repos, tc.configured, tc.noAuto)
+			asserts.Equal(t, got, tc.want, "interval")
+			asserts.Equal(t, exceeded, tc.exceeded, "budget exceeded flag")
+		})
+	}
+}
+
+// The budget warning must fire on transitions only — entering the over-budget
+// state, or staying in it with a changed repo count — never every cycle, and
+// again after recovering and re-entering.
+func TestPollInterval_WarnsOnTransitionsOnly(t *testing.T) {
+	a, err := newAdapter(pollConfig())
+	asserts.NoError(t, err, "adapter")
+	var buf bytes.Buffer
+	a.mu.Lock()
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	a.mu.Unlock()
+	warns := func() int { return strings.Count(buf.String(), "level=WARN") }
+
+	var warned budgetState
+	asserts.Equal(t, a.pollInterval(100, &warned), 120*time.Second, "interval raised")
+	asserts.Equal(t, warns(), 1, "entering over-budget warns")
+	a.pollInterval(100, &warned)
+	asserts.Equal(t, warns(), 1, "steady over-budget state does not re-warn")
+	a.pollInterval(200, &warned)
+	asserts.Equal(t, warns(), 2, "changed repo count re-warns")
+	asserts.Equal(t, a.pollInterval(1, &warned), defaultReactionPollInterval, "under budget uses configured interval")
+	asserts.Equal(t, warns(), 2, "recovery does not warn")
+	a.pollInterval(100, &warned)
+	asserts.Equal(t, warns(), 3, "re-entering over-budget warns again")
+	asserts.True(t, strings.Contains(buf.String(), "automatically raising"), "warning names the auto-raise")
+}
+
+// With auto-interval disabled the configured interval is honored and the
+// warning says adjustment is off.
+func TestPollInterval_NoAutoWarnsButKeepsInterval(t *testing.T) {
+	cfg := pollConfig()
+	cfg.ReactionPollNoAutoInterval = true
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "adapter")
+	var buf bytes.Buffer
+	a.mu.Lock()
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	a.mu.Unlock()
+
+	var warned budgetState
+	asserts.Equal(t, a.pollInterval(100, &warned), defaultReactionPollInterval, "configured interval kept")
+	asserts.True(t, strings.Contains(buf.String(), "disabled"), "warning says auto-adjust is disabled")
+}
+
+// PAT mode, wildcard owner that is not the bot itself: discovery lists the
+// owner's public repos and skips archived ones.
+func TestDiscoverRepos_OwnerListing(t *testing.T) {
+	api := &fakeAPI{ownerRepos: map[string][]*gogithub.Repository{"octo": {
+		testRepository("octo", "alpha", false),
+		testRepository("octo", "attic", true),
+	}}}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"octo/*"}
+	a := pollAdapter(t, cfg, srv)
+
+	got, err := a.discoverRepos(context.Background())
+	asserts.NoError(t, err, "discovery")
+	asserts.Equal(t, len(got), 1, "archived repo skipped")
+	asserts.Equal(t, got[0], repoRef{owner: "octo", name: "alpha"}, "discovered repo")
+}
+
+// PAT mode, wildcard owner that IS the bot (case-insensitive): discovery must
+// use the authenticated-user listing, which sees private repos.
+func TestDiscoverRepos_SelfOwnerUsesAuthenticatedListing(t *testing.T) {
+	api := &fakeAPI{authedRepos: []*gogithub.Repository{testRepository("botbooter-bot", "private-repo", false)}}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"Botbooter-Bot/*"}
+	a := pollAdapter(t, cfg, srv)
+	a.mu.Lock()
+	a.selfLogin = "botbooter-bot"
+	a.mu.Unlock()
+
+	got, err := a.discoverRepos(context.Background())
+	asserts.NoError(t, err, "discovery")
+	asserts.Equal(t, len(got), 1, "one repo discovered via /user/repos")
+	asserts.Equal(t, got[0], repoRef{owner: "botbooter-bot", name: "private-repo"}, "private repo visible")
+}
+
+// App mode: discovery lists the installation's repos and filters them to the
+// wildcard owners, skipping archived.
+func TestDiscoverRepos_AppModeListsInstallation(t *testing.T) {
+	api := &fakeAPI{installRepos: []*gogithub.Repository{
+		testRepository("lao", "one", false),
+		testRepository("someone-else", "two", false),
+		testRepository("lao", "attic", true),
+	}}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := appConfig(t)
+	cfg.ReactionPollRepos = []string{"lao/*"}
+	a := pollAdapter(t, cfg, srv)
+
+	got, err := a.discoverRepos(context.Background())
+	asserts.NoError(t, err, "discovery")
+	asserts.Equal(t, len(got), 1, "other owners and archived repos filtered out")
+	asserts.Equal(t, got[0], repoRef{owner: "lao", name: "one"}, "installation repo matching the wildcard")
+}
+
+// waitUntil polls cond until it holds or the deadline passes.
+func waitUntil(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting: " + msg)
+}
+
+// End-to-end through the poll loop: wildcard-discovered repos are polled,
+// archived ones are not, and discovery is refreshed after
+// discoveryRefreshCycles cycles.
+func TestPollReactions_DiscoversPollsAndRefreshes(t *testing.T) {
+	api := &fakeAPI{
+		comments: []*gogithub.IssueComment{testComment(9001, 42, 0)},
+		ownerRepos: map[string][]*gogithub.Repository{"octo": {
+			testRepository("octo", "alpha", false),
+			testRepository("octo", "attic", true),
+		}},
+	}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"octo/*"}
+	cfg.ReactionPollInterval = time.Millisecond
+	cfg.ReactionPollNoAutoInterval = true // a 1ms cycle blows the budget; keep the test fast
+	a := pollAdapter(t, cfg, srv)
+	a.mu.Lock()
+	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil)) // silence the budget warning
+	a.mu.Unlock()
+
+	deps := core.AdapterDeps{
+		DispatchReaction: func(context.Context, *core.Reaction) { t.Error("zero-count comment must not dispatch") },
+		Done:             func(error) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		a.pollReactions(ctx, context.Background(), deps, time.Now())
+		close(stopped)
+	}()
+
+	// A second discovery listing proves the refresh cadence recurs.
+	waitUntil(t, func() bool { return api.repoListCount() >= 2 }, "discovery refreshed")
+	cancel()
+	<-stopped
+
+	asserts.True(t, api.commentListsFor("octo/alpha") >= 1, "discovered repo polled")
+	asserts.Equal(t, api.commentListsFor("octo/attic"), 0, "archived repo never polled")
+}
+
+// Discovery failure must not take down polling of explicit repos; the poller
+// logs, keeps going, and retries discovery at the next refresh.
+func TestPollReactions_DiscoveryFailureKeepsExplicitRepos(t *testing.T) {
+	api := &fakeAPI{
+		comments:      []*gogithub.IssueComment{testComment(9001, 42, 0)},
+		failRepoLists: true,
+	}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	cfg := pollConfig()
+	cfg.ReactionPollRepos = []string{"lao/botbooter", "missing/*"}
+	cfg.ReactionPollInterval = time.Millisecond
+	cfg.ReactionPollNoAutoInterval = true // a 1ms cycle blows the budget; keep the test fast
+	a := pollAdapter(t, cfg, srv)
+	a.mu.Lock()
+	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil)) // discovery warns every refresh
+	a.mu.Unlock()
+
+	deps := core.AdapterDeps{
+		DispatchReaction: func(context.Context, *core.Reaction) { t.Error("zero-count comment must not dispatch") },
+		Done:             func(error) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		a.pollReactions(ctx, context.Background(), deps, time.Now())
+		close(stopped)
+	}()
+
+	waitUntil(t, func() bool { return api.commentListsFor("lao/botbooter") >= 2 }, "explicit repo polled across cycles")
+	waitUntil(t, func() bool { return api.repoListCount() >= 2 }, "failed discovery retried")
+	cancel()
+	<-stopped
 }

@@ -134,6 +134,11 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.logger = deps.Logger
 	a.mu.Unlock()
 
+	// Snapshot the reaction cutoff now, not when the poller goroutine starts:
+	// the poller waits behind self-identity resolution (a GitHub round-trip),
+	// and the documented contract is "only reactions added while connected".
+	reactionCutoff := time.Now()
+
 	go func() {
 		// Self-identity resolves here, off the Connect path: adapter.Connect
 		// is non-blocking by contract (core holds the bot lock across it), so
@@ -144,7 +149,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		// mode needs the lookup: App comments arrive as type "Bot" and
 		// isSelfOrBot drops them wholesale.
 		if a.cfg.Token != "" {
-			selfID, err := a.resolveSelf(ctx)
+			selfID, selfLogin, err := a.resolveSelf(ctx)
 			if err != nil {
 				_ = ln.Close()        // Serve never runs, so nothing else closes it
 				if ctx.Err() == nil { // a canceled startup is a shutdown, not a failure
@@ -154,19 +159,21 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 			}
 			a.mu.Lock()
 			a.selfID = selfID
+			a.selfLogin = selfLogin
 			a.mu.Unlock()
 		}
 		// The reaction poller starts after self-identity resolves so its very
 		// first cycle can filter the bot's own reactions, and only when repos
-		// are configured. It stops with ctx like the teardown watcher below;
+		// are configured AND an OnReaction handler is registered — polling
+		// costs API requests every cycle, so a bot nobody is listening on
+		// must not pay for it. It stops with ctx like the teardown watcher below;
 		// its dispatches ride detachedCtx + inflight, so Disconnect's drain
-		// covers reaction handlers exactly like webhook dispatch.
-		if len(a.pollRepos) > 0 {
-			go a.pollReactions(ctx, detachedCtx, deps, time.Now().Add(-a.cfg.ReactionLookback))
+		// covers reaction handlers like webhook dispatch (see pollReactions
+		// for the one caveat).
+		if a.pollingConfigured() && deps.HasReactionHandlers {
+			go a.pollReactions(ctx, detachedCtx, deps, reactionCutoff)
 		}
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			deps.Done(err)
-		}
+		serve(srv, ln, deps.Done)
 	}()
 
 	// Tear down when the run context is canceled; identity-compare so a stale
@@ -184,16 +191,27 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
-// resolveSelf resolves the bot's own account for reply-loop prevention in PAT
-// mode, where its comments arrive as a plain User. App mode needs no lookup:
-// its comments carry user type "Bot", which isSelfOrBot drops without ever
-// consulting selfID.
-func (a *adapter) resolveSelf(ctx context.Context) (int64, error) {
+// serve runs srv on ln and reports any unexpected termination — anything but
+// the ErrServerClosed of a clean Shutdown — to done. Split out so the error
+// filter is unit-testable with a failing listener (mirrors the Teams adapter).
+func serve(srv *http.Server, ln net.Listener, done func(error)) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		done(err)
+	}
+}
+
+// resolveSelf resolves the bot's own account (ID and login) for reply-loop
+// prevention in PAT mode, where its comments arrive as a plain User; the
+// login also routes wildcard repo discovery of the bot's own owner through
+// the authenticated-user listing. App mode needs no lookup: its comments
+// carry user type "Bot", which isSelfOrBot drops without ever consulting
+// selfID, and its discovery lists the installation's repos.
+func (a *adapter) resolveSelf(ctx context.Context) (int64, string, error) {
 	user, _, err := a.client.Users.Get(ctx, "")
 	if err != nil {
-		return 0, fmt.Errorf("github: resolve self identity: %w", err)
+		return 0, "", fmt.Errorf("github: resolve self identity: %w", err)
 	}
-	return user.GetID(), nil
+	return user.GetID(), user.GetLogin(), nil
 }
 
 func (a *adapter) Disconnect() error {

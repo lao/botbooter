@@ -3,7 +3,9 @@
 // the adapter receives issue and PR comments over an issue_comment webhook and
 // replies as issue comments through the GitHub REST API. Emoji reactions have
 // no webhook, so OnReaction is fed by an opt-in poller over each
-// Config.ReactionPollRepos entry's newest comments. A GitHub-only binary pulls
+// Config.ReactionPollRepos entry's newest comments; the poller runs only when
+// both repos are listed and an OnReaction handler was registered before the
+// bot connects. A GitHub-only binary pulls
 // in go-github and ghinstallation but never compiles discordgo, slack-go or
 // go-telegram.
 package github
@@ -27,11 +29,6 @@ type Message = githubint.Message
 // [Config].ReactionPollRepos is set.
 type ReactionPayload = githubint.ReactionPayload
 
-// ReactionStore dedups polled reactions across cycles; see
-// [Config].ReactionStore. The default is in-process — provide a persistent
-// implementation (with [Config].ReactionLookback) to survive restarts.
-type ReactionStore = githubint.ReactionStore
-
 // ErrMissingConfig is returned by [New] when a required [Config] field is empty.
 var ErrMissingConfig = githubint.ErrMissingConfig
 
@@ -43,8 +40,8 @@ var ErrAmbiguousAuth = githubint.ErrAmbiguousAuth
 var ErrBadChannelID = githubint.ErrBadChannelID
 
 // ErrBadReactionConfig is returned by [New] when a reaction-polling [Config]
-// field is malformed: a ReactionPollRepos entry that is not "owner/name", or a
-// negative ReactionPollInterval or ReactionLookback.
+// field is malformed: a ReactionPollRepos entry that is not "owner/name" or
+// the wildcard "owner/*", or a negative ReactionPollInterval.
 var ErrBadReactionConfig = githubint.ErrBadReactionConfig
 
 // New creates a GitHub bot. It runs an inbound webhook HTTP server at cfg.Addr,

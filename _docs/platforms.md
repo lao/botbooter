@@ -470,8 +470,20 @@ bot, err := github.New(github.Config{
 })
 ```
 
-Optional `github.Config` fields: `Path` (webhook route, default `/webhook`) and
-`HTTPClient` (the outbound API client; defaults to a 30-second timeout).
+Optional `github.Config` fields: `Path` (webhook route, default `/webhook`),
+`HTTPClient` (the outbound API client; defaults to a 30-second timeout), and the
+reaction-polling trio — `ReactionPollRepos` (opt-in; empty disables polling,
+and the poller only starts when an `OnReaction` handler is registered before
+the bot connects; entries are `"owner/name"` or the wildcard `"owner/*"`,
+which polls every repo of that owner the credentials can see, minus archived,
+re-resolved every ~10 cycles), `ReactionPollInterval` (default 30s; when the
+polled repo count at that interval would exceed the poller's request budget of
+3000/h the adapter logs a warning and automatically raises the effective
+interval to fit) and `ReactionPollNoAutoInterval` (disables that raise — the
+warning still logs and the configured interval is honored). Reaction dedup is
+in-process only, and only reactions added while the bot is connected are
+dispatched — reactions added while it was down are missed. See the reactions
+example and CLAUDE.md for the polling contract.
 
 #### Step 3, Expose the local server
 
@@ -482,7 +494,10 @@ ngrok http 8080
 Point the webhook's payload URL at `https://…/webhook`, then comment on any
 issue or PR in a watched repository. Comment from a **human** account: the bot
 ignores its own comments and all other bots' (any `Bot`-typed author), so two
-bots can never reply-loop each other.
+App-mode bots can never reply-loop each other. A PAT-mode bot's comments arrive
+as a plain `User`, though — another bot ignores it only when it is that bot's
+own account, so two *PAT-mode* bots watching the same repository can still
+ping-pong. Prefer App mode when several bots share a repo.
 
 `Message.ChannelID` is `owner/repo#number`, so replies land on the same issue
 or PR; `github.RawEvent(m)` returns a `*github.Message` whose `Event` field

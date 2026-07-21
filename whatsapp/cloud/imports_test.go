@@ -14,5 +14,5 @@ import (
 // the module-level isolation deps test.
 func TestWhatsAppCloudImportsNoPlatformSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "whatsmeow", "modernc.org/sqlite"}, "whatsapp/cloud")
+		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "whatsmeow", "modernc.org/sqlite", "google/go-github", "bradleyfalzon/ghinstallation"}, "whatsapp/cloud")
 }
