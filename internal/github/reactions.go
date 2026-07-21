@@ -37,7 +37,9 @@ type ReactionStore interface {
 	MarkSeen(ctx context.Context, id int64) (fresh bool, err error)
 }
 
-// memoryReactionStore is the default in-process ReactionStore.
+// memoryReactionStore is the default in-process ReactionStore. Its seen set
+// grows one int64 per dispatched reaction and is never pruned — negligible at
+// poller rates, and the cutoff keeps pre-connect history out entirely.
 type memoryReactionStore struct {
 	mu   sync.Mutex
 	seen map[int64]struct{}
@@ -141,7 +143,10 @@ func toReaction(repo repoRef, issue int, comment *gogithub.IssueComment, reactio
 // failures are logged and retried next cycle, never fatal — the webhook half
 // of the adapter keeps serving. Dispatch runs on dispatchCtx (the connection's
 // detached context) under the inflight counter, so Disconnect's drain covers
-// reaction handlers exactly like webhook dispatch.
+// reaction handlers like webhook dispatch — minus the ack barrier: webhook
+// increments land before Shutdown returns, while a poller mid-cycle can spawn
+// a dispatch as the drain ends, so that handler runs with an already-canceled
+// context and may outlive Disconnect.
 func (a *adapter) pollReactions(ctx, dispatchCtx context.Context, deps core.AdapterDeps, cutoff time.Time) {
 	// counts caches each window comment's reactions.total_count from the
 	// previous cycle; an unchanged count skips the per-comment detail request,

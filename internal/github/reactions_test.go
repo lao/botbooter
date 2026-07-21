@@ -160,6 +160,21 @@ func reactionCaptureDeps(mu *sync.Mutex, got *[]*core.Reaction, done chan struct
 	}
 }
 
+// drainInflight settles any dispatch goroutines a poll cycle spawned before a
+// test asserts on them. The inflight increment is synchronous with the spawn,
+// so a "nothing dispatched" assertion after this drain is deterministic: a
+// wrongly-spawned dispatch is waited for and lands in got, instead of racing
+// the assertion and false-passing.
+func drainInflight(t *testing.T, a *adapter) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.drainDispatch(ctx)
+	// drainDispatch returns silently on timeout; a hung dispatch must fail the
+	// test, not let a "nothing dispatched" assertion false-pass.
+	asserts.Equal(t, a.inflight.Load(), int64(0), "dispatch goroutines settled within the drain window")
+}
+
 var testRepo = repoRef{owner: "lao", name: "botbooter"}
 
 func TestNewAdapter_ReactionConfigValidation(t *testing.T) {
@@ -257,7 +272,10 @@ func TestPollRepoOnce_CutoffSkipsAndSparesStore(t *testing.T) {
 		reactionCaptureDeps(&mu, &got, nil), testRepo,
 		map[int64]int{}, map[int64]int{}, time.Now())
 	asserts.NoError(t, err, "poll cycle")
+	drainInflight(t, a)
 
+	mu.Lock()
+	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "pre-cutoff reaction not dispatched")
 	asserts.Equal(t, store.callCount(), 0, "pre-cutoff reaction never reaches the store")
 }
@@ -281,6 +299,7 @@ func TestPollRepoOnce_SeenReactionNotRedispatched(t *testing.T) {
 	asserts.NoError(t, a.pollRepoOnce(context.Background(), context.Background(), deps, testRepo, map[int64]int{}, map[int64]int{}, cutoff), "first cycle")
 	awaitDispatch(t, done, 1)
 	asserts.NoError(t, a.pollRepoOnce(context.Background(), context.Background(), deps, testRepo, map[int64]int{}, map[int64]int{}, cutoff), "second cycle")
+	drainInflight(t, a)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -336,7 +355,10 @@ func TestPollRepoOnce_BotAndSelfReactorsDropped(t *testing.T) {
 		reactionCaptureDeps(&mu, &got, nil), testRepo,
 		map[int64]int{}, map[int64]int{}, time.Now().Add(-time.Hour))
 	asserts.NoError(t, err, "poll cycle")
+	drainInflight(t, a)
 
+	mu.Lock()
+	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "bot-type and self reactors are dropped")
 }
 
@@ -360,7 +382,10 @@ func TestPollRepoOnce_StoreErrorSkipsDispatch(t *testing.T) {
 		reactionCaptureDeps(&mu, &got, nil), testRepo,
 		map[int64]int{}, map[int64]int{}, time.Now().Add(-time.Hour))
 	asserts.NoError(t, err, "a store failure is logged, not a cycle error")
+	drainInflight(t, a)
 
+	mu.Lock()
+	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "reaction skipped on store error")
 	asserts.Equal(t, store.callCount(), 1, "store was consulted")
 }
@@ -406,7 +431,46 @@ func TestPollRepoOnce_MalformedIssueURL(t *testing.T) {
 		reactionCaptureDeps(&mu, &got, nil), testRepo,
 		map[int64]int{}, map[int64]int{}, time.Now().Add(-time.Hour))
 	asserts.Error(t, err, "unparseable issue_url is an error, not a silent bad ChannelID")
+	drainInflight(t, a)
+
+	mu.Lock()
+	defer mu.Unlock()
 	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+// A zero-reaction comment — the dominant steady state — must skip the detail
+// request even on its first sighting, and still enter the count cache.
+func TestPollRepoOnce_ZeroCountSkipsDetailCall(t *testing.T) {
+	api := &fakeAPI{comments: []*gogithub.IssueComment{testComment(9001, 42, 0)}}
+	srv := httptest.NewServer(api.handler(t))
+	defer srv.Close()
+	a := pollAdapter(t, pollConfig(), srv)
+
+	var mu sync.Mutex
+	var got []*core.Reaction
+	next := map[int64]int{}
+	err := a.pollRepoOnce(context.Background(), context.Background(),
+		reactionCaptureDeps(&mu, &got, nil), testRepo,
+		map[int64]int{}, next, time.Now().Add(-time.Hour))
+	asserts.NoError(t, err, "poll cycle")
+
+	_, reactionLists := api.counts()
+	asserts.Equal(t, reactionLists, 0, "no detail request for a zero-count comment")
+	cached, ok := next[9001]
+	asserts.True(t, ok, "zero count enters the cache")
+	asserts.Equal(t, cached, 0, "cached count is zero")
+}
+
+// issueNumber must reject non-positive numbers, not just unparseable URLs.
+func TestIssueNumber_RejectsNonPositive(t *testing.T) {
+	for _, url := range []string{
+		"https://api.github.com/repos/lao/botbooter/issues/0",
+		"https://api.github.com/repos/lao/botbooter/issues/-1",
+	} {
+		c := &gogithub.IssueComment{IssueURL: gogithub.Ptr(url)}
+		_, err := issueNumber(c)
+		asserts.Error(t, err, url)
+	}
 }
 
 // Reaction dispatch must ride the inflight counter so Disconnect's drain

@@ -12,5 +12,5 @@ import (
 // isolation deps test.
 func TestWhatsMeowImportsNoForeignSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "golang-jwt"}, "whatsmeow")
+		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "golang-jwt", "google/go-github", "bradleyfalzon/ghinstallation"}, "whatsmeow")
 }

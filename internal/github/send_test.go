@@ -89,6 +89,7 @@ func TestParseChannelID(t *testing.T) {
 		// surfacing later as a confusing API 404 on repo "repo#10".
 		{"owner/repo#10#20", "", "", 0, true},
 		{"owner/repo", "", "", 0, true},   // no #number
+		{"a/b/c#1", "", "", 0, true},      // slash inside repo
 		{"owner#1", "", "", 0, true},      // no /repo
 		{"owner/repo#0", "", "", 0, true}, // non-positive number
 		{"owner/repo#abc", "", "", 0, true},
