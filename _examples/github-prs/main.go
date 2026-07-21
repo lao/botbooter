@@ -15,8 +15,10 @@
 //	go run ./_examples/github-prs   # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) (and optional GITHUB_REPO, GITHUB_PR_POLL_SECONDS, GITHUB_WEBHOOK_SECRET, GITHUB_ADDR, GITHUB_PATH)
 //
 // Only the API credentials are required. GITHUB_REPO ("owner/name") pins the
-// watch to one repository; when unset the example watches every repository the
-// credentials can reach, discovered once at startup — the App installation's
+// watch to one repository, and the wildcard form ("owner/*") narrows the watch
+// to that owner's repositories among the discovered set; when unset the
+// example watches every repository the credentials can reach, discovered once
+// at startup — the App installation's
 // granted repos in App mode (GET /installation/repositories), everything the
 // token user can access in PAT mode (GET /user/repos; a fine-grained PAT
 // narrows this to its granted repos, a classic PAT sees every repo the account
@@ -190,19 +192,25 @@ func watchPullRequests(ctx context.Context, bot *botbooter.Bot, scope watchScope
 // resolveScope returns the explicit GITHUB_REPO scope when set, and otherwise
 // discovers every repository the credentials can reach: the installation's
 // granted repos in App mode, the token user's accessible repos in PAT mode.
-// Archived repositories are skipped — they cannot receive new PRs. Owners
-// dedupe into user:/org: search qualifiers, chunked under the query length
-// cap.
+// The wildcard "owner/*" (matching the adapter's ReactionPollRepos form — "*"
+// is only special as the whole name) runs the same discovery narrowed to that
+// owner, so it still only covers repos the credentials reach. Archived
+// repositories are skipped — they cannot receive new PRs. Owners dedupe into
+// user:/org: search qualifiers, chunked under the query length cap.
 func resolveScope(ctx context.Context, bot *botbooter.Bot) (watchScope, error) {
+	ownerFilter := ""
 	if repo := os.Getenv("GITHUB_REPO"); repo != "" {
 		owner, name, ok := strings.Cut(repo, "/")
 		if !ok || owner == "" || name == "" {
-			return watchScope{}, fmt.Errorf(`GITHUB_REPO must be "owner/name", got %q`, repo)
+			return watchScope{}, fmt.Errorf(`GITHUB_REPO must be "owner/name" or "owner/*", got %q`, repo)
 		}
-		return watchScope{
-			qualifiers: []string{"repo:" + repo},
-			allowed:    map[string]bool{repo: true},
-		}, nil
+		if name != "*" {
+			return watchScope{
+				qualifiers: []string{"repo:" + repo},
+				allowed:    map[string]bool{repo: true},
+			}, nil
+		}
+		ownerFilter = owner
 	}
 
 	client := github.Client(bot)
@@ -230,6 +238,11 @@ func resolveScope(ctx context.Context, bot *botbooter.Bot) (watchScope, error) {
 		}
 		for _, r := range repos {
 			if r.GetArchived() {
+				continue
+			}
+			// GitHub owner names are case-insensitive; match the wildcard the
+			// same way so a casing mismatch doesn't silently watch nothing.
+			if ownerFilter != "" && !strings.EqualFold(r.GetOwner().GetLogin(), ownerFilter) {
 				continue
 			}
 			scope.allowed[r.GetFullName()] = true
