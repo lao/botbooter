@@ -1,28 +1,39 @@
-// Command github-prs demonstrates reacting when a pull request is opened on
-// any repository the bot can reach: the bot posts a welcome comment on every
-// new PR.
+// Command github-prs demonstrates reacting when a pull request is opened: the
+// bot posts a welcome comment on every new PR. GITHUB_PR_MODE picks how PR
+// creation is observed — "poll" (the default) or "webhook".
 //
-// The adapter's webhook ingress is issue_comment events only — a pull_request
-// "opened" delivery is acked and dropped, so no command handler fires when a PR
-// is created. This example works around that gap entirely with the public API,
-// the same way reaction ingress was prototyped before it moved into the
-// adapter: a single watcher polls the Search API for freshly created PRs
-// through the bot's own authenticated API client (github.Client) and replies
-// through the bot's normal egress — bot.SendMessageContext with channel
-// "owner/repo#number" posts an issue comment, and PRs are issues for
-// commenting purposes, so the comment lands on the PR conversation.
+//	go run ./_examples/github-prs   # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) (and optional GITHUB_PR_MODE, GITHUB_REPO, GITHUB_PR_POLL_SECONDS, GITHUB_WEBHOOK_SECRET, GITHUB_ADDR, GITHUB_PATH)
 //
-//	go run ./_examples/github-prs   # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) (and optional GITHUB_REPO, GITHUB_PR_POLL_SECONDS, GITHUB_WEBHOOK_SECRET, GITHUB_ADDR, GITHUB_PATH)
+// # Webhook mode
 //
-// Only the API credentials are required. GITHUB_REPO ("owner/name") pins the
-// watch to one repository, and the wildcard form ("owner/*") narrows the watch
-// to that owner's repositories among the discovered set; when unset the
-// example watches every repository the credentials can reach, discovered once
-// at startup — the App installation's
-// granted repos in App mode (GET /installation/repositories), everything the
-// token user can access in PAT mode (GET /user/repos; a fine-grained PAT
-// narrows this to its granted repos, a classic PAT sees every repo the account
-// sees) — skipping archived ones, which cannot receive new PRs.
+// GITHUB_PR_MODE=webhook uses the adapter's pull_request ingress
+// (github.Config.OnPullRequest): GitHub pushes each delivery to the bot's
+// webhook endpoint, so a new PR is welcomed instantly, with no polling budget
+// and no eventual-consistency window. The price is reachability: the endpoint
+// (GITHUB_ADDR, default ":8080") must be exposed at a public HTTPS URL and
+// registered as a repository or App webhook subscribed to the pull_request
+// event (add issue_comment for the echo command below), with
+// GITHUB_WEBHOOK_SECRET matching the registered secret — required in this
+// mode, because GitHub signs every delivery. The adapter already drops
+// bot-authored and self-authored PRs and forwards only the opened, reopened
+// and synchronize actions; this example welcomes only "opened", a PR's first
+// appearance. GITHUB_REPO is ignored — the webhook registration itself decides
+// which repositories deliver.
+//
+// # Poll mode
+//
+// Poll mode needs no public URL and no webhook registration: a single watcher
+// polls the Search API for freshly created PRs through the bot's own
+// authenticated API client (github.Client). Only the API credentials are
+// required. GITHUB_REPO ("owner/name") pins the watch to one repository, and
+// the wildcard form ("owner/*") narrows the watch to that owner's
+// repositories among the discovered set; when unset the example watches every
+// repository the credentials can reach, discovered once at startup — the App
+// installation's granted repos in App mode (GET /installation/repositories),
+// everything the token user can access in PAT mode (GET /user/repos; a
+// fine-grained PAT narrows this to its granted repos, a classic PAT sees
+// every repo the account sees) — skipping archived ones, which cannot receive
+// new PRs.
 //
 // The watch itself is one Search API query per cycle regardless of repo count
 // (GITHUB_PR_POLL_SECONDS, default 30), paginated only when a cycle's window
@@ -43,26 +54,31 @@
 // arrive as a plain User and are NOT skipped — don't open PRs with the same
 // account the bot posts with.
 //
-// The webhook half of the adapter still needs an address to bind, but PR
-// watching never uses it, so it defaults to a localhost-only listener with a
-// placeholder secret; set GITHUB_WEBHOOK_SECRET/GITHUB_ADDR and register the
-// URL as a repo webhook (events: issue_comment) only if you also want the
-// "echo" command to answer comments on the PR.
+// In poll mode the webhook half of the adapter still needs an address to
+// bind, but PR watching never uses it, so it defaults to a localhost-only
+// listener with a placeholder secret; set GITHUB_WEBHOOK_SECRET/GITHUB_ADDR
+// and register the URL as a repo webhook (events: issue_comment) only if you
+// also want the "echo" command to answer comments on the PR.
+//
+// Either way the reply goes through the bot's normal egress —
+// bot.SendMessageContext with channel "owner/repo#number" posts an issue
+// comment, and PRs are issues for commenting purposes, so the comment lands
+// on the PR conversation.
 //
 // The code is split by concern: main.go (env parsing, wiring), bot.go
-// (adapter construction, the welcome comment), scope.go (repository
-// discovery), poll.go (the Search API watcher).
+// (adapter construction, the welcome comment), webhook.go (webhook mode),
+// scope.go (poll-mode repository discovery), poll.go (the Search API
+// watcher).
 package main
 
 import (
+	"cmp"
 	"context"
 	"log"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/lao/botbooter"
@@ -71,22 +87,25 @@ import (
 func main() {
 	_ = godotenv.Load(".env")
 
-	interval := 30 * time.Second
-	if s := os.Getenv("GITHUB_PR_POLL_SECONDS"); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n <= 0 {
-			log.Fatalf("parse GITHUB_PR_POLL_SECONDS %q", s)
-		}
-		interval = time.Duration(n) * time.Second
+	var bot *botbooter.Bot
+	var err error
+	mode := cmp.Or(os.Getenv("GITHUB_PR_MODE"), "poll")
+	switch mode {
+	case "webhook":
+		bot, err = newWebhookBot()
+	case "poll":
+		bot, err = newBot(nil)
+	default:
+		log.Fatalf(`GITHUB_PR_MODE must be "poll" or "webhook", got %q`, mode)
 	}
-
-	bot, err := newBot()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// The webhook half still works when registered: commenting "echo <text>" on
-	// the welcomed PR answers back, proving both ingress directions on one PR.
+	// The webhook half also answers comments: commenting "echo <text>" on the
+	// welcomed PR echoes back, proving both ingress directions on one PR. In
+	// poll mode this needs the issue_comment webhook registered; in webhook
+	// mode the endpoint is already registered, so just add the event.
 	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, message *botbooter.Message) {
 		reply := "You said: " + strings.TrimPrefix(message.Content, "echo ")
 		if err := b.SendMessageContext(ctx, message.ChannelID, reply); err != nil {
@@ -97,25 +116,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Bound discovery so a stalled network call fails the startup instead of
-	// hanging it; the watch loop bounds its own cycles the same way.
-	discCtx, discCancel := context.WithTimeout(ctx, time.Minute)
-	scope, err := resolveScope(discCtx, bot)
-	discCancel()
-	if err != nil {
+	if mode == "webhook" {
+		log.Printf("serving pull_request webhooks on %s (register the public URL with events: pull_request, issue_comment)",
+			cmp.Or(os.Getenv("GITHUB_ADDR"), ":8080"))
+	} else if err := startPollWatcher(ctx, bot); err != nil {
 		log.Fatal(err)
 	}
-	if len(scope.allowed) == 0 {
-		log.Fatal("no repositories to watch: the credentials reach none (grant the App/PAT access, or set GITHUB_REPO)")
-	}
 
-	go watchPullRequests(ctx, bot, scope, interval)
-
-	log.Printf("watching %d repositories for new pull requests every %s (%d search query/cycle)",
-		len(scope.allowed), interval, len(scope.qualifiers))
-	if perMin := len(scope.qualifiers) * int(time.Minute/interval); perMin > 25 {
-		log.Printf("warning: ~%d searches/min risks the 30/min Search API budget; raise GITHUB_PR_POLL_SECONDS", perMin)
-	}
 	if err := bot.Run(ctx); err != nil {
 		log.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,41 @@ import (
 // searchLag is the re-query overlap compensating for the Search API's
 // eventually consistent index; the seen-set dedupes within it.
 const searchLag = 2 * time.Minute
+
+// startPollWatcher resolves the watch scope and starts the background Search
+// API watcher. It returns an error instead of logging fatally so main owns
+// process exit.
+func startPollWatcher(ctx context.Context, bot *botbooter.Bot) error {
+	interval := 30 * time.Second
+	if s := os.Getenv("GITHUB_PR_POLL_SECONDS"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("parse GITHUB_PR_POLL_SECONDS %q", s)
+		}
+		interval = time.Duration(n) * time.Second
+	}
+
+	// Bound discovery so a stalled network call fails the startup instead of
+	// hanging it; the watch loop bounds its own cycles the same way.
+	discCtx, discCancel := context.WithTimeout(ctx, time.Minute)
+	scope, err := resolveScope(discCtx, bot)
+	discCancel()
+	if err != nil {
+		return err
+	}
+	if len(scope.allowed) == 0 {
+		return fmt.Errorf("no repositories to watch: the credentials reach none (grant the App/PAT access, or set GITHUB_REPO)")
+	}
+
+	go watchPullRequests(ctx, bot, scope, interval)
+
+	log.Printf("watching %d repositories for new pull requests every %s (%d search query/cycle)",
+		len(scope.allowed), interval, len(scope.qualifiers))
+	if perMin := len(scope.qualifiers) * int(time.Minute/interval); perMin > 25 {
+		log.Printf("warning: ~%d searches/min risks the 30/min Search API budget; raise GITHUB_PR_POLL_SECONDS", perMin)
+	}
+	return nil
+}
 
 // watchPullRequests polls the Search API for PRs created since the last cycle
 // across the whole scope at once and welcomes each exactly once. It reads
