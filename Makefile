@@ -1,4 +1,4 @@
-.PHONY: all build test test-race test-examples cover lint fmt fmt-examples vet vet-examples vuln run-cli tidy clean
+.PHONY: all build test test-race test-examples cover lint fmt fmt-examples vet vet-examples vuln run-cli tidy clean publish
 
 # Default target: format, vet, lint and race-test. The lifecycle code is
 # concurrency-heavy, so the pre-commit gate runs the race detector.
@@ -51,6 +51,30 @@ vuln:
 # _examples is its own module, so run it from that directory.
 run-cli:
 	cd _examples && go run ./basic cli
+
+# Publish a new version of the module: check the release preconditions, run
+# the full pre-commit gate, then create an annotated tag and push it. Go
+# consumers pick the tag up through the module proxy; the final go list warms
+# proxy.golang.org so the version resolves immediately (its failure is
+# non-fatal — the tag is already live and the proxy fetches on demand).
+# Publishing is one-way: once the proxy caches a version it can never be
+# re-tagged — a bad release must be burned and retracted, not reissued.
+# VERSION reaches the shell as an environment variable, never as recipe text,
+# so a value with shell metacharacters is inert data, not command source.
+# Usage: make publish VERSION=v0.4.0
+publish: export PUBLISH_VERSION := $(VERSION)
+publish:
+	@[ -n "$$PUBLISH_VERSION" ] || { echo "usage: make publish VERSION=vX.Y.Z"; exit 1; }
+	@printf '%s' "$$PUBLISH_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$$' || { echo "VERSION must be canonical semver like v0.4.0 (no leading zeros, no pre-release)"; exit 1; }
+	@! git rev-parse -q --verify "refs/tags/$$PUBLISH_VERSION" >/dev/null || { echo "tag $$PUBLISH_VERSION already exists: git push origin $$PUBLISH_VERSION to finish an interrupted publish, or git tag -d $$PUBLISH_VERSION to retry"; exit 1; }
+	@[ -z "$$(git status --porcelain)" ] || { echo "working tree not clean"; exit 1; }
+	@git fetch -q origin main
+	@git merge-base --is-ancestor HEAD origin/main || { echo "HEAD is not on origin/main; merge and push first"; exit 1; }
+	$(MAKE) all
+	@[ -z "$$(git status --porcelain)" ] || { echo "make all modified files (fmt); commit them and retry"; exit 1; }
+	git tag -a "$$PUBLISH_VERSION" -m "$$PUBLISH_VERSION"
+	git push origin "$$PUBLISH_VERSION"
+	-GOPROXY=https://proxy.golang.org go list -m github.com/lao/botbooter@"$$PUBLISH_VERSION"
 
 tidy:
 	go mod tidy
