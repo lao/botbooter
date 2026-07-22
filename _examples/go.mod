@@ -5,9 +5,11 @@ go 1.25.0
 replace github.com/lao/botbooter => ../
 
 require (
+	github.com/google/go-github/v88 v88.0.0
 	github.com/joho/godotenv v1.5.1
 	github.com/lao/botbooter v0.0.0-00010101000000-000000000000
 	github.com/teilomillet/gollm v0.1.11
+	modernc.org/sqlite v1.53.0
 )
 
 require (
@@ -30,7 +32,6 @@ require (
 	github.com/go-telegram/bot v1.21.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
-	github.com/google/go-github/v88 v88.0.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
@@ -66,6 +67,5 @@ require (
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.53.0 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )
