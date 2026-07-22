@@ -219,9 +219,10 @@ type AdapterDeps struct {
 	Logger              *slog.Logger // always non-nil
 }
 
-// Bot is the platform-agnostic chat bot. Register handlers and middleware
-// before Connect; after that, Connect/Run/Disconnect/Send are safe to call
-// concurrently. Registering after Connect races the dispatch goroutine.
+// Bot is the platform-agnostic chat bot. Register handlers, middleware, and flows
+// (HandleFlow — and the Flow builder calls behind it) before Connect; after that,
+// Connect/Run/Disconnect/Send are safe to call concurrently. Registering, or
+// mutating a registered Flow, after Connect races the dispatch goroutine.
 type Bot struct {
 	BotType BotType
 

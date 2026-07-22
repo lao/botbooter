@@ -383,7 +383,7 @@ func TestConversationManager_SweeperRecoversFromStorePanic(t *testing.T) {
 
 	// sweepRecovered must swallow the store's panic; if it propagated, the test
 	// binary would crash here.
-	m.sweepRecovered(time.Now())
+	m.sweepRecovered(time.Now(), nil)
 
 	// Delete panicked before removing the entry, so it remains — and the manager
 	// is still alive.

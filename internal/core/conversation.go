@@ -124,22 +124,12 @@ func (s *memConversationStore) expiredKeys(now time.Time) []string {
 // inside a store call, so a durable store can later sit behind compare-and-swap
 // without relocating the validator (which is arbitrary user Go code).
 type conversationManager struct {
-	store  ConversationStore
-	locks  [conversationShards]sync.Mutex
-	logger *slog.Logger // sweeper diagnostics sink; set by startSweeper, nil → slog.Default
+	store ConversationStore
+	locks [conversationShards]sync.Mutex
 }
 
 func newConversationManager() *conversationManager {
 	return &conversationManager{store: newMemConversationStore()}
-}
-
-// log returns the configured sweeper logger, falling back to slog.Default so the
-// manager is usable before startSweeper wires one in (e.g. in unit tests).
-func (m *conversationManager) log() *slog.Logger {
-	if m.logger != nil {
-		return m.logger
-	}
-	return slog.Default()
 }
 
 // shardFor returns the lock guarding key. The same key always maps to the same
@@ -162,11 +152,16 @@ func (m *conversationManager) withLock(key string, fn func()) {
 
 // sweepRecovered runs sweep with a recover so a panic in a custom
 // ConversationStore cannot take down the sweeper goroutine (and with it the
-// process), mirroring the recover that guards dispatch in core.go.
-func (m *conversationManager) sweepRecovered(now time.Time) {
+// process), mirroring the recover that guards dispatch in core.go. logger (may be
+// nil → slog.Default) is passed in rather than held on the manager so a sweeper
+// goroutine never shares mutable diagnostics state with a concurrent reconnect.
+func (m *conversationManager) sweepRecovered(now time.Time, logger *slog.Logger) {
 	defer func() {
 		if r := recover(); r != nil {
-			m.log().Error("botbooter: recovered from panic in conversation sweeper", "panic", r)
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Error("botbooter: recovered from panic in conversation sweeper", "panic", r)
 		}
 	}()
 	m.sweep(now)
@@ -193,12 +188,13 @@ func (m *conversationManager) sweep(now time.Time) {
 // returned channel so a caller can observe that the goroutine has exited — making
 // the sweeper leak-free and testable. A non-positive interval falls back to
 // defaultSweepInterval. logger (may be nil) routes sweeper panic recovery through
-// the Bot's configured diagnostics sink.
+// the Bot's configured diagnostics sink; it is captured by the goroutine, not
+// stored on the manager, so a reconnect that starts a fresh sweeper never races a
+// lingering old one over shared state.
 func (m *conversationManager) startSweeper(ctx context.Context, interval time.Duration, logger *slog.Logger) <-chan struct{} {
 	if interval <= 0 {
 		interval = defaultSweepInterval
 	}
-	m.logger = logger
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -209,7 +205,7 @@ func (m *conversationManager) startSweeper(ctx context.Context, interval time.Du
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				m.sweepRecovered(time.Now())
+				m.sweepRecovered(time.Now(), logger)
 			}
 		}
 	}()
