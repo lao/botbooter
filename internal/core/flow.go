@@ -52,6 +52,9 @@ func Validate(fn func(string) error) AskOption {
 //
 //   - It keeps the answer out of the framework's own logging and excludes the key
 //     from any state serialized to a Store, so secrets never reach durable storage.
+//   - Its answer is stored with its exact bytes: ordinary answers are trimmed of
+//     surrounding whitespace, but a secret (password, token) keeps leading and
+//     trailing whitespace, which can be meaningful.
 //
 // It does NOT encrypt anything, does not police user-installed middleware (which
 // sees the raw Message.Content), and does not hide the answer from other members
@@ -179,6 +182,11 @@ func serializableState(state ConversationState, flow *Flow) ConversationState {
 // an invalid regexp, flow.id is empty, the flow has no steps, its Ask keys are not
 // unique, it has no OnComplete, or another flow with the same id is already
 // registered. On any error nothing is registered.
+//
+// flow must not be mutated after it is registered: HandleFlow stores the pointer
+// and dispatch goroutines read its steps and callbacks concurrently, so a later
+// builder call (Ask, OnComplete, Timeout, …) on the same *Flow while the Bot is
+// connected is a data race. Finish building before calling HandleFlow.
 func (b *Bot) HandleFlow(pattern string, flow *Flow) error {
 	if flow == nil {
 		return errors.New("botbooter: HandleFlow: flow must not be nil")

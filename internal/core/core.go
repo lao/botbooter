@@ -424,7 +424,7 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// Gated on registered flows so a bot that never calls HandleFlow spins up no
 	// background goroutine.
 	if b.conversations != nil && len(b.flows) > 0 {
-		b.conversations.startSweeper(runCtx, defaultSweepInterval)
+		b.conversations.startSweeper(runCtx, defaultSweepInterval, b.log())
 	}
 	return nil
 }

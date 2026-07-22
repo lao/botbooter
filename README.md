@@ -173,7 +173,9 @@ if err := bot.HandleFlow("^sign ?up$", signup); err != nil {
 `ErrFlowNoOnComplete`, `ErrFlowAlreadyRegistered`) — plus the pattern error from a
 bad regexp, and a nil-flow error.
 `Validate(fn)` re-prompts the same step on a non-nil error (using `err.Error()` as
-the nudge); an empty/whitespace reply is a non-answer and also re-prompts.
+the nudge); an empty/whitespace reply is a non-answer and also re-prompts. Ordinary
+answers are trimmed of surrounding whitespace before storage; a `Secret()` step
+keeps its exact bytes (leading/trailing whitespace can matter in a password).
 
 Things to know (v1):
 

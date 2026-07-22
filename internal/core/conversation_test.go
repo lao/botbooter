@@ -144,7 +144,7 @@ func TestConversationManager_SweeperLifecycleExits(t *testing.T) {
 	m := newConversationManager()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	done := m.startSweeper(ctx, 10*time.Millisecond)
+	done := m.startSweeper(ctx, 10*time.Millisecond, nil)
 	cancel()
 
 	select {
@@ -160,7 +160,7 @@ func TestConversationManager_SweeperReapsExpired(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m.startSweeper(ctx, 5*time.Millisecond)
+	m.startSweeper(ctx, 5*time.Millisecond, nil)
 
 	deadline := time.After(2 * time.Second)
 	for {
@@ -233,6 +233,32 @@ func TestConversationManager_AdvanceHappyPath(t *testing.T) {
 
 	_, ok := bot.conversations.store.Get(conversationKey(msgFrom("u", "c", "")))
 	asserts.False(t, ok, "state cleared after completion")
+}
+
+func TestConversationManager_SecretAnswerKeepsExactBytes(t *testing.T) {
+	adapter := &recordingAdapter{}
+	bot := New(SlackBotType, adapter)
+	ctx := context.Background()
+
+	var completed Answers
+	flow := &Flow{
+		id: "signup",
+		steps: []flowStep{
+			{key: "name", prompt: "name?"},
+			{key: "password", prompt: "pw?", secret: true},
+		},
+		onComplete: func(_ context.Context, _ *Bot, _ *Message, a Answers) { completed = a },
+	}
+	bot.flows[flow.id] = flow
+
+	bot.conversations.start(ctx, bot, msgFrom("u", "c", "signup"), flow)
+	// Ordinary step: surrounding whitespace is trimmed.
+	asserts.True(t, bot.conversations.advance(ctx, bot, msgFrom("u", "c", "  Alice  ")), "name consumed")
+	// Secret step: exact bytes (including surrounding spaces) are preserved.
+	asserts.True(t, bot.conversations.advance(ctx, bot, msgFrom("u", "c", "  s3cret  ")), "password consumed")
+
+	asserts.Equal(t, completed.Get("name"), "Alice", "ordinary answer is trimmed")
+	asserts.Equal(t, completed.Get("password"), "  s3cret  ", "secret answer keeps exact bytes")
 }
 
 func TestConversationManager_StartSetIfAbsent(t *testing.T) {
@@ -320,6 +346,11 @@ func TestBot_dispatch_RoutesActiveFlow(t *testing.T) {
 
 func TestBot_SweeperLifecycle_ConnectDisconnect(t *testing.T) {
 	bot := New(SlackBotType, &recordingAdapter{})
+
+	// The sweeper only starts when at least one flow is registered, so register one
+	// or this asserts nothing.
+	f := NewFlow("f").Ask("a", "a?").OnComplete(noopComplete)
+	asserts.NoError(t, bot.HandleFlow("^f$", f), "register flow")
 
 	// The recording adapter spawns no goroutine of its own, so Connect adds only
 	// the sweeper; Disconnect cancels its run context and it must exit.

@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 	"hash/fnv"
-	"log"
+	"log/slog"
 	"maps"
 	"strings"
 	"sync"
@@ -124,12 +124,22 @@ func (s *memConversationStore) expiredKeys(now time.Time) []string {
 // inside a store call, so a durable store can later sit behind compare-and-swap
 // without relocating the validator (which is arbitrary user Go code).
 type conversationManager struct {
-	store ConversationStore
-	locks [conversationShards]sync.Mutex
+	store  ConversationStore
+	locks  [conversationShards]sync.Mutex
+	logger *slog.Logger // sweeper diagnostics sink; set by startSweeper, nil → slog.Default
 }
 
 func newConversationManager() *conversationManager {
 	return &conversationManager{store: newMemConversationStore()}
+}
+
+// log returns the configured sweeper logger, falling back to slog.Default so the
+// manager is usable before startSweeper wires one in (e.g. in unit tests).
+func (m *conversationManager) log() *slog.Logger {
+	if m.logger != nil {
+		return m.logger
+	}
+	return slog.Default()
 }
 
 // shardFor returns the lock guarding key. The same key always maps to the same
@@ -156,7 +166,7 @@ func (m *conversationManager) withLock(key string, fn func()) {
 func (m *conversationManager) sweepRecovered(now time.Time) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("botbooter: recovered from panic in conversation sweeper: %v", r)
+			m.log().Error("botbooter: recovered from panic in conversation sweeper", "panic", r)
 		}
 	}()
 	m.sweep(now)
@@ -182,11 +192,13 @@ func (m *conversationManager) sweep(now time.Time) {
 // startSweeper runs sweep on an interval until ctx is done, then closes the
 // returned channel so a caller can observe that the goroutine has exited — making
 // the sweeper leak-free and testable. A non-positive interval falls back to
-// defaultSweepInterval.
-func (m *conversationManager) startSweeper(ctx context.Context, interval time.Duration) <-chan struct{} {
+// defaultSweepInterval. logger (may be nil) routes sweeper panic recovery through
+// the Bot's configured diagnostics sink.
+func (m *conversationManager) startSweeper(ctx context.Context, interval time.Duration, logger *slog.Logger) <-chan struct{} {
 	if interval <= 0 {
 		interval = defaultSweepInterval
 	}
+	m.logger = logger
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -271,7 +283,7 @@ func (b *Bot) flowByID(id string) (*Flow, bool) {
 // transient platform failure cannot wedge the dispatch goroutine.
 func (b *Bot) sendFlowMessage(ctx context.Context, channelID, text string) {
 	if err := b.SendMessageContext(ctx, channelID, text); err != nil {
-		log.Printf("botbooter: failed to send flow prompt: %v", err)
+		b.log().Error("botbooter: failed to send flow prompt", "error", err)
 	}
 }
 
@@ -396,9 +408,17 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 		return true, send(step.prompt)
 	}
 
+	// The stored (and validated) value is the trimmed content for ordinary steps —
+	// chat clients pad messages — but a Secret() step keeps the exact bytes, since
+	// leading/trailing whitespace can be meaningful in a password or token.
+	answer := content
+	if step.secret {
+		answer = msg.Content
+	}
+
 	// The validator runs under the lock; it is documented as "keep it fast".
 	if step.validate != nil {
-		if err := step.validate(content); err != nil {
+		if err := step.validate(answer); err != nil {
 			nudge := step.prompt
 			if e := err.Error(); e != "" {
 				nudge = e
@@ -413,7 +433,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 		// ConversationStore could return a zero-value state.
 		state.Answers = map[string]string{}
 	}
-	state.Answers[step.key] = content
+	state.Answers[step.key] = answer
 
 	// Last step → clear state and complete. onComplete receives an exclusive copy
 	// of the answers, so a consumer that retains the map is never surprised by the
