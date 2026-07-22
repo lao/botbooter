@@ -21,7 +21,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          # Latest 1.25 patch, not the exact go.mod floor: base 1.25.0 ships with
+          # stdlib CVEs later patched in 1.25.9–.12, which the vuln scan flags.
+          go-version: "1.25"
+          check-latest: true
           cache: true
       - name: Check formatting
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
@@ -29,7 +32,16 @@ jobs:
         run: go build ./...
       - name: Vet
         run: go vet ./...
+      - name: Build examples (separate module)
+        run: cd _examples && go vet ./...
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
       - name: Test (race + coverage)
+        env:
+          # Run the webhook drain-timing regression tests (otherwise skipped).
+          BOTBOOTER_WHATSAPP_DRAIN_TIMING_TEST: "1"
+          BOTBOOTER_TEAMS_DRAIN_TIMING_TEST: "1"
+          BOTBOOTER_GITHUB_DRAIN_TIMING_TEST: "1"
         run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
       - name: Upload coverage to Codecov
         if: ${{ env.CODECOV_TOKEN != '' }}
@@ -47,7 +59,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
+          go-version: "1.25"
+          check-latest: true
       - uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
           version: v2.12

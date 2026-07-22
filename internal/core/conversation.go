@@ -381,8 +381,18 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 
 	step := flow.steps[state.Step]
 
-	// Empty/whitespace answers are non-answers: re-prompt without storing.
+	// slideTTL refreshes the idle timeout and persists it. The timeout measures
+	// user silence, so any message for the active step — including a rejected or
+	// empty answer — counts as engagement and slides the deadline; only going
+	// quiet lets it expire.
+	slideTTL := func() {
+		state.ExpiresAt = now.Add(flow.timeoutOrDefault())
+		m.store.Set(key, state)
+	}
+
+	// Empty/whitespace answers are non-answers: re-prompt without storing an answer.
 	if content == "" {
+		slideTTL()
 		return true, send(step.prompt)
 	}
 
@@ -393,6 +403,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 			if e := err.Error(); e != "" {
 				nudge = e
 			}
+			slideTTL()
 			return true, send(nudge)
 		}
 	}
@@ -418,7 +429,6 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 	// contract); secret exclusion happens only at the future durable-Store
 	// boundary via serializableState.
 	state.Step++
-	state.ExpiresAt = now.Add(flow.timeoutOrDefault())
-	m.store.Set(key, state)
+	slideTTL()
 	return true, send(flow.steps[state.Step].prompt)
 }

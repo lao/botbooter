@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -194,13 +195,15 @@ func (b *Bot) HandleFlow(pattern string, flow *Flow) error {
 	if b.conversations == nil {
 		b.conversations = newConversationManager()
 	}
-	// AddHandler compiles the pattern and returns an error before registering it,
-	// so an invalid pattern leaves the flow registry untouched.
-	if err := b.AddHandler(Command{Pattern: pattern, Handler: func(ctx context.Context, bot *Bot, m *Message) {
-		bot.conversations.start(ctx, bot, m, flow)
-	}}); err != nil {
-		return err
+	// AddHandler records an invalid pattern into setupErrs rather than returning it,
+	// so compile the pattern here to surface the error synchronously and leave the
+	// flow registry untouched on failure.
+	if _, err := regexp.Compile(pattern); err != nil {
+		return fmt.Errorf("botbooter: flow id %q: invalid pattern %q: %w", flow.id, pattern, err)
 	}
+	b.AddHandler(Command{Pattern: pattern, Handler: func(ctx context.Context, bot *Bot, m *Message) {
+		bot.conversations.start(ctx, bot, m, flow)
+	}})
 	b.flows[flow.id] = flow
 	return nil
 }

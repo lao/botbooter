@@ -1,4 +1,4 @@
-package whatsapp
+package teams
 
 import (
 	"testing"
@@ -8,19 +8,22 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	bot, err := New(Config{Token: "t", PhoneNumberID: "p", AppSecret: "s", VerifyToken: "v", Addr: ":0"})
-	asserts.NoError(t, err, "new whatsapp bot")
-	asserts.Equal(t, bot.BotType, botbooter.WhatsAppBotType, "bot type")
+	bot, err := New(Config{AppID: "app-id", AppPassword: "secret", Addr: "127.0.0.1:0"})
+
+	asserts.NoError(t, err, "new Teams bot")
+	asserts.Equal(t, bot.BotType, botbooter.TeamsBotType, "bot type")
 }
 
 func TestNewMissingConfig(t *testing.T) {
 	_, err := New(Config{})
+
 	asserts.ErrorIs(t, err, ErrMissingConfig, "missing config")
 }
 
 func TestRawMessage(t *testing.T) {
-	want := &Message{From: "1234"}
+	want := &Message{From: "user-1"}
 	got, ok := RawMessage(&botbooter.Message{Raw: want})
-	asserts.True(t, ok, "raw present")
+
+	asserts.True(t, ok, "raw message present")
 	asserts.Equal(t, got, want, "raw message")
 }

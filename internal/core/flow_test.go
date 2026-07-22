@@ -190,6 +190,28 @@ func TestFlow_TTLSlidesOnEachStep(t *testing.T) {
 	asserts.True(t, s2.ExpiresAt.After(s1.ExpiresAt), "TTL slides forward on each successful step")
 }
 
+func TestFlow_TTLSlidesOnRejectedAnswer(t *testing.T) {
+	bot := New(SlackBotType, &recordingAdapter{})
+	ctx := context.Background()
+	key := conversationKey(msgFrom("u", "c", ""))
+
+	// A validator that rejects everything keeps the flow on its first step.
+	reject := Validate(func(string) error { return errors.New("nope") })
+	f := NewFlow("f").Timeout(time.Hour).Ask("a", "a?", reject).OnComplete(noopComplete)
+	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
+
+	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
+	s1, _ := bot.conversations.store.Get(key)
+
+	time.Sleep(2 * time.Millisecond) // ensure the clock advances
+	handled := bot.conversations.advance(ctx, bot, msgFrom("u", "c", "bad"))
+	asserts.True(t, handled, "a rejected answer is consumed")
+	s2, ok := bot.conversations.store.Get(key)
+	asserts.True(t, ok, "state survives a rejected answer")
+	asserts.Equal(t, s2.Step, 0, "step does not advance on a rejected answer")
+	asserts.True(t, s2.ExpiresAt.After(s1.ExpiresAt), "TTL slides forward even when the answer is rejected")
+}
+
 func TestFlow_ExpiredStateTimesOut(t *testing.T) {
 	bot := New(SlackBotType, &recordingAdapter{})
 	ctx := context.Background()

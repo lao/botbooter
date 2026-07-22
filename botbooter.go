@@ -1,14 +1,22 @@
 // Package botbooter holds the platform-agnostic shared types for building chat
-// bots that behave the same way across Slack, Discord, Telegram, WhatsApp and a
-// local CLI.
+// bots that behave the same way across Slack, Discord, Telegram, WhatsApp,
+// Microsoft Teams, GitHub and a local CLI.
 //
 // This package is SDK-free: it imports no platform SDK and only re-exports the
 // shared types from internal/core. Construct a bot from one of the per-platform
 // packages — botbooter/slack, botbooter/discord, botbooter/telegram,
-// botbooter/whatsapp or botbooter/cli — each of which pulls in only its own
-// platform SDK (WhatsApp speaks the Cloud API over plain HTTP and needs none),
-// then drive it through the shared types re-exported here. A bot that uses one
-// platform never compiles the other platforms' SDKs into its binary.
+// botbooter/whatsapp/cloud, botbooter/whatsapp/whatsmeow, botbooter/teams,
+// botbooter/github or botbooter/cli — each of which pulls in only its own
+// platform SDK (WhatsApp Cloud API and Teams speak REST APIs over plain HTTP
+// and need none; GitHub pulls google/go-github plus bradleyfalzon/ghinstallation
+// for GitHub App auth), then drive it through the shared types re-exported here.
+// A bot that uses one platform never compiles the other platforms' SDKs into
+// its binary.
+//
+// WhatsApp comes in two flavors selected by import path: whatsapp/cloud (Meta
+// Cloud API webhook, needs a Meta Business account and a public HTTPS URL) and
+// whatsapp/whatsmeow (WhatsApp Web multidevice protocol via whatsmeow, QR-linked
+// to a phone, no Meta account or webhook needed).
 package botbooter
 
 import "github.com/lao/botbooter/internal/core"
@@ -17,6 +25,7 @@ import "github.com/lao/botbooter/internal/core"
 var (
 	ErrUnknownBotType   = core.ErrUnknownBotType
 	ErrAlreadyConnected = core.ErrAlreadyConnected
+	ErrNilMessage       = core.ErrNilMessage
 )
 
 // Errors returned by [Bot.HandleFlow]; check them with errors.Is.
@@ -39,6 +48,11 @@ const (
 	CLIBotType      = core.CLIBotType
 	TelegramBotType = core.TelegramBotType
 	WhatsAppBotType = core.WhatsAppBotType
+	TeamsBotType    = core.TeamsBotType
+	// WhatsMeowBotType is the WhatsApp Web (whatsmeow) flavor; WhatsAppBotType is
+	// the Meta Cloud API flavor.
+	WhatsMeowBotType = core.WhatsMeowBotType
+	GitHubBotType    = core.GitHubBotType
 )
 
 type (
@@ -46,8 +60,6 @@ type (
 	Bot = core.Bot
 	// Message is an incoming message handed to handlers. See [core.Message].
 	Message = core.Message
-	// CLIMessage is the raw payload of a CLI message. See [core.CLIMessage].
-	CLIMessage = core.CLIMessage
 	// Command pairs a regexp pattern with a handler. See [core.Command].
 	Command = core.Command
 	// Attachment is a platform-agnostic file attachment. See [core.Attachment].
@@ -63,6 +75,13 @@ type (
 	Answers = core.Answers
 	// AskOption configures a flow step (see [Validate], [Secret]). See [core.AskOption].
 	AskOption = core.AskOption
+
+	// Reaction is an emoji reaction added to a message. See [core.Reaction].
+	Reaction = core.Reaction
+	// ReactionHandler handles a reaction. See [core.ReactionHandler].
+	ReactionHandler = core.ReactionHandler
+	// SendOption modifies a send. See [core.SendOption].
+	SendOption = core.SendOption
 )
 
 // NewFlow starts building a multi-step conversational [Flow] with the given
@@ -76,3 +95,11 @@ func Validate(fn func(string) error) AskOption { return core.Validate(fn) }
 // Secret marks a flow step's answer sensitive: kept out of framework logs and any
 // future serialized Store state. It is not encryption. See [core.Secret].
 func Secret() AskOption { return core.Secret() }
+
+// InReplyTo anchors a send on m so the adapter posts into m's thread or
+// reply-chain, deriving the correct per-platform anchor. See [core.InReplyTo].
+func InReplyTo(m *Message) SendOption { return core.InReplyTo(m) }
+
+// WithThreadID anchors a send on a raw native id the adapter uses verbatim; it
+// takes precedence over [InReplyTo]. See [core.WithThreadID].
+func WithThreadID(id string) SendOption { return core.WithThreadID(id) }

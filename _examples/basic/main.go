@@ -1,11 +1,13 @@
-// Command v1 is a small demo of botbooter. It runs an "echo" bot on Slack,
-// Discord, Telegram, WhatsApp or the local CLI.
+// Command basic is a small demo of botbooter. It runs an "echo" bot on Slack,
+// Discord, Telegram, WhatsApp (either flavor), Microsoft Teams or the local CLI.
 //
-//	go run ./_examples/v1            # CLI mode (no credentials needed)
-//	go run ./_examples/v1 slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
-//	go run ./_examples/v1 discord    # reads DISCORD_BOT_TOKEN
-//	go run ./_examples/v1 telegram   # reads TELEGRAM_BOT_TOKEN
-//	go run ./_examples/v1 whatsapp   # reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
+//	go run ./_examples/basic            # CLI mode (no credentials needed)
+//	go run ./_examples/basic slack      # reads SLACK_APP_TOKEN / SLACK_BOT_TOKEN
+//	go run ./_examples/basic discord    # reads DISCORD_BOT_TOKEN
+//	go run ./_examples/basic telegram   # reads TELEGRAM_BOT_TOKEN
+//	go run ./_examples/basic whatsapp   # Cloud API flavor: reads WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (and optional WA_PATH, default /webhook)
+//	go run ./_examples/basic whatsmeow  # WhatsApp Web flavor: no credentials; scan the QR on first run (optional WA_MEOW_DB, default botbooter-whatsapp-meow.db)
+//	go run ./_examples/basic teams      # reads TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (and optional TEAMS_APP_TENANT_ID, TEAMS_PATH, default /api/messages)
 package main
 
 import (
@@ -36,9 +38,7 @@ func main() {
 	b := &ExampleBot{Bot: bot}
 
 	b.AddMiddleware(loggingMiddleware)
-	if err := b.HandleFunc("^echo ", b.echo); err != nil {
-		log.Fatal(err)
-	}
+	b.HandleFunc("^echo ", b.echo)
 	if err := registerSignup(b.Bot); err != nil {
 		log.Fatal(err)
 	}
@@ -61,7 +61,9 @@ func (b *ExampleBot) echo(ctx context.Context, _ *botbooter.Bot, message *botboo
 	log.Printf("echo command: %q", message.Content)
 
 	reply := "You said: " + strings.TrimPrefix(message.Content, "echo ")
-	if err := b.SendMessageContext(ctx, message.ChannelID, reply); err != nil {
+	// Reply threads the response into the triggering message (e.g. inside a Slack
+	// thread) instead of posting to the channel root as SendMessageContext would.
+	if err := b.Reply(ctx, message, reply); err != nil {
 		log.Println("failed to send message:", err)
 	}
 }

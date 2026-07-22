@@ -12,5 +12,5 @@ import (
 // which is SDK-free) is proven by the module-level isolation deps test.
 func TestSlackImportsNoForeignSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "go-telegram/bot"}, "slack")
+		[]string{"discordgo", "go-telegram/bot", "google/go-github", "bradleyfalzon/ghinstallation"}, "slack")
 }

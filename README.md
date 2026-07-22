@@ -2,15 +2,14 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/lao/botbooter.svg)](https://pkg.go.dev/github.com/lao/botbooter)
 [![CI](https://github.com/lao/botbooter/actions/workflows/ci.yml/badge.svg)](https://github.com/lao/botbooter/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/lao/botbooter)](https://goreportcard.com/report/github.com/lao/botbooter)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/lao/botbooter)](go.mod)
 [![Test Coverage](https://codecov.io/gh/lao/botbooter/branch/main/graph/badge.svg)](https://codecov.io/gh/lao/botbooter)
 [![Releases](https://img.shields.io/github/v/release/lao/botbooter.svg?include_prereleases&color=blue)](https://github.com/lao/botbooter/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
-Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, or stdin.
+Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, Microsoft Teams, a GitHub issue or PR comment, or stdin.
 
 > ⚠️ **Not production ready.** botbooter is pre-1.0 and under active development. The
 > public API may change without notice, and it has not been hardened or battle-tested for
@@ -19,7 +18,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (Cloud API webhook), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
@@ -32,7 +31,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 go get github.com/lao/botbooter
 ```
 
-Requires Go 1.23+.
+Requires Go 1.25+.
 
 ## Quickstart
 
@@ -53,7 +52,7 @@ import (
 func main() {
 	bot := cli.New(os.Stdin, os.Stdout)
 
-	_ = bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
 	})
 
@@ -66,11 +65,14 @@ func main() {
 Or run the bundled example directly:
 
 ```bash
-go run ./_examples/v1            # CLI mode (default, no credentials)
-go run ./_examples/v1 slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
-go run ./_examples/v1 discord    # uses DISCORD_BOT_TOKEN
-go run ./_examples/v1 telegram   # uses TELEGRAM_BOT_TOKEN
-go run ./_examples/v1 whatsapp   # uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
+go run ./_examples/basic            # CLI mode (default, no credentials)
+go run ./_examples/basic slack      # uses SLACK_APP_TOKEN / SLACK_BOT_TOKEN
+go run ./_examples/basic discord    # uses DISCORD_BOT_TOKEN
+go run ./_examples/basic telegram   # uses TELEGRAM_BOT_TOKEN
+go run ./_examples/basic whatsapp   # WhatsApp Cloud API flavor: uses WA_TOKEN / WA_PHONE_ID / WA_APP_SECRET / WA_VERIFY_TOKEN / WA_ADDR (+ optional WA_PATH)
+go run ./_examples/basic whatsmeow  # WhatsApp Web flavor: no credentials — scan the QR on first run (+ optional WA_MEOW_DB)
+go run ./_examples/basic teams      # uses TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (+ optional TEAMS_APP_TENANT_ID / TEAMS_PATH)
+go run ./_examples/basic github     # uses GITHUB_TOKEN / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR (+ optional GITHUB_PATH)
 ```
 
 ## Concepts
@@ -82,16 +84,21 @@ Import `botbooter` for the shared types plus the one `botbooter/<platform>` pack
 | Constructor | Signature | Notes |
 |---|---|---|
 | `cli.New(in io.Reader, out io.Writer)` | `*Bot` | Local adapter; `nil` defaults to stdin/stdout. |
-| `slack.New(appToken, botToken string)` | `*Bot` | Socket Mode (`xapp-…` + `xoxb-…`). |
+| `slack.New(cfg slack.Config)` | `(*Bot, error)` | Socket Mode (`AppToken` `xapp-…` + `BotToken` `xoxb-…`). |
 | `discord.New(token string)` | `(*Bot, error)` | Enables the message-content intent (see below). |
 | `telegram.New(token string)` | `(*Bot, error)` | Long polling via `getUpdates`; BotFather token. |
-| `whatsapp.New(cfg whatsapp.Config)` | `(*Bot, error)` | Meta Cloud API; runs an inbound webhook HTTP server. |
+| `cloud.New(cfg cloud.Config)` | `(*Bot, error)` | WhatsApp, Meta Cloud API flavor (`botbooter/whatsapp/cloud`); runs an inbound webhook HTTP server. |
+| `whatsmeow.New(cfg whatsmeow.Config)` | `(*Bot, error)` | WhatsApp, Web-protocol flavor (`botbooter/whatsapp/whatsmeow`); QR-links to a phone, no Meta account needed. |
+| `teams.New(cfg teams.Config)` | `(*Bot, error)` | Azure Bot Framework; runs an inbound webhook HTTP server. |
+| `github.New(cfg github.Config)` | `(*Bot, error)` | Issue/PR comments via `issue_comment` webhook; PAT or GitHub App auth. |
+
+WhatsApp comes in **two flavors selected by import path** — `whatsapp/cloud` (official Meta Cloud API: Business account, webhook + public HTTPS URL, no third-party deps) and `whatsapp/whatsmeow` (unofficial WhatsApp Web multidevice protocol via [whatsmeow](https://github.com/tulir/whatsmeow): pair by QR code like WhatsApp Web, session persisted in a local SQLite file — `Config.DBPath`, default `botbooter-whatsapp-meow.db` in the working directory — no Meta account or webhook). Only the flavor you import is compiled into your binary.
 
 ### Handlers, commands and middleware
 
 ```go
 // A command routes messages whose content matches a regular expression.
-_ = bot.AddHandler(botbooter.Command{
+bot.AddHandler(botbooter.Command{
 	Pattern: "^ping$",
 	Handler: func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, "pong")
@@ -99,7 +106,7 @@ _ = bot.AddHandler(botbooter.Command{
 })
 
 // HandleFunc is a shorthand for the common case.
-_ = bot.HandleFunc("^hello", greetHandler)
+bot.HandleFunc("^hello", greetHandler)
 
 // Fallback when nothing matches.
 bot.SetUnknownCommandHandler(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
@@ -113,7 +120,31 @@ bot.AddMiddleware(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Messa
 })
 ```
 
-`AddHandler` / `HandleFunc` return an error if the pattern is not a valid regular expression.
+`AddHandler` / `HandleFunc` return nothing. If a pattern is not a valid regular expression the error is recorded and `Connect`/`Run` refuse to start, reporting every invalid pattern in one joined error.
+
+### Replies and threads
+
+A send is plain by default and threads only when you pass a **send option**:
+
+- **`b.SendMessageContext(ctx, m.ChannelID, text)`** — plain message in the **channel root**. It ignores where the triggering message lives, so a reply to a message inside a thread lands back in the channel, detached.
+- **`b.SendMessageContext(ctx, m.ChannelID, text, botbooter.InReplyTo(m))`** — posts into the **thread or reply-chain of `m`**. Each adapter derives its own correct anchor from `m` — you don't compute one.
+- **`b.Reply(ctx, m, text)`** — convenience sugar for exactly the `InReplyTo(m)` call above. Prefer it in handlers.
+
+```go
+bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	// Threads the answer onto the triggering message instead of the channel root.
+	_ = b.Reply(ctx, m, "You said: "+strings.TrimPrefix(m.Content, "echo "))
+})
+```
+
+"Thread" means something different on each platform, so `InReplyTo(m)` hands the whole `Message` to the adapter and it picks the anchor. Two scenarios spell out the behavior:
+
+- **A comment already inside a thread** → the reply continues **that same thread**. On Slack the reply is posted with `thread_ts = m.ReplyToID` (the thread root the inbound message carried); on Discord/Telegram/WhatsApp it quotes / references `m.ID`.
+- **A top-level comment in a channel** → the reply is a **direct reply to that comment**, anchored on it, *not* forced into the channel root. On Slack a top-level message has no thread root, so it gets a plain top-level reply (Slack does **not** open a brand-new thread off it — that would only bury the reply under an empty thread); on Discord it becomes an inline reply referencing the message, on Telegram a `reply_to_message_id`, and on WhatsApp (Cloud API) a quoted reply. The WhatsApp Web (whatsmeow) flavor currently ignores the threading anchor and sends a plain message.
+
+For a raw, platform-specific anchor there's **`botbooter.WithThreadID(id)`** — the adapter uses the string verbatim (a Slack `thread_ts`, or a reply/quote message id elsewhere) and it wins over `InReplyTo`. You own platform-correctness with it. Per-platform anchor semantics, the precedence and fallback rules, and how `ReplyToID` vs `ID` are chosen are documented in [_docs/platforms.md](_docs/platforms.md#threaded-replies).
+
+Fallback is automatic and safe: **Teams**, **GitHub** (issue comment threads are flat — a reply already lands in the conversation) and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send — a send never fails just because a message can't be threaded. `Reply` returns an error only when the bot has no adapter or `m` is `nil`.
 
 ### Conversational flows
 
@@ -149,7 +180,8 @@ Things to know (v1):
 - **DM-intended.** While a flow is active it shadows the command table, so *every*
   message in that conversation becomes an answer until it completes, the user types
   the cancel word (default `"cancel"`, set with `CancelWord`, disable with `""`), or
-  it times out (per-step idle TTL, default 10m via `Timeout`, slides each step). In a
+  it times out (idle TTL, default 10m via `Timeout`; any reply — even a rejected or
+  empty one — slides the deadline, so only going silent expires it). In a
   public channel this means a flow consumes everyone's messages — run flows in DMs.
 - **`Secret()`** keeps an answer out of framework logs and any future serialized
   `Store` state. It is **not** encryption, does not police your own middleware, and
@@ -170,7 +202,9 @@ for _, a := range attachments {
 }
 ```
 
-`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram).
+`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp Cloud API). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp Cloud API resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram). GitHub comments carry markdown rather than an upload channel, so `GetAttachments` returns none there.
+
+WhatsApp Web (whatsmeow) media is end-to-end encrypted and has no URL at all — fetch and decrypt the bytes with `whatsmeow.Download(ctx, bot, a)`.
 
 A terminal has no real upload channel, so the **CLI adapter treats any local file path in the message as an attachment** — "uploading" means referencing the path. Image files are detected by content sniffing:
 
@@ -205,12 +239,14 @@ if ev, ok := slack.RawEvent(m); ok {
 	_ = ev.ThreadTimeStamp // anything on the raw *slackevents.MessageEvent
 }
 
-// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, whatsapp.RawMessage, cli.RawData.
-// Underlying client per platform (WhatsApp has none — it speaks the Cloud API over plain HTTP):
+// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, cloud.RawMessage (WhatsApp Cloud API), whatsmeow.RawMessage (WhatsApp Web), teams.RawMessage, github.RawEvent, cli.RawData.
+// Underlying client per platform (WhatsApp Cloud API and Teams have none — they speak REST over plain HTTP):
 client := slack.Client(bot)        // *slack.Client (nil if not a Slack bot)
 sock := slack.SocketClient(bot)    // *socketmode.Client (nil if not a Slack bot)
 session := discord.Session(bot)    // *discordgo.Session
 tg := telegram.Client(bot)         // *bot.Bot
+wa := whatsmeow.Client(bot)        // *whatsmeow.Client (WhatsApp Web flavor)
+gh := github.Client(bot)           // *go-github Client — labels, reactions, checks, anything beyond replies
 ```
 
 ### Lifecycle
@@ -239,13 +275,16 @@ documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 | Slack | `xapp-…` app-level token + `xoxb-…` bot token | [_docs/platforms.md](_docs/platforms.md#slack) |
 | Discord | bot token + Message Content Intent | [_docs/platforms.md](_docs/platforms.md#discord) |
 | Telegram | BotFather bot token | [_docs/platforms.md](_docs/platforms.md#telegram) |
-| WhatsApp | Cloud API token + phone-number id + app secret + verify token + bind addr | [_docs/platforms.md](_docs/platforms.md#whatsapp) |
+| WhatsApp (Cloud API) | Cloud API token + phone-number id + app secret + verify token + bind addr | [_docs/platforms.md](_docs/platforms.md#whatsapp) |
+| WhatsApp (Web / whatsmeow) | nothing — scan a QR code from WhatsApp > Linked devices on first run | [_docs/platforms.md](_docs/platforms.md#whatsapp-web-whatsmeow) |
+| Microsoft Teams | Azure Bot app id + password (+ optional tenant id) + bind addr | [_docs/platforms.md](_docs/platforms.md#microsoft-teams) |
+| GitHub | PAT **or** App (id + installation id + private key) + webhook secret + bind addr | [_docs/platforms.md](_docs/platforms.md#github) |
 | CLI | nothing (local stdin/stdout) | [_docs/platforms.md](_docs/platforms.md#cli) |
 
 ## Development
 
 ```bash
-make all        # fmt + vet + lint + test
+make all        # fmt + vet (both incl. _examples) + lint + test-race
 make test-race  # race detector
 make cover      # coverage report
 make run-cli    # run the example bot in CLI mode
@@ -275,10 +314,10 @@ Alternatives:
 
 ## Roadmap
 
-- [x] Slack, Discord, Telegram, WhatsApp and CLI adapters
+- [x] Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub and CLI adapters
 - [x] Middleware and attachment abstraction
 - [x] Unify attachment URL retrieval for all implementations
-- [ ] Microsoft Teams, WeChat, Mastodon adapters
+- [ ] WeChat, Mastodon adapters
 - [ ] Richer message types (blocks, embeds)
 - [x] Conversational flows — multi-step forms via `HandleFlow` (linear, in-memory, single-instance)
 - [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend

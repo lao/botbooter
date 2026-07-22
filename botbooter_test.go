@@ -24,8 +24,9 @@ import (
 	"github.com/lao/botbooter/discord"
 	"github.com/lao/botbooter/internal/asserts"
 	"github.com/lao/botbooter/slack"
+	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
-	"github.com/lao/botbooter/whatsapp"
+	"github.com/lao/botbooter/whatsapp/cloud"
 )
 
 // syncBuffer is a concurrency-safe buffer: the CLI adapter writes to its output
@@ -89,11 +90,6 @@ func newDiscordBot(t *testing.T) *botbooter.Bot {
 	return bot
 }
 
-func mustAddHandler(t *testing.T, bot *botbooter.Bot, pattern string, handler botbooter.CommandHandler) {
-	t.Helper()
-	asserts.NoError(t, bot.AddHandler(botbooter.Command{Pattern: pattern, Handler: handler}), "AddHandler "+pattern)
-}
-
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
 
 func writeFile(t *testing.T, path string, data []byte) {
@@ -135,7 +131,7 @@ func TestBot_Disconnect(t *testing.T) {
 	})
 
 	t.Run("SlackBot", func(t *testing.T) {
-		bot := slack.New("xapp-test", "xoxb-test")
+		bot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 
 		err := bot.Disconnect()
 
@@ -160,7 +156,7 @@ func TestBot_SendMessage(t *testing.T) {
 		if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
 			t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; SendMessage performs a real Slack Web API call")
 		}
-		bot := slack.New("xapp-test", "xoxb-test")
+		bot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 
 		err := bot.SendMessage("channel123", "test message")
 
@@ -209,7 +205,7 @@ func TestBot_GetAttachments(t *testing.T) {
 	})
 
 	t.Run("SlackBot", func(t *testing.T) {
-		bot := slack.New("xapp-test", "xoxb-test")
+		bot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 		message := &botbooter.Message{
 			Raw: &slackevents.MessageEvent{
 				Files: []slackevents.File{
@@ -241,7 +237,7 @@ func TestCLIBot_Run_ProcessesInput(t *testing.T) {
 	out := &syncBuffer{}
 	bot := cli.New(in, out)
 
-	mustAddHandler(t, bot, "^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		_ = b.SendMessageContext(ctx, m.ChannelID, strings.TrimPrefix(m.Content, "echo "))
 	})
 	unknown := 0
@@ -263,7 +259,7 @@ func TestCLIBot_GetAttachments_EndToEnd(t *testing.T) {
 
 	bot := cli.New(strings.NewReader("echo "+png+"\n"), &syncBuffer{})
 	var got []botbooter.Attachment
-	mustAddHandler(t, bot, "^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
+	bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message) {
 		atts, err := b.GetAttachments(m)
 		asserts.NoError(t, err, "GetAttachments")
 		got = atts
@@ -306,7 +302,7 @@ func TestConnectSlack_StartsAndStops(t *testing.T) {
 	if os.Getenv("BOTBOOTER_SLACK_NETWORK_TEST") == "" {
 		t.Skip("set BOTBOOTER_SLACK_NETWORK_TEST=1 to run; performs real Slack network I/O via RunContext")
 	}
-	bot := slack.New("xapp-test", "xoxb-test")
+	bot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 	ctx, cancel := context.WithCancel(context.Background())
 
 	asserts.NoError(t, bot.Connect(ctx), "Connect Slack should start the loop")
@@ -359,17 +355,26 @@ func TestBot_Start_GracefulShutdownOnSignal(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- bot.Start() }()
 
-	// Give Start time to register the signal handler before we signal.
-	time.Sleep(150 * time.Millisecond)
 	proc, err := os.FindProcess(os.Getpid())
 	asserts.NoError(t, err, "FindProcess")
-	asserts.NoError(t, proc.Signal(syscall.SIGTERM), "send SIGTERM")
 
-	select {
-	case err := <-done:
-		asserts.NoError(t, err, "Start should return after SIGTERM")
-	case <-time.After(2 * time.Second):
-		t.Fatal("Start did not shut down after SIGTERM")
+	// Start registers its signal handler asynchronously, so a signal sent too
+	// early is missed. Resend SIGTERM until Start observes it and returns, rather
+	// than sleeping a load-dependent fixed interval. The guard handler above
+	// keeps an early signal from terminating the test binary.
+	resend := time.NewTicker(20 * time.Millisecond)
+	defer resend.Stop()
+	deadline := time.After(2 * time.Second)
+	for {
+		asserts.NoError(t, proc.Signal(syscall.SIGTERM), "send SIGTERM")
+		select {
+		case err := <-done:
+			asserts.NoError(t, err, "Start should return after SIGTERM")
+			return
+		case <-resend.C:
+		case <-deadline:
+			t.Fatal("Start did not shut down after SIGTERM")
+		}
 	}
 }
 
@@ -396,17 +401,24 @@ func TestRawAccessors(t *testing.T) {
 	})
 
 	t.Run("CLI", func(t *testing.T) {
-		c := &botbooter.CLIMessage{Text: "hi"}
+		c := &cli.Message{Text: "hi"}
 		got, ok := cli.RawData(&botbooter.Message{Raw: c})
 		asserts.True(t, ok, "cli.RawData")
 		asserts.True(t, got == c, "same pointer")
 	})
 
 	t.Run("WhatsApp", func(t *testing.T) {
-		wm := &whatsapp.Message{Type: "text"}
-		got, ok := whatsapp.RawMessage(&botbooter.Message{Raw: wm})
-		asserts.True(t, ok, "whatsapp.RawMessage")
+		wm := &cloud.Message{Type: "text"}
+		got, ok := cloud.RawMessage(&botbooter.Message{Raw: wm})
+		asserts.True(t, ok, "cloud.RawMessage")
 		asserts.True(t, got == wm, "same pointer")
+	})
+
+	t.Run("Teams", func(t *testing.T) {
+		tm := &teams.Message{Text: "hi"}
+		got, ok := teams.RawMessage(&botbooter.Message{Raw: tm})
+		asserts.True(t, ok, "teams.RawMessage")
+		asserts.True(t, got == tm, "same pointer")
 	})
 
 	t.Run("WrongPlatform", func(t *testing.T) {
@@ -416,7 +428,7 @@ func TestRawAccessors(t *testing.T) {
 }
 
 func TestSessionAccessors(t *testing.T) {
-	slackBot := slack.New("xapp-test", "xoxb-test")
+	slackBot, _ := slack.New(slack.Config{AppToken: "xapp-test", BotToken: "xoxb-test"})
 	asserts.NotNil(t, slack.Client(slackBot), "SlackClient")
 	asserts.NotNil(t, slack.SocketClient(slackBot), "SlackSocketClient")
 
@@ -428,19 +440,41 @@ func TestSessionAccessors(t *testing.T) {
 	asserts.NoError(t, err, "telegram.New")
 	asserts.NotNil(t, telegram.Client(telegramBot), "TelegramClient")
 
-	whatsappBot, err := whatsapp.New(whatsapp.Config{
+	whatsappBot, err := cloud.New(cloud.Config{
 		Token: "t", PhoneNumberID: "p", AppSecret: "s", VerifyToken: "v", Addr: ":0",
 	})
-	asserts.NoError(t, err, "whatsapp.New")
+	asserts.NoError(t, err, "cloud.New")
 	asserts.Equal(t, whatsappBot.BotType, botbooter.WhatsAppBotType, "WhatsApp bot type")
+
+	teamsBot, err := teams.New(teams.Config{
+		AppID: "app", AppPassword: "secret", Addr: ":0",
+	})
+	asserts.NoError(t, err, "teams.New")
+	asserts.Equal(t, teamsBot.BotType, botbooter.TeamsBotType, "Teams bot type")
 
 	cliBot := cli.New(emptyReader{}, &syncBuffer{})
 	asserts.True(t, slack.Client(cliBot) == nil, "SlackClient nil for non-Slack bot")
 }
 
 func TestWhatsAppNew_MissingConfig(t *testing.T) {
-	_, err := whatsapp.New(whatsapp.Config{})
-	asserts.ErrorIs(t, err, whatsapp.ErrMissingConfig, "empty config should report the sentinel")
+	_, err := cloud.New(cloud.Config{})
+	asserts.ErrorIs(t, err, cloud.ErrMissingConfig, "empty config should report the sentinel")
+}
+
+func TestTeamsNew_MissingConfig(t *testing.T) {
+	cases := map[string]func(*teams.Config){
+		"appID":       func(c *teams.Config) { c.AppID = "" },
+		"appPassword": func(c *teams.Config) { c.AppPassword = "" },
+		"addr":        func(c *teams.Config) { c.Addr = "" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := teams.Config{AppID: "app", AppPassword: "secret", Addr: ":0"}
+			mutate(&cfg)
+			_, err := teams.New(cfg)
+			asserts.ErrorIs(t, err, teams.ErrMissingConfig, "missing field should report the sentinel")
+		})
+	}
 }
 
 // TestBot_ResolveAttachmentURL_Alias proves the unified method surfaces through

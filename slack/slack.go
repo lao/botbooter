@@ -12,15 +12,29 @@ import (
 	slackint "github.com/lao/botbooter/internal/slack"
 )
 
-// New creates a Slack bot that connects via Socket Mode.
-func New(appToken, botToken string) *botbooter.Bot {
-	return slackint.New(appToken, botToken)
+// Config configures a Slack (Socket Mode) bot.
+type Config = slackint.Config
+
+// ErrMissingConfig is returned by [New] when a required [Config] field is empty.
+var ErrMissingConfig = slackint.ErrMissingConfig
+
+// New creates a Slack bot that connects via Socket Mode. It returns
+// [ErrMissingConfig] if a required config field is missing.
+func New(cfg Config) (*botbooter.Bot, error) {
+	return slackint.New(cfg)
 }
 
 // RawEvent returns the raw Slack message event carried on m, reporting whether m
 // originated from Slack.
 func RawEvent(m *botbooter.Message) (*slackevents.MessageEvent, bool) {
 	return slackint.RawEvent(m)
+}
+
+// RawReaction returns the raw Slack reaction event carried on r, reporting
+// whether r originated from Slack. Its Reaction field is the platform's original
+// bare shortname ("thumbsup") behind r.Emoji's colon-wrapped ":thumbsup:".
+func RawReaction(r *botbooter.Reaction) (*slackevents.ReactionAddedEvent, bool) {
+	return slackint.RawReaction(r)
 }
 
 // Client returns the Slack Web API client backing b, or nil if b is not a Slack

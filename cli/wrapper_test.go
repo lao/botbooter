@@ -15,7 +15,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestRawData(t *testing.T) {
-	want := &botbooter.CLIMessage{Text: "hi"}
+	want := &Message{Text: "hi"}
 	got, ok := RawData(&botbooter.Message{Raw: want})
 	asserts.True(t, ok, "raw present")
 	asserts.Equal(t, got, want, "raw data")

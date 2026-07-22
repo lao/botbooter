@@ -185,7 +185,7 @@ type recordingAdapter struct {
 func (r *recordingAdapter) Connect(context.Context, AdapterDeps) error { return nil }
 func (r *recordingAdapter) Disconnect() error                          { return nil }
 func (r *recordingAdapter) Attachments(*Message) ([]Attachment, error) { return nil, nil }
-func (r *recordingAdapter) Send(_ context.Context, _, text string) error {
+func (r *recordingAdapter) Send(_ context.Context, _, text string, _ SendOptions) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sent = append(r.sent, text)
