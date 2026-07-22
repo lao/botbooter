@@ -29,8 +29,7 @@ func welcomeForEvent(event *gogithub.PullRequestEvent) (channel, comment string,
 // Connect, long after New returned.
 func newWebhookBot() (*botbooter.Bot, error) {
 	var bot *botbooter.Bot
-	var err error
-	bot, err = newBot(func(ctx context.Context, event *gogithub.PullRequestEvent) {
+	bot, err := newBot(func(ctx context.Context, event *gogithub.PullRequestEvent) {
 		channel, comment, ok := welcomeForEvent(event)
 		if !ok {
 			return

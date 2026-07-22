@@ -118,7 +118,7 @@ func main() {
 
 	if mode == "webhook" {
 		log.Printf("serving pull_request webhooks on %s (register the public URL with events: pull_request, issue_comment)",
-			cmp.Or(os.Getenv("GITHUB_ADDR"), ":8080"))
+			cmp.Or(os.Getenv("GITHUB_ADDR"), defaultWebhookAddr))
 	} else if err := startPollWatcher(ctx, bot); err != nil {
 		log.Fatal(err)
 	}

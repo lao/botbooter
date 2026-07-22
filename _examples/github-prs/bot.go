@@ -13,6 +13,9 @@ import (
 	"github.com/lao/botbooter/github"
 )
 
+// defaultWebhookAddr is where webhook mode binds when GITHUB_ADDR is unset.
+const defaultWebhookAddr = ":8080"
+
 // welcomeComment is the comment posted on a freshly opened PR, shared by both
 // ingress modes so switching modes doesn't change what contributors see.
 func welcomeComment(login string) string {
@@ -38,7 +41,7 @@ func newBot(onPullRequest func(context.Context, *gogithub.PullRequestEvent)) (*b
 		if cfg.WebhookSecret == "" {
 			return nil, errors.New("GITHUB_WEBHOOK_SECRET is required in webhook mode: it must match the secret registered on the repository webhook")
 		}
-		cfg.Addr = cmp.Or(cfg.Addr, ":8080")
+		cfg.Addr = cmp.Or(cfg.Addr, defaultWebhookAddr)
 	} else {
 		cfg.WebhookSecret = cmp.Or(cfg.WebhookSecret, "github-prs-example-unused")
 		cfg.Addr = cmp.Or(cfg.Addr, "127.0.0.1:0")
