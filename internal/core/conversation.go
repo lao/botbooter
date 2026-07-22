@@ -428,20 +428,24 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 		}
 	}
 
-	if state.Answers == nil {
-		// Defensive: the built-in store always stores a non-nil map, but a custom
-		// ConversationStore could return a zero-value state.
-		state.Answers = map[string]string{}
+	// Clone before writing rather than mutating in place: Get may return a map that
+	// aliases the store's live state (the in-memory store does), and mutating it here
+	// would write behind the store's own lock, relying solely on the shard lock. A
+	// fresh map keeps transitionLocked from touching data it did not allocate.
+	answers := maps.Clone(state.Answers)
+	if answers == nil {
+		answers = map[string]string{}
 	}
-	state.Answers[step.key] = answer
+	answers[step.key] = answer
+	state.Answers = answers
 
 	// Last step → clear state and complete. onComplete receives an exclusive copy
 	// of the answers, so a consumer that retains the map is never surprised by the
 	// engine reusing the underlying map.
 	if state.Step == len(flow.steps)-1 {
-		answers := Answers(maps.Clone(state.Answers))
+		completed := Answers(maps.Clone(answers))
 		m.store.Delete(key)
-		return true, func() { flow.onComplete(ctx, b, msg, answers) }
+		return true, func() { flow.onComplete(ctx, b, msg, completed) }
 	}
 
 	// Otherwise advance, slide the TTL, and send the next prompt. The in-memory

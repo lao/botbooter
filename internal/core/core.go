@@ -624,7 +624,7 @@ func (b *Bot) dispatch(ctx context.Context, message *Message) {
 		// An active flow for this conversation consumes the message before the
 		// command table; advance reports false (and we fall through) when no flow
 		// is active or its state outlived its registration.
-		if bot.conversations != nil && bot.conversations.advance(ctx, bot, message) {
+		if len(bot.flows) > 0 && bot.conversations != nil && bot.conversations.advance(ctx, bot, message) {
 			return
 		}
 		for i := range bot.commands {

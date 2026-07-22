@@ -106,10 +106,11 @@ Semantics:
 - `Validate(fn func(string) error)` — on error the engine **re-prompts the same step**
   (using `err.Error()` as the nudge when non-empty) and does not advance or store.
 - **Empty / whitespace answers are non-answers, not stored values.** The engine trims the
-  content; an empty result is treated like a validation failure (re-prompt) so a blank
-  line never silently satisfies a step (e.g. `name=""`). A step that legitimately accepts
-  empty input must opt out via a validator that permits it. (This is distinct from the
-  bot's own echo, which adapters already drop before dispatch — see §4.)
+  content; an empty result re-prompts the same step *before* the validator runs, so a blank
+  line never silently satisfies a step (e.g. `name=""`) and a validator is never asked to
+  rule on empty input. Empty answers are therefore unconditionally rejected — there is no
+  validator opt-out in v1. (This is distinct from the bot's own echo, which adapters already
+  drop before dispatch — see §4.)
 - `Secret()` — marks the answer sensitive. Its scope is **precisely defined** (see
   "What `Secret()` does and does not cover" below); it is **not** general encryption.
 - `Answers` — read-only accessor: `Get(key) string` (returns `""` for a missing key) and
