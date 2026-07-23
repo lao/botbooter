@@ -42,8 +42,19 @@ const (
 	// issue_comment payloads are tens of KB, but push and pull_request
 	// deliveries (many commits, large PR bodies) can reach GitHub's 25 MiB
 	// webhook ceiling, so cap there rather than at 1 MiB — a lower cap silently
-	// dropped real push/PR deliveries at the body reader.
+	// dropped real push/PR deliveries at the body reader. Peak memory from
+	// concurrent large reads is bounded by maxConcurrentReads (below), not by
+	// this per-request cap alone.
 	maxRequestBytes = 25 << 20 // 25 MiB (GitHub's webhook payload ceiling)
+
+	// maxConcurrentReads bounds concurrent inbound processing (the
+	// up-to-maxRequestBytes body read + HMAC verify + parse). The body must be
+	// read before its signature can be checked, so without this an
+	// unauthenticated flood of large POSTs could each buffer maxRequestBytes with
+	// no limit; this caps peak read memory at maxConcurrentReads*maxRequestBytes
+	// (~1.6 GiB). It is separate from maxConcurrentDispatch because a read is
+	// short-lived while a dispatch goroutine may run a slow handler.
+	maxConcurrentReads = 64
 
 	// maxConcurrentDispatch bounds in-flight webhook dispatch goroutines. A
 	// delivery that would exceed it is answered 503 (GitHub retries) instead of
@@ -192,6 +203,10 @@ type adapter struct {
 	// saturating flood into 503s instead of unbounded goroutines. Buffered at
 	// New and shared across reconnects; the reaction poller does not use it.
 	sem chan struct{}
+	// readSem bounds concurrent inbound request processing so a flood of large
+	// bodies can't buffer unbounded memory before the HMAC check (see
+	// maxConcurrentReads); separate from sem, which bounds dispatch goroutines.
+	readSem chan struct{}
 }
 
 // pollingConfigured reports whether ReactionPollRepos named anything to poll,
@@ -295,6 +310,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 		pollRepos:      pollRepos,
 		wildcardOwners: wildcardOwners,
 		sem:            make(chan struct{}, maxConcurrentDispatch),
+		readSem:        make(chan struct{}, maxConcurrentReads),
 	}
 	if a.pollingConfigured() {
 		a.reactions = newReactionStore()

@@ -22,6 +22,20 @@ const signatureHeader = "X-Hub-Signature-256"
 // slow deliveries and disables hooks that fail persistently, so dropped and
 // invalid-but-authentic payloads are acked too.
 func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
+	// Bound concurrent inbound processing before reading the (up to
+	// maxRequestBytes) body: the body must be read to verify its HMAC, so this
+	// caps the memory an unauthenticated flood of large POSTs can buffer. Held
+	// only across read+verify+parse (this function); the dispatch goroutine has
+	// its own bound (ackAndDispatch).
+	select {
+	case a.readSem <- struct{}{}:
+	default:
+		a.log().Warn("github: inbound concurrency limit reached; shedding with 503", "limit", maxConcurrentReads)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { <-a.readSem }()
+
 	// Read then verify as two steps with two distinct failure codes (the
 	// sibling-adapter pattern): a body we cannot read is the client's 400; a
 	// body that fails HMAC is a 403. The one-shot ValidatePayload cannot
@@ -148,6 +162,7 @@ func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 	select {
 	case a.sem <- struct{}{}:
 	default:
+		a.log().Warn("github: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}

@@ -348,6 +348,23 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	asserts.Equal(t, a.inflight.Load(), int64(0), "slot released after the handler returns")
 }
 
+// A saturated read semaphore must answer 503 before the (up to maxRequestBytes)
+// body is buffered, so a flood of large POSTs cannot exhaust memory ahead of the
+// HMAC check.
+func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	a.readSem = make(chan struct{}, 1)
+	a.readSem <- struct{}{} // occupy the only inbound slot
+
+	var got []*core.Message
+	w := httptest.NewRecorder()
+	a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "issue_comment", issueCommentCreated), captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusServiceUnavailable, "saturated read gate returns 503")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
 func selfIdentityServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
