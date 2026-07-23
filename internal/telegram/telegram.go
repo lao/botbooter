@@ -23,9 +23,10 @@ type adapter struct {
 	newClient func() (*bot.Bot, error)
 	selfID    int64
 
-	mu     sync.Mutex
-	client *bot.Bot     // the client running the active poll loop; guarded by mu
-	logger *slog.Logger // set from AdapterDeps at Connect; guarded by mu
+	mu                sync.Mutex
+	client            *bot.Bot     // the client running the active poll loop; guarded by mu
+	logger            *slog.Logger // set from AdapterDeps at Connect; guarded by mu
+	newClientConsumed bool         // whether the New-time client has been claimed by a Connect; guarded by mu
 }
 
 // log returns the Bot's logger handed over at Connect, or slog.Default()
@@ -93,12 +94,21 @@ var allowedUpdates = bot.AllowedUpdates{
 
 // clientOptions is the option set every client (one per connection) is built
 // with; the stub-server tests append to it, so it stays the single source of
-// truth for production client configuration.
+// truth for production client configuration. The error and debug handlers
+// resolve the logger lazily through a.log(), so a client built at New time (with
+// no logger yet) still routes its poll-loop failures to the logger installed at
+// Connect — instead of go-telegram's default handler writing to the stdlib log.
 func (a *adapter) clientOptions() []bot.Option {
 	return []bot.Option{
 		bot.WithDefaultHandler(a.onUpdate),
 		bot.WithSkipGetMe(),
 		bot.WithAllowedUpdates(allowedUpdates),
+		bot.WithErrorsHandler(func(err error) {
+			a.log().Error("botbooter: telegram poll error", "err", err)
+		}),
+		bot.WithDebugHandler(func(format string, args ...any) {
+			a.log().Debug("botbooter: telegram: " + fmt.Sprintf(format, args...))
+		}),
 	}
 }
 
@@ -119,19 +129,43 @@ func New(token string) (*core.Bot, error) {
 	return core.New(core.TelegramBotType, a), nil
 }
 
-// Connect starts the getUpdates long-poll loop in the background and returns immediately.
+// Connect starts the getUpdates long-poll loop in the background and returns
+// immediately. Before starting the loop it probes getMe so a bad token (or an
+// unreachable API) fails fast here, rather than the poll loop retrying a 401
+// forever while silently delivering nothing.
+//
+// The first Connect runs the loop on the New-time client, so a RegisterHandler a
+// consumer made on Client(bot) before Connect survives; every reconnect builds a
+// fresh client, so a canceled run's buffered updates die with it instead of
+// draining into the successor connection.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	ctx = withDeps(ctx, &deps)
 
-	tg, err := a.newClient()
-	if err != nil {
-		return err
+	a.mu.Lock()
+	tg := a.client
+	reuse := tg != nil && !a.newClientConsumed
+	a.mu.Unlock()
+
+	if !reuse {
+		var err error
+		if tg, err = a.newClient(); err != nil {
+			return err
+		}
+	}
+
+	// Fail fast on an invalid token or unreachable API. Left to the poll loop this
+	// is an infinite silent retry; surfaced from Connect it becomes an error from
+	// Run. Marking the New-time client consumed is deferred until the probe passes
+	// so a transient failure doesn't discard its pre-Connect RegisterHandlers.
+	if _, err := tg.GetMe(ctx); err != nil {
+		return fmt.Errorf("telegram: getMe probe failed (check the bot token): %w", err)
 	}
 
 	// Publish the poll-loop client so Client(b) and Send target the client that
 	// actually receives updates — a RegisterHandler on it now fires.
 	a.mu.Lock()
 	a.client = tg
+	a.newClientConsumed = true
 	a.logger = deps.Logger
 	a.mu.Unlock()
 
@@ -346,6 +380,14 @@ func (a *adapter) onUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 	if m.From.IsBot || m.From.ID == a.selfID {
+		return
+	}
+	// Skip empty service messages (member joins, stickers, locations, pinned
+	// notices, …): no text, no caption, and no attachment the adapter surfaces.
+	// Dispatching their empty Content to the unknown-command handler would be
+	// noise. Mirrors Slack (Text=="" && no Files) and whatsmeow (text=="" &&
+	// !hasMedia).
+	if cmp.Or(m.Text, m.Caption) == "" && len(attachmentsFromMessage(m)) == 0 {
 		return
 	}
 
