@@ -250,6 +250,42 @@ func TestHandleSocketEvent(t *testing.T) {
 
 		asserts.True(t, got == nil, "Handler should not be called for non-EventsAPI event types")
 	})
+
+	// A slash-command / interactive payload rides the same socket carrying a
+	// Request but a non-Events-API type. It must be acked (else Slack shows the
+	// user an error and retries) and dropped (not dispatched).
+	t.Run("NonEventsAPIWithRequestIsAckedAndDropped", func(t *testing.T) {
+		a := newTestAdapter()
+		var acked []string
+		a.ackFn = func(req socketmode.Request) { acked = append(acked, req.EnvelopeID) }
+		var got *core.Message
+
+		evt := socketmode.Event{
+			Type:    socketmode.EventTypeSlashCommand,
+			Request: &socketmode.Request{EnvelopeID: "slash-envelope"},
+		}
+
+		fn := a.prepareDispatch(context.Background(), evt, captureDeps(&got))
+
+		asserts.True(t, fn == nil, "non-Events-API payload is not dispatched")
+		asserts.Equal(t, strings.Join(acked, ","), "slash-envelope", "the payload's Request was acked exactly once")
+		asserts.True(t, got == nil, "handler not called for a non-Events-API payload")
+	})
+
+	// A payload with no Request (a lifecycle event like Connecting) is neither
+	// acked nor dispatched.
+	t.Run("NonEventsAPIWithoutRequestIsNotAcked", func(t *testing.T) {
+		a := newTestAdapter()
+		ackCount := 0
+		a.ackFn = func(socketmode.Request) { ackCount++ }
+
+		evt := socketmode.Event{Type: socketmode.EventTypeConnecting}
+
+		fn := a.prepareDispatch(context.Background(), evt, captureDeps(nil))
+
+		asserts.True(t, fn == nil, "lifecycle event is not dispatched")
+		asserts.Equal(t, ackCount, 0, "a Request-less event is not acked")
+	})
 }
 
 func TestDisconnect(t *testing.T) {
