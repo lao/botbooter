@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -320,16 +319,13 @@ func TestBot_dispatch_RoutesActiveFlow(t *testing.T) {
 	})
 
 	done := false
-	flow := &Flow{
-		id:         "signup",
-		steps:      []flowStep{{key: "name", prompt: "name?"}, {key: "color", prompt: "color?"}},
-		onComplete: func(context.Context, *Bot, *Message, Answers) { done = true },
-		cancelWord: "cancel",
-	}
-	bot.flows[flow.id] = flow
-	mustAddHandler(t, bot, "^signup$", func(ctx context.Context, b *Bot, m *Message) {
-		b.conversations.start(ctx, b, m, flow)
-	})
+	// Register through the production HandleFlow wiring so dispatch invokes the
+	// real start closure (flow.go), not a hand-rolled handler.
+	flow := NewFlow("signup").
+		Ask("name", "name?").
+		Ask("color", "color?").
+		OnComplete(func(context.Context, *Bot, *Message, Answers) { done = true })
+	asserts.NoError(t, bot.HandleFlow("^signup$", flow), "register flow")
 	fellThrough := false
 	bot.SetUnknownCommandHandler(func(context.Context, *Bot, *Message) { fellThrough = true })
 
@@ -352,18 +348,18 @@ func TestBot_SweeperLifecycle_ConnectDisconnect(t *testing.T) {
 	f := NewFlow("f").Ask("a", "a?").OnComplete(noopComplete)
 	asserts.NoError(t, bot.HandleFlow("^f$", f), "register flow")
 
-	// The recording adapter spawns no goroutine of its own, so Connect adds only
-	// the sweeper; Disconnect cancels its run context and it must exit.
-	before := runtime.NumGoroutine()
 	asserts.NoError(t, bot.Connect(context.Background()), "connect")
+	c := bot.currentConn()
+	asserts.True(t, c.sweeperDone != nil, "Connect starts the sweeper for a bot with flows")
 	asserts.NoError(t, bot.Disconnect(), "disconnect")
 
-	deadline := time.Now().Add(2 * time.Second)
-	for runtime.NumGoroutine() > before {
-		if time.Now().After(deadline) {
-			t.Fatalf("sweeper goroutine leaked after Disconnect: before=%d now=%d", before, runtime.NumGoroutine())
-		}
-		time.Sleep(5 * time.Millisecond)
+	// Disconnect cancels the run context; observe the sweeper goroutine actually
+	// exit through the channel it closes on return — leak-free, and without polling
+	// the whole process's goroutine count.
+	select {
+	case <-c.sweeperDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweeper goroutine did not exit after Disconnect (leak)")
 	}
 }
 

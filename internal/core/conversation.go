@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"hash/fnv"
 	"log/slog"
 	"maps"
 	"strings"
@@ -20,9 +19,11 @@ const conversationShards = 256
 // state when started without an explicit interval.
 const defaultSweepInterval = time.Minute
 
-// defaultFlowTimeout is the per-step idle TTL applied when a Flow sets none. The
-// TTL slides on each successful step, so a long but actively-progressing form does
-// not time out mid-fill.
+// defaultFlowTimeout is the per-step idle TTL applied when a Flow sets none. It
+// measures user silence: any message for the active step — including an empty or
+// rejected answer — counts as engagement and slides the deadline, so a long but
+// actively-progressing form never times out mid-fill; only going quiet lets it
+// expire.
 const defaultFlowTimeout = 10 * time.Minute
 
 // ConversationState is the per-conversation flow state the engine carries between
@@ -133,11 +134,19 @@ func newConversationManager() *conversationManager {
 }
 
 // shardFor returns the lock guarding key. The same key always maps to the same
-// shard.
+// shard. FNV-1a is inlined over the key's bytes to avoid the per-call hasher heap
+// allocation fnv.New32a() incurs (it returns an interface).
 func (m *conversationManager) shardFor(key string) *sync.Mutex {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return &m.locks[h.Sum32()%conversationShards]
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= prime32
+	}
+	return &m.locks[h%conversationShards]
 }
 
 // withLock runs fn while holding key's shard lock, releasing it even if fn
@@ -262,8 +271,9 @@ func (f *Flow) timeoutOrDefault() time.Duration {
 // per-user AND per-channel, so one user can run independent flows in a DM and in a
 // channel. The NUL separator is unambiguous because no supported platform's UserID
 // or ChannelID contains a NUL byte (Slack/Discord/Telegram ids are numeric or
-// alphanumeric, WhatsApp ids are numeric, and the CLI is single-user trusted
-// input).
+// alphanumeric, WhatsApp ids are numeric, Teams ids are prefixed alphanumerics
+// like "29:"/"19:", GitHub ids are "owner/repo"/issue-number strings, and the CLI
+// is single-user trusted input).
 func conversationKey(m *Message) string {
 	return m.UserID + "\x00" + m.ChannelID
 }

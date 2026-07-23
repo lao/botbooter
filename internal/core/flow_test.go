@@ -1,9 +1,11 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -472,4 +474,96 @@ func TestFlow_ConcurrentAdvanceNoDeadlock(t *testing.T) {
 	if s, ok := bot.conversations.store.Get(key); ok {
 		asserts.True(t, s.Step >= 0 && s.Step < len(f.steps), "step stays within bounds")
 	}
+}
+
+// The expired-state branch with NO OnTimeout still consumes the trigger message
+// (returns handled) and reaps the state, taking the nil-onTimeout default path.
+func TestFlow_ExpiredStateWithoutOnTimeoutConsumesAndReaps(t *testing.T) {
+	bot := New(SlackBotType, &recordingAdapter{})
+	key := conversationKey(msgFrom("u", "c", ""))
+
+	f := NewFlow("f").Ask("a", "a?").OnComplete(noopComplete) // no OnTimeout
+	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
+
+	bot.conversations.store.Set(key, ConversationState{
+		FlowID:    "f",
+		ExpiresAt: time.Now().Add(-time.Minute),
+		Answers:   map[string]string{},
+	})
+
+	handled := bot.conversations.advance(context.Background(), bot, msgFrom("u", "c", "late"))
+	asserts.True(t, handled, "an expired-state message is consumed even with no OnTimeout set")
+	_, ok := bot.conversations.store.Get(key)
+	asserts.False(t, ok, "expired state is reaped on the nil-OnTimeout default path")
+}
+
+// The cancel-word branch with NO OnCancel still consumes the message and reaps
+// the state, taking the nil-onCancel default path.
+func TestFlow_CancelWithoutOnCancelConsumesAndReaps(t *testing.T) {
+	bot := New(SlackBotType, &recordingAdapter{})
+	ctx := context.Background()
+	key := conversationKey(msgFrom("u", "c", ""))
+
+	f := NewFlow("f").Ask("a", "a?").Ask("b", "b?").OnComplete(noopComplete) // no OnCancel
+	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
+
+	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
+	handled := bot.conversations.advance(ctx, bot, msgFrom("u", "c", "cancel"))
+	asserts.True(t, handled, "the cancel word is consumed even with no OnCancel set")
+	_, ok := bot.conversations.store.Get(key)
+	asserts.False(t, ok, "state is cleared on the nil-OnCancel default path")
+}
+
+// failingSendAdapter's Send always errors, so a flow prompt can never be
+// delivered — exercising sendFlowMessage's log-and-continue path.
+type failingSendAdapter struct{}
+
+func (failingSendAdapter) Connect(context.Context, AdapterDeps) error { return nil }
+func (failingSendAdapter) Disconnect() error                          { return nil }
+func (failingSendAdapter) Attachments(*Message) ([]Attachment, error) { return nil, nil }
+func (failingSendAdapter) Send(context.Context, string, string, SendOptions) error {
+	return errors.New("send boom")
+}
+
+// A prompt-send failure must not wedge or roll back the flow: sendFlowMessage
+// logs the error and the state machine advances regardless.
+func TestFlow_SendFailureStillAdvancesAndLogs(t *testing.T) {
+	var buf bytes.Buffer
+	bot := New(SlackBotType, failingSendAdapter{})
+	bot.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx := context.Background()
+	key := conversationKey(msgFrom("u", "c", ""))
+
+	f := NewFlow("f").Ask("a", "a?").Ask("b", "b?").OnComplete(noopComplete)
+	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
+
+	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
+	s, ok := bot.conversations.store.Get(key)
+	asserts.True(t, ok, "flow starts despite a failed first-prompt send")
+	asserts.Equal(t, s.Step, 0, "on step 0 after start")
+
+	handled := bot.conversations.advance(ctx, bot, msgFrom("u", "c", "alpha"))
+	asserts.True(t, handled, "answer is consumed even though the prompt send fails")
+	s2, _ := bot.conversations.store.Get(key)
+	asserts.Equal(t, s2.Step, 1, "flow advances to step 1 despite the send error")
+
+	asserts.True(t, strings.Contains(buf.String(), "failed to send flow prompt"),
+		"the send failure is logged, not propagated")
+}
+
+// A nil AskOption must be skipped rather than panicking, mirroring
+// resolveSendOptions' nil-skip; the step still registers and collects answers.
+func TestFlow_AskSkipsNilOption(t *testing.T) {
+	bot := New(SlackBotType, &recordingAdapter{})
+	ctx := context.Background()
+
+	var got Answers
+	f := NewFlow("f").
+		Ask("a", "a?", nil, Validate(func(string) error { return nil }), nil).
+		OnComplete(func(_ context.Context, _ *Bot, _ *Message, a Answers) { got = a })
+	asserts.NoError(t, bot.HandleFlow("^f$", f), "a flow whose Ask carried nil options registers")
+
+	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
+	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "answer"))
+	asserts.Equal(t, got.Get("a"), "answer", "the step with nil options still collects its answer")
 }

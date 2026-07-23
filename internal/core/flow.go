@@ -56,6 +56,10 @@ func Validate(fn func(string) error) AskOption {
 //     surrounding whitespace, but a secret (password, token) keeps leading and
 //     trailing whitespace, which can be meaningful.
 //
+// The engine still decides whether a step is answered from the TRIMMED content,
+// so an all-whitespace reply is treated as no answer and re-prompts even on a
+// Secret() step; the exact-bytes rule only governs how a real answer is stored.
+//
 // It does NOT encrypt anything, does not police user-installed middleware (which
 // sees the raw Message.Content), and does not hide the answer from other members
 // of a public channel. Secret-collecting flows should therefore be DM-only.
@@ -65,11 +69,14 @@ func Secret() AskOption {
 
 // Ask appends a question to the flow: prompt is sent to the user and the reply is
 // stored under key. Options configure validation (Validate) and secrecy (Secret).
-// Keys must be unique within a flow; HandleFlow rejects duplicates.
+// Keys must be unique within a flow; HandleFlow rejects duplicates. A nil option
+// is skipped, so a conditionally-built option slice may carry a nil entry.
 func (f *Flow) Ask(key, prompt string, opts ...AskOption) *Flow {
 	step := flowStep{key: key, prompt: prompt}
 	for _, opt := range opts {
-		opt(&step)
+		if opt != nil {
+			opt(&step)
+		}
 	}
 	f.steps = append(f.steps, step)
 	return f
@@ -88,7 +95,16 @@ func (f *Flow) OnCancel(fn func(ctx context.Context, b *Bot, m *Message)) *Flow 
 	return f
 }
 
-// OnTimeout sets the optional callback run when an idle flow expires.
+// OnTimeout sets the optional callback run when an idle flow's next message
+// lands after expiry but before the background sweeper reaps the state.
+//
+// It does NOT fire on a timer. Expiry is lazy: the background sweeper deletes
+// expired state WITHOUT running OnTimeout, and expiry is otherwise noticed only
+// when the user's next message arrives. So OnTimeout runs only if that next
+// message lands in the window between expiry and the next sweep (at most one
+// sweep interval wide); if the user stays quiet past a sweep the state is reaped
+// silently, and a later message falls through to the command table as if no flow
+// were ever active.
 func (f *Flow) OnTimeout(fn func(ctx context.Context, b *Bot, m *Message)) *Flow {
 	f.onTimeout = fn
 	return f
@@ -96,14 +112,18 @@ func (f *Flow) OnTimeout(fn func(ctx context.Context, b *Bot, m *Message)) *Flow
 
 // CancelWord sets the bail-out word (default "cancel"); passing "" disables
 // cancellation. The cancel check precedes validation, so the configured word
-// shadows that exact answer on every step.
+// shadows that exact answer on every step. The match is exact and
+// case-sensitive against the trimmed message: "cancel" (with any surrounding
+// whitespace) bails, but "Cancel" or "CANCEL" do not.
 func (f *Flow) CancelWord(word string) *Flow {
 	f.cancelWord = word
 	return f
 }
 
-// Timeout sets the per-step idle TTL (default 10m); it slides on each successful
-// step.
+// Timeout sets the per-step idle TTL (default 10m). It measures user silence: the
+// deadline slides on ANY message for the active step — including an empty or
+// rejected answer — since any message counts as engagement. Only going quiet past
+// the TTL lets the flow expire.
 func (f *Flow) Timeout(d time.Duration) *Flow {
 	f.timeout = d
 	return f
