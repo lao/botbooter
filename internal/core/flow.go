@@ -126,11 +126,13 @@ func (f *Flow) CancelWord(word string) *Flow {
 }
 
 // Timeout sets the per-step idle TTL (default 10m). It measures user silence: the
-// deadline slides on ANY message for the active step — including an empty or
-// rejected answer — since any message counts as engagement. Only going quiet past
-// the TTL lets the flow expire. A non-positive d is ignored and the default
-// applies — there is no "disable timeout" in v1 (an unbounded flow would leak
-// in-memory state).
+// deadline slides on any message the engine sees for the active step — including an
+// empty or rejected answer — since any message counts as engagement. (Some adapters
+// drop attachment-less "service" messages — stickers, locations, member joins —
+// before the engine, so those neither answer a step nor slide the deadline.) Only
+// going quiet past the TTL lets the flow expire. A non-positive d is ignored and the
+// default applies — there is no "disable timeout" in v1 (an unbounded flow would
+// leak in-memory state).
 func (f *Flow) Timeout(d time.Duration) *Flow {
 	f.timeout = d
 	return f

@@ -172,9 +172,9 @@ if err := bot.HandleFlow("^sign ?up$", signup); err != nil {
 ```
 
 `HandleFlow` validates the flow and returns an `errors.Is`-checkable sentinel
-(`ErrFlowEmptyID`, `ErrFlowNoSteps`, `ErrFlowEmptyStepKey`, `ErrFlowDuplicateKey`,
-`ErrFlowNoOnComplete`, `ErrFlowAlreadyRegistered`) — plus the pattern error from a
-bad regexp, and a nil-flow error.
+(`ErrFlowNil`, `ErrFlowEmptyID`, `ErrFlowNoSteps`, `ErrFlowEmptyStepKey`,
+`ErrFlowEmptyStepPrompt`, `ErrFlowDuplicateKey`, `ErrFlowNoOnComplete`,
+`ErrFlowAlreadyRegistered`) — plus the pattern error from a bad regexp.
 `Validate(fn)` re-prompts the same step on a non-nil error (using `err.Error()` as
 the nudge); an empty/whitespace reply is a non-answer and also re-prompts. Ordinary
 answers are trimmed of surrounding whitespace before storage; a `Secret()` step
@@ -185,13 +185,19 @@ Things to know (v1):
 - **DM-intended.** While a flow is active it shadows the command table, so *every*
   message in that conversation becomes an answer until it completes, the user types
   the cancel word (default `"cancel"`, set with `CancelWord`, disable with `""`), or
-  it times out (idle TTL, default 10m via `Timeout`; any reply — even a rejected or
-  empty one — slides the deadline, so only going silent expires it). In a
+  it times out (idle TTL, default 10m via `Timeout`; any reply the flow receives —
+  even a rejected or empty one — slides the deadline, so only going silent expires
+  it). In a
   public channel this means a flow consumes everyone's messages — run flows in DMs.
   Register `OnCancel(fn)` / `OnTimeout(fn)` on the flow to react to those two
   exits; note the timeout callback fires only if the user's next message arrives
   before the background sweeper reclaims the expired state (see the `Flow.OnTimeout`
   godoc for the exact contract).
+- **Attachment-less "service" messages don't reach a flow on some platforms.**
+  Slack, Telegram and the whatsmeow flavor drop messages with no text, caption or
+  attachment (stickers, locations, member joins, …) before dispatch, mirroring their
+  ordinary message handling. Mid-flow this means such a message neither answers a
+  step (no empty-answer re-prompt) nor slides the idle TTL — a text reply does both.
 - **`Secret()`** keeps an answer out of framework logs and any future serialized
   `Store` state. It is **not** encryption, does not police your own middleware, and
   does not hide the answer from other members of a public channel.
