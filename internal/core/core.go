@@ -457,6 +457,13 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// only background sweeping pauses for that window (lazy expiry still applies).
 	// Gated on registered flows so a bot that never calls HandleFlow spins up no
 	// background goroutine.
+	//
+	// teardown cancels the old connection's runCtx but does not wait for its
+	// sweeper to observe cancellation and exit (production teardown never blocks
+	// on sweeperDone), so a fast reconnect can briefly run two sweepers against
+	// the shared per-Bot conversationManager. That overlap is benign: sweep
+	// re-checks expiry under each shard lock before deleting, so a concurrent
+	// double-sweep is idempotent.
 	if b.conversations != nil && len(b.flows) > 0 {
 		c.sweeperDone = b.conversations.startSweeper(runCtx, defaultSweepInterval, b.log())
 	}

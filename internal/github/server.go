@@ -27,6 +27,11 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	// caps the memory an unauthenticated flood of large POSTs can buffer. Held
 	// only across read+verify+parse (this function); the dispatch goroutine has
 	// its own bound (ackAndDispatch).
+	//
+	// Unlike a.sem (recreated per Connect, so ackAndDispatch snapshots it under
+	// a.mu), a.readSem is allocated once in newAdapter and never reassigned, so
+	// this direct read races nothing. If readSem ever becomes per-connection, it
+	// must adopt the same a.mu snapshot pattern.
 	select {
 	case a.readSem <- struct{}{}:
 	default:
