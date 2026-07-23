@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -15,12 +16,16 @@ const defaultCancelWord = "cancel"
 // Errors returned by [Bot.HandleFlow], wrapped with the flow id (and key) for
 // context. Check them with errors.Is.
 var (
+	// ErrFlowNil is returned when a nil *Flow is passed to HandleFlow.
+	ErrFlowNil = errors.New("botbooter: flow must not be nil")
 	// ErrFlowEmptyID is returned when a flow's id is empty.
 	ErrFlowEmptyID = errors.New("botbooter: flow id must not be empty")
 	// ErrFlowNoSteps is returned when a flow has no Ask steps.
 	ErrFlowNoSteps = errors.New("botbooter: flow has no steps")
 	// ErrFlowEmptyStepKey is returned when a flow has an Ask step with an empty key.
 	ErrFlowEmptyStepKey = errors.New("botbooter: flow step has an empty key")
+	// ErrFlowEmptyStepPrompt is returned when a flow has an Ask step with an empty prompt.
+	ErrFlowEmptyStepPrompt = errors.New("botbooter: flow step has an empty prompt")
 	// ErrFlowDuplicateKey is returned when a flow has two Ask steps with the same key.
 	ErrFlowDuplicateKey = errors.New("botbooter: flow has a duplicate Ask key")
 	// ErrFlowNoOnComplete is returned when a flow has no OnComplete callback.
@@ -103,7 +108,8 @@ func (f *Flow) CancelWord(word string) *Flow {
 }
 
 // Timeout sets the per-step idle TTL (default 10m); it slides on each successful
-// step.
+// step. A non-positive d is ignored and the default applies — there is no
+// "disable timeout" in v1 (an unbounded flow would leak in-memory state).
 func (f *Flow) Timeout(d time.Duration) *Flow {
 	f.timeout = d
 	return f
@@ -121,6 +127,9 @@ func (f *Flow) validate() error {
 	for _, s := range f.steps {
 		if s.key == "" {
 			return fmt.Errorf("botbooter: flow %q: %w", f.id, ErrFlowEmptyStepKey)
+		}
+		if strings.TrimSpace(s.prompt) == "" {
+			return fmt.Errorf("botbooter: flow %q: %q: %w", f.id, s.key, ErrFlowEmptyStepPrompt)
 		}
 		if seen[s.key] {
 			return fmt.Errorf("botbooter: flow %q: %q: %w", f.id, s.key, ErrFlowDuplicateKey)
@@ -189,7 +198,7 @@ func serializableState(state ConversationState, flow *Flow) ConversationState {
 // connected is a data race. Finish building before calling HandleFlow.
 func (b *Bot) HandleFlow(pattern string, flow *Flow) error {
 	if flow == nil {
-		return errors.New("botbooter: HandleFlow: flow must not be nil")
+		return ErrFlowNil
 	}
 	if err := flow.validate(); err != nil {
 		return err
