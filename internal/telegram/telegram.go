@@ -138,6 +138,11 @@ func New(token string) (*core.Bot, error) {
 // consumer made on Client(bot) before Connect survives; every reconnect builds a
 // fresh client, so a canceled run's buffered updates die with it instead of
 // draining into the successor connection.
+// getMeProbeTimeout bounds the Connect-time getMe probe so a hung Bot API cannot
+// hold core.Bot's mutex (held across adapter.Connect) indefinitely when the
+// caller's context carries no deadline.
+const getMeProbeTimeout = 10 * time.Second
+
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	ctx = withDeps(ctx, &deps)
 
@@ -157,7 +162,14 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	// is an infinite silent retry; surfaced from Connect it becomes an error from
 	// Run. Marking the New-time client consumed is deferred until the probe passes
 	// so a transient failure doesn't discard its pre-Connect RegisterHandlers.
-	if _, err := tg.GetMe(ctx); err != nil {
+	//
+	// Bound the probe with its own timeout: core.Bot.Connect holds b.mu across
+	// adapter.Connect, so a deadline-less caller context must not let a hung API
+	// stall the probe — and thus the Bot's lock and any concurrent Disconnect —
+	// indefinitely.
+	probeCtx, cancel := context.WithTimeout(ctx, getMeProbeTimeout)
+	defer cancel()
+	if _, err := tg.GetMe(probeCtx); err != nil {
 		return fmt.Errorf("telegram: getMe probe failed (check the bot token): %w", err)
 	}
 
