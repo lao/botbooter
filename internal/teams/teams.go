@@ -55,7 +55,10 @@ type Config struct {
 	// bare port ("8080") is accepted as shorthand for ":8080".
 	Addr string
 	// Path is the webhook route; it defaults to /api/messages.
-	Path       string
+	Path string
+	// HTTPClient overrides the client used for outbound Bot Connector calls
+	// (token minting, replies, and the JWKS/OpenID metadata fetches); a default
+	// client with a 30s timeout is used when nil.
 	HTTPClient *http.Client
 }
 
@@ -79,10 +82,15 @@ type adapter struct {
 	// after the drain window so a stuck handler or reply cannot leak.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
-	convs          map[string]conversation // conversationID -> reply routing info
-	convOrder      []string                // FIFO insertion order for bounded eviction
-	token          cachedToken
-	keys           map[string]*jwksKey // kid -> signing key + channel endorsements
+	// dispatchSem is a counting semaphore (capacity maxConcurrentDispatch) that
+	// bounds in-flight dispatch goroutines: the handler acquires a slot before
+	// acking and sheds load with 503 when it is full. Allocated once in newAdapter
+	// so the bound is adapter-wide across reconnects.
+	dispatchSem chan struct{}
+	convs       map[string]conversation // conversationID -> reply routing info
+	convOrder   []string                // FIFO insertion order for bounded eviction
+	token       cachedToken
+	keys        map[string]*jwksKey // kid -> signing key + channel endorsements
 	// keysAt is the last JWKS fetch attempt (rate-limits refreshes); keysFreshAt
 	// is the last successful refresh (drives the jwksMaxAge staleness gate).
 	keysAt      time.Time
@@ -91,6 +99,9 @@ type adapter struct {
 	// fetchMu serializes JWKS refreshes so a burst of unknown-kid tokens triggers
 	// a single upstream fetch.
 	fetchMu sync.Mutex
+	// tokenMu serializes cold outbound-token mints so a burst of concurrent Sends
+	// makes a single client-credentials request, mirroring fetchMu.
+	tokenMu sync.Mutex
 }
 
 // New creates a Microsoft Teams bot backed by the Azure Bot Framework. It returns
@@ -140,9 +151,10 @@ func newAdapter(cfg Config) (*adapter, error) {
 		tenant = "botframework.com"
 	}
 	return &adapter{
-		cfg:       cfg,
-		http:      cfg.HTTPClient,
-		tokenURL:  "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token",
-		openIDURL: openIDConfigURL,
+		cfg:         cfg,
+		http:        cfg.HTTPClient,
+		tokenURL:    "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token",
+		openIDURL:   openIDConfigURL,
+		dispatchSem: make(chan struct{}, maxConcurrentDispatch),
 	}, nil
 }
