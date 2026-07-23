@@ -52,9 +52,13 @@ const (
 	// read before its signature can be checked, so without this an
 	// unauthenticated flood of large POSTs could each buffer maxRequestBytes with
 	// no limit; this caps peak read memory at maxConcurrentReads*maxRequestBytes
-	// (~1.6 GiB). It is separate from maxConcurrentDispatch because a read is
-	// short-lived while a dispatch goroutine may run a slow handler.
-	maxConcurrentReads = 64
+	// (~400 MiB), keeping the worst case friendly to memory-constrained
+	// deployments (small containers). It is kept well above realistic GitHub
+	// delivery concurrency, and a saturating burst is shed with 503 (GitHub
+	// retries), so legitimate traffic is not dropped. It is separate from
+	// maxConcurrentDispatch because a read is short-lived while a dispatch
+	// goroutine may run a slow handler.
+	maxConcurrentReads = 16
 
 	// maxConcurrentDispatch bounds in-flight webhook dispatch goroutines. A
 	// delivery that would exceed it is answered 503 (GitHub retries) instead of
