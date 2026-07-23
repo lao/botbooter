@@ -192,7 +192,11 @@ Things to know (v1):
   Register `OnCancel(fn)` / `OnTimeout(fn)` on the flow to react to those two
   exits; note the timeout callback fires only if the user's next message arrives
   before the background sweeper reclaims the expired state (see the `Flow.OnTimeout`
-  godoc for the exact contract).
+  godoc for the exact contract). The message that discovers the expiry is consumed
+  either way: it runs `OnTimeout` if set, otherwise it is dropped rather than
+  falling through to the command table (a late reply is likelier a stale flow answer
+  than a fresh command), so a post-timeout `help` gets no reply — the message after
+  it is handled normally.
 - **Attachment-less "service" messages don't reach a flow on some platforms.**
   Slack, Telegram and the whatsmeow flavor drop messages with no text, caption or
   attachment (stickers, locations, member joins, …) before dispatch, mirroring their
