@@ -34,6 +34,36 @@ type Config = wmint.Config
 // so the session must be re-paired. Check for it with errors.Is.
 var ErrLoggedOut = wmint.ErrLoggedOut
 
+// These sentinels are the remaining terminal (permanent-disconnect) conditions
+// reported through Run alongside ErrLoggedOut. whatsmeow does not auto-reconnect
+// after any of them; the reported error wraps the sentinel plus any detail the
+// event carried. Check for them with errors.Is.
+var (
+	// ErrStreamReplaced is reported when another login using the same session
+	// displaces this connection.
+	ErrStreamReplaced = wmint.ErrStreamReplaced
+
+	// ErrClientOutdated is reported when the server rejects the connection
+	// because the whatsmeow protocol version is too old.
+	ErrClientOutdated = wmint.ErrClientOutdated
+
+	// ErrTemporaryBan is reported when WhatsApp temporarily bans the account.
+	ErrTemporaryBan = wmint.ErrTemporaryBan
+
+	// ErrCATRefresh is reported when refreshing the client's crypto auth token
+	// fails.
+	ErrCATRefresh = wmint.ErrCATRefresh
+
+	// ErrConnectFailure is reported when the server rejects the connection with a
+	// failure reason whatsmeow does not model as its own event.
+	ErrConnectFailure = wmint.ErrConnectFailure
+)
+
+// ErrClosed is returned by Run/Connect when a store-owning bot is reused after
+// its single run: Disconnect closed the underlying store. Construct a fresh bot
+// with New instead of reconnecting this one. Check for it with errors.Is.
+var ErrClosed = wmint.ErrClosed
+
 // ErrNotDownloadable is returned by [Download] when the attachment does not
 // carry a whatsmeow downloadable media payload.
 var ErrNotDownloadable = wmint.ErrNotDownloadable

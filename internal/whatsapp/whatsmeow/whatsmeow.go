@@ -60,6 +60,43 @@ var dsnPathEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 // so the session must be re-paired. Check for it with errors.Is.
 var ErrLoggedOut = errors.New("whatsmeow: logged out, session must be re-linked")
 
+// The following sentinels are the remaining terminal (permanent-disconnect)
+// conditions whatsmeow signals alongside ErrLoggedOut. whatsmeow does not
+// auto-reconnect after any of them, so each is reported through Run to end the
+// run loop instead of leaving the bot silently connected-but-dead. Check for
+// them with errors.Is; the reported error wraps a sentinel plus any detail the
+// event carried.
+var (
+	// ErrStreamReplaced is reported when another login using the same session
+	// (for example a second process started with the same store) displaces this
+	// connection.
+	ErrStreamReplaced = errors.New("whatsmeow: stream replaced by another login with the same session")
+
+	// ErrClientOutdated is reported when the WhatsApp server rejects the
+	// connection because the whatsmeow protocol version is too old; upgrading the
+	// go.mau.fi/whatsmeow dependency is required to recover.
+	ErrClientOutdated = errors.New("whatsmeow: client outdated, upgrade go.mau.fi/whatsmeow")
+
+	// ErrTemporaryBan is reported when WhatsApp temporarily bans the account; the
+	// wrapped detail carries the reason code and, when known, the ban expiry.
+	ErrTemporaryBan = errors.New("whatsmeow: temporarily banned")
+
+	// ErrCATRefresh is reported when refreshing the client's CAT (crypto auth
+	// token) fails; the wrapped detail carries the underlying error.
+	ErrCATRefresh = errors.New("whatsmeow: CAT refresh failed")
+
+	// ErrConnectFailure is reported when the server rejects the connection with a
+	// failure reason whatsmeow does not model as its own event; the wrapped
+	// detail carries the reason code and server message.
+	ErrConnectFailure = errors.New("whatsmeow: connection failed")
+)
+
+// ErrClosed is returned by Connect when a store-owning bot is reused after its
+// single run: Disconnect closed the underlying SQLite store, so the client can
+// no longer be connected. Construct a fresh bot with New instead of reconnecting
+// this one. Check for it with errors.Is.
+var ErrClosed = errors.New("whatsmeow: bot is single-run after Disconnect; construct a fresh one")
+
 // ErrNotDownloadable is returned by Download when the attachment does not carry
 // a whatsmeow downloadable media payload.
 var ErrNotDownloadable = errors.New("whatsmeow: attachment is not downloadable media")
@@ -104,6 +141,10 @@ type adapter struct {
 	// which case Disconnect closes it. A caller-supplied Container or Client is
 	// left for the caller to close.
 	ownContainer *sqlstore.Container
+	// closed is set once Disconnect has closed an owned store. Such a bot is
+	// single-run — its client can no longer reach the store — so a later Connect
+	// fails fast with ErrClosed instead of erroring deep inside whatsmeow.
+	closed bool
 }
 
 // New creates a WhatsApp Web bot from cfg. It opens (or reuses) the session
@@ -147,6 +188,16 @@ func newAdapter(cfg Config) (*adapter, error) {
 		if ownDBPath == "" {
 			ownDBPath = defaultDBPath
 		}
+		// Pre-create the file 0600 before SQLite opens it, so the store never
+		// exists at SQLite's default 0644 even momentarily: it holds the linked
+		// session and crypto keys, and a concurrent reader could otherwise catch
+		// the world-readable creation window. O_CREATE without O_TRUNC leaves an
+		// existing db untouched (its perms are tightened by the chmod below).
+		if f, err := os.OpenFile(ownDBPath, os.O_CREATE, 0o600); err != nil { //nolint:gosec // ownDBPath is the adapter's own store path (cfg.DBPath/default), same trust as the sqlstore open below
+			return nil, fmt.Errorf("whatsmeow: create store file: %w", err)
+		} else if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("whatsmeow: create store file: %w", err)
+		}
 		c, err := sqlstore.New(context.Background(), sqliteDialect, fmt.Sprintf(dsnFormat, dsnPathEscaper.Replace(ownDBPath)), logger)
 		if err != nil {
 			return nil, fmt.Errorf("whatsmeow: open store: %w", err)
@@ -163,14 +214,18 @@ func newAdapter(cfg Config) (*adapter, error) {
 		return nil, fmt.Errorf("whatsmeow: get device: %w", err)
 	}
 
-	// The store we created holds the linked session and crypto keys — a
-	// credential. Restrict it to the owner. Best effort: SQLite's default 0644
-	// is the concern, but a chmod failure must not block startup. The -wal/-shm
-	// sidecars don't exist at this point (the store runs in the default DELETE
-	// journal mode); if WAL is ever enabled, SQLite creates them with the main
-	// file's permissions, so chmodding the db file alone covers them too.
+	// Tighten the store to owner-only. The pre-create above already opens it 0600
+	// for the common (new-file) case; this also covers a store file that already
+	// existed with looser perms. A chmod failure must not block startup — the
+	// store still works — but it is a credential-exposure risk worth logging.
+	// The -wal/-shm sidecars don't exist at this point (the store runs in the
+	// default DELETE journal mode); if WAL is ever enabled, SQLite creates them
+	// with the main file's permissions, so chmodding the db file alone covers
+	// them too.
 	if ownDBPath != "" {
-		_ = os.Chmod(ownDBPath, 0o600)
+		if err := os.Chmod(ownDBPath, 0o600); err != nil {
+			logger.Warnf("could not restrict store file %q to owner-only (holds session keys): %v", ownDBPath, err)
+		}
 	}
 
 	return &adapter{
@@ -185,6 +240,16 @@ func newAdapter(cfg Config) (*adapter, error) {
 // first: QR codes are streamed to the callback while the session links. The
 // client then runs in the background until ctx is canceled, mirroring Discord.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
+	// A store-owning bot is single-run: Disconnect closed its store, so the
+	// client can no longer reach it. Fail fast and explicitly rather than deep
+	// inside whatsmeow. (Caller-supplied Client/Container bots never set closed.)
+	a.mu.Lock()
+	closed := a.closed
+	a.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+
 	// whatsmeow can deliver more than one terminal event for a single connection
 	// (a pairing failure and a logout can both fire, and both the event handler
 	// and the QR channel observe a logout during pairing), but core's run loop
@@ -254,13 +319,26 @@ func (a *adapter) pumpQR(qrChan <-chan wm.QRChannelItem, reportDone func(error))
 }
 
 // onEvent handles the whatsmeow events the adapter cares about: incoming
-// messages are dispatched, and a logout ends the run loop via reportDone.
+// messages are dispatched, and each terminal permanent-disconnect event ends
+// the run loop via reportDone with a matching sentinel. whatsmeow does not
+// auto-reconnect after any of these, so leaving one unmapped would strand the
+// bot silently connected-but-dead until the process is restarted.
 func (a *adapter) onEvent(ctx context.Context, evt any, deps core.AdapterDeps, reportDone func(error)) {
 	switch v := evt.(type) {
 	case *events.Message:
 		a.onMessage(ctx, v, deps)
 	case *events.LoggedOut:
 		reportDone(ErrLoggedOut)
+	case *events.StreamReplaced:
+		reportDone(ErrStreamReplaced)
+	case *events.ClientOutdated:
+		reportDone(ErrClientOutdated)
+	case *events.TemporaryBan:
+		reportDone(fmt.Errorf("%w: %s", ErrTemporaryBan, v.String()))
+	case *events.CATRefreshError:
+		reportDone(fmt.Errorf("%w: %w", ErrCATRefresh, v.Error))
+	case *events.ConnectFailure:
+		reportDone(fmt.Errorf("%w: reason %d %q", ErrConnectFailure, v.Reason, v.Message))
 	}
 }
 
@@ -279,8 +357,10 @@ func (a *adapter) onMessage(ctx context.Context, v *events.Message, deps core.Ad
 		// An empty emoji means the reaction was removed; skip it, mirroring the
 		// Cloud API flavor. A reaction whose key carries no message id has no
 		// reply target, so skip it too — keeping Reaction.MessageID always set,
-		// same reasoning as Slack's file-reaction skip. No self-reaction filter:
-		// the bot never adds reactions, so a self-reply loop is impossible.
+		// same reasoning as Slack's file-reaction skip. The bot's own reactions
+		// are already dropped by the IsFromMe guard at the top of onMessage, so
+		// whatsmeow has a de-facto self filter (unlike Slack) and a self-reply
+		// loop is impossible.
 		if react.GetText() != "" && react.GetKey().GetID() != "" {
 			deps.DispatchReaction(ctx, toReaction(v, react))
 		}
@@ -351,6 +431,11 @@ func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	container := a.ownContainer
 	a.ownContainer = nil
+	if container != nil {
+		// Closing the owned store retires this bot: a later Connect must not try
+		// to reach the now-closed store (see ErrClosed).
+		a.closed = true
+	}
 	a.mu.Unlock()
 	if container != nil {
 		return container.Close()
