@@ -96,6 +96,17 @@ func TestParseChannelID(t *testing.T) {
 		{"/repo#1", "", "", 0, true},  // empty owner
 		{"owner/#1", "", "", 0, true}, // empty repo
 		{"", "", "", 0, true},
+		// Charset/segment hardening: a segment must be a legal owner/repo name
+		// ([A-Za-z0-9._-]) and never "." or ".." — otherwise a crafted id could
+		// walk or inject the REST path.
+		{"../x#1", "", "", 0, true},          // ".." owner traverses the path
+		{"owner/..#1", "", "", 0, true},      // ".." repo traverses the path
+		{".#1", "", "", 0, true},             // "." owner (also no /repo)
+		{"owner/.#1", "", "", 0, true},       // "." repo
+		{"ow ner/repo#1", "", "", 0, true},   // space in owner
+		{"owner/re:po#1", "", "", 0, true},   // colon in repo
+		{"owner/re/po#1", "", "", 0, true},   // slash in repo (path separator)
+		{"own%2fer/repo#1", "", "", 0, true}, // percent-encoded separator
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

@@ -38,9 +38,18 @@ import (
 const (
 	defaultPath = "/webhook"
 
-	// The endpoint is public; cap bodies against memory exhaustion. Real
-	// issue_comment payloads are tens of KB at most.
-	maxRequestBytes = 1 << 20 // 1 MiB
+	// The endpoint is public; cap bodies against memory exhaustion.
+	// issue_comment payloads are tens of KB, but push and pull_request
+	// deliveries (many commits, large PR bodies) can reach GitHub's 25 MiB
+	// webhook ceiling, so cap there rather than at 1 MiB — a lower cap silently
+	// dropped real push/PR deliveries at the body reader.
+	maxRequestBytes = 25 << 20 // 25 MiB (GitHub's webhook payload ceiling)
+
+	// maxConcurrentDispatch bounds in-flight webhook dispatch goroutines. A
+	// delivery that would exceed it is answered 503 (GitHub retries) instead of
+	// spawning an unbounded goroutine under a flood. The reaction poller is
+	// excluded — its cadence is self-bounded and it has no HTTP response to 503.
+	maxConcurrentDispatch = 256
 
 	shutdownTimeout = 5 * time.Second
 	drainTimeout    = 5 * time.Second
@@ -178,6 +187,11 @@ type adapter struct {
 	// logger is the Bot's logger handed over at Connect; read via log().
 	logger   *slog.Logger
 	inflight atomic.Int64
+	// sem bounds concurrent webhook dispatch goroutines (see
+	// maxConcurrentDispatch). A non-blocking acquire before the ack turns a
+	// saturating flood into 503s instead of unbounded goroutines. Buffered at
+	// New and shared across reconnects; the reaction poller does not use it.
+	sem chan struct{}
 }
 
 // pollingConfigured reports whether ReactionPollRepos named anything to poll,
@@ -276,7 +290,12 @@ func newAdapter(cfg Config) (*adapter, error) {
 		baseTransport = http.DefaultTransport
 	}
 
-	a := &adapter{cfg: cfg, pollRepos: pollRepos, wildcardOwners: wildcardOwners}
+	a := &adapter{
+		cfg:            cfg,
+		pollRepos:      pollRepos,
+		wildcardOwners: wildcardOwners,
+		sem:            make(chan struct{}, maxConcurrentDispatch),
+	}
 	if a.pollingConfigured() {
 		a.reactions = newReactionStore()
 	}

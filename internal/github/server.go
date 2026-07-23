@@ -32,6 +32,10 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 		return
 	}
 	if err := gogithub.ValidateSignature(r.Header.Get(signatureHeader), payload, []byte(a.cfg.WebhookSecret)); err != nil {
+		// Log the rejection so an operator can diagnose a webhook-secret
+		// mismatch (mirrors the Teams sibling's 401 log). The error names only
+		// the HMAC failure, never the secret or body.
+		a.log().Warn("github: inbound request rejected with 403", "error", err)
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -74,8 +78,7 @@ func (a *adapter) handleIssueComment(dispatchCtx context.Context, w http.Respons
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	a.dispatchAsync(func() { deps.Dispatch(dispatchCtx, toMessage(event)) })
+	a.ackAndDispatch(w, func() { deps.Dispatch(dispatchCtx, toMessage(event)) })
 }
 
 // handlePullRequest routes pull_request deliveries to cfg.OnPullRequest.
@@ -101,8 +104,7 @@ func (a *adapter) handlePullRequest(dispatchCtx context.Context, w http.Response
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	a.dispatchAsync(func() { callback(dispatchCtx, event) })
+	a.ackAndDispatch(w, func() { callback(dispatchCtx, event) })
 }
 
 // reviewableAction reports whether a pull_request action creates or changes
@@ -132,8 +134,28 @@ func (a *adapter) handlePush(dispatchCtx context.Context, w http.ResponseWriter,
 		return
 	}
 
+	a.ackAndDispatch(w, func() { callback(dispatchCtx, event) })
+}
+
+// ackAndDispatch bounds concurrent webhook dispatch with a counting semaphore
+// (maxConcurrentDispatch). It attempts a non-blocking acquire BEFORE acking: on
+// success it acks 200, runs f on a drained dispatch goroutine, and releases the
+// slot when f returns; on saturation it answers 503 so GitHub retries the
+// delivery later instead of the adapter spawning unbounded goroutines under a
+// flood. The reaction poller does not go through here (it has no HTTP response
+// to 503 and its cadence is self-bounded); it uses dispatchAsync directly.
+func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
+	select {
+	case a.sem <- struct{}{}:
+	default:
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	a.dispatchAsync(func() { callback(dispatchCtx, event) })
+	a.dispatchAsync(func() {
+		defer func() { <-a.sem }()
+		f()
+	})
 }
 
 // dispatchAsync runs f on a dispatch goroutine tracked by the inflight
