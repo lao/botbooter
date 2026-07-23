@@ -138,11 +138,6 @@ func New(token string) (*core.Bot, error) {
 // consumer made on Client(bot) before Connect survives; every reconnect builds a
 // fresh client, so a canceled run's buffered updates die with it instead of
 // draining into the successor connection.
-// getMeProbeTimeout bounds the Connect-time getMe probe so a hung Bot API cannot
-// hold core.Bot's mutex (held across adapter.Connect) indefinitely when the
-// caller's context carries no deadline.
-const getMeProbeTimeout = 10 * time.Second
-
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	ctx = withDeps(ctx, &deps)
 
@@ -158,23 +153,9 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		}
 	}
 
-	// Fail fast on an invalid token or unreachable API. Left to the poll loop this
-	// is an infinite silent retry; surfaced from Connect it becomes an error from
-	// Run. Marking the New-time client consumed is deferred until the probe passes
-	// so a transient failure doesn't discard its pre-Connect RegisterHandlers.
-	//
-	// Bound the probe with its own timeout: core.Bot.Connect holds b.mu across
-	// adapter.Connect, so a deadline-less caller context must not let a hung API
-	// stall the probe — and thus the Bot's lock and any concurrent Disconnect —
-	// indefinitely.
-	probeCtx, cancel := context.WithTimeout(ctx, getMeProbeTimeout)
-	defer cancel()
-	if _, err := tg.GetMe(probeCtx); err != nil {
-		return fmt.Errorf("telegram: getMe probe failed (check the bot token): %w", err)
-	}
-
 	// Publish the poll-loop client so Client(b) and Send target the client that
-	// actually receives updates — a RegisterHandler on it now fires.
+	// actually receives updates — a RegisterHandler on it fires — and mark the
+	// New-time client consumed so a reconnect builds a fresh one.
 	a.mu.Lock()
 	a.client = tg
 	a.newClientConsumed = true
@@ -182,6 +163,22 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.mu.Unlock()
 
 	go func() {
+		// Probe getMe before starting the poll loop so an invalid token or
+		// unreachable API surfaces as an error from Run (via Done) instead of the
+		// poll loop's infinite silent 401 retry. It runs HERE, off the Connect
+		// path, on purpose: core.Bot.Connect holds b.mu across adapter.Connect and
+		// relies on it being non-blocking, so a synchronous network probe would let
+		// a slow/unreachable API stall the Bot's lock — and any concurrent
+		// Disconnect — for the probe's duration. ctx is core's run context, which
+		// Disconnect cancels, so a hung probe unblocks on teardown.
+		if _, err := tg.GetMe(ctx); err != nil {
+			if ctx.Err() != nil {
+				deps.Done(ctx.Err()) // shutdown during the probe, not a token failure
+			} else {
+				deps.Done(fmt.Errorf("telegram: getMe probe failed (check the bot token): %w", err))
+			}
+			return
+		}
 		tg.Start(ctx)
 		deps.Done(ctx.Err())
 	}()

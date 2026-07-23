@@ -930,8 +930,10 @@ func TestConnect_ReusesNewTimeClientForRegisteredHandlers(t *testing.T) {
 }
 
 // TestConnect_GetMeProbeFailsFast proves an invalid token surfaces as an error
-// from Connect (the getMe probe) instead of the poll loop silently retrying a
-// 401 forever.
+// from Run (via Done) instead of the poll loop silently retrying a 401 forever.
+// The probe runs off the Connect path — Connect stays non-blocking, since
+// core.Bot holds its mutex across adapter.Connect — so the error arrives on Done,
+// not from Connect's return.
 func TestConnect_GetMeProbeFailsFast(t *testing.T) {
 	a := newStubAdapterRaw(t, 0, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -942,15 +944,21 @@ func TestConnect_GetMeProbeFailsFast(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
 	})
 
+	done := make(chan error, 1)
 	deps := core.AdapterDeps{
 		Dispatch: func(context.Context, *core.Message) {},
-		Done:     func(error) {},
+		Done:     func(err error) { done <- err },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := a.Connect(ctx, deps)
-	asserts.Error(t, err, "an invalid token must fail Connect fast via the getMe probe")
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect returns without blocking on the probe")
+	select {
+	case err := <-done:
+		asserts.Error(t, err, "an invalid token surfaces via Run/Done, not an infinite silent 401 retry")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the getMe probe failure was never reported via Done")
+	}
 }
 
 // chanLogHandler is a race-free slog.Handler for observing log records emitted
