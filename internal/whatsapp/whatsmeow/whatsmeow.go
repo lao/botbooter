@@ -191,9 +191,12 @@ func newAdapter(cfg Config) (*adapter, error) {
 		// Pre-create the file 0600 before SQLite opens it, so the store never
 		// exists at SQLite's default 0644 even momentarily: it holds the linked
 		// session and crypto keys, and a concurrent reader could otherwise catch
-		// the world-readable creation window. O_CREATE without O_TRUNC leaves an
-		// existing db untouched (its perms are tightened by the chmod below).
-		if f, err := os.OpenFile(ownDBPath, os.O_CREATE, 0o600); err != nil { //nolint:gosec // ownDBPath is the adapter's own store path (cfg.DBPath/default), same trust as the sqlstore open below
+		// the world-readable creation window. O_RDWR|O_CREATE without O_TRUNC
+		// leaves an existing db untouched (its perms are tightened by the chmod
+		// below); O_EXCL is deliberately NOT set, because a returning bot
+		// legitimately reopens the store it created on a prior run and O_EXCL
+		// would reject that.
+		if f, err := os.OpenFile(ownDBPath, os.O_RDWR|os.O_CREATE, 0o600); err != nil { //nolint:gosec // ownDBPath is the adapter's own store path (cfg.DBPath/default), same trust as the sqlstore open below
 			return nil, fmt.Errorf("whatsmeow: create store file: %w", err)
 		} else if err := f.Close(); err != nil {
 			return nil, fmt.Errorf("whatsmeow: create store file: %w", err)
