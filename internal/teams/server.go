@@ -75,6 +75,9 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
 	a.logger = deps.Logger
+	// Fresh per-connection dispatch semaphore: a slot a hung handler never
+	// releases dies with this connection instead of leaking across reconnects.
+	a.dispatchSem = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	go serve(srv, ln, deps.Done)
@@ -138,9 +141,14 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 	// Bound concurrent dispatch with a counting semaphore: acquire a slot before
 	// acking so saturation returns 503 (the platform retries) rather than acking a
 	// message the adapter would then drop. Non-blocking so a burst sheds load
-	// instead of stalling the handler.
+	// instead of stalling the handler. Snapshot the per-connection semaphore once so
+	// the acquire here and the release below target the SAME channel across a
+	// reconnect that swaps a.dispatchSem.
+	a.mu.Lock()
+	sem := a.dispatchSem
+	a.mu.Unlock()
 	select {
-	case a.dispatchSem <- struct{}{}:
+	case sem <- struct{}{}:
 	default:
 		a.log().Warn("teams: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -158,7 +166,7 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 	// The semaphore slot is released when dispatch returns.
 	a.inflight.Add(1)
 	go func() {
-		defer func() { <-a.dispatchSem }()
+		defer func() { <-sem }()
 		defer a.inflight.Add(-1)
 		deps.Dispatch(dispatchCtx, msg)
 	}()

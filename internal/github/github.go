@@ -204,8 +204,10 @@ type adapter struct {
 	inflight atomic.Int64
 	// sem bounds concurrent webhook dispatch goroutines (see
 	// maxConcurrentDispatch). A non-blocking acquire before the ack turns a
-	// saturating flood into 503s instead of unbounded goroutines. Buffered at
-	// New and shared across reconnects; the reaction poller does not use it.
+	// saturating flood into 503s instead of unbounded goroutines. Re-created per
+	// Connect and captured at acquire, so a slot that a context-ignoring handler
+	// never releases is confined to that one connection rather than leaking for the
+	// adapter's whole lifetime; the reaction poller does not use it.
 	sem chan struct{}
 	// readSem bounds concurrent inbound request processing so a flood of large
 	// bodies can't buffer unbounded memory before the HMAC check (see

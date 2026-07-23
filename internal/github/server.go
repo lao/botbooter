@@ -159,8 +159,14 @@ func (a *adapter) handlePush(dispatchCtx context.Context, w http.ResponseWriter,
 // flood. The reaction poller does not go through here (it has no HTTP response
 // to 503 and its cadence is self-bounded); it uses dispatchAsync directly.
 func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
+	// Snapshot this connection's semaphore once: Connect installs a fresh one per
+	// connection, and the acquire below and the release in the dispatch goroutine
+	// must target the SAME channel even if a later reconnect swaps a.sem.
+	a.mu.Lock()
+	sem := a.sem
+	a.mu.Unlock()
 	select {
-	case a.sem <- struct{}{}:
+	case sem <- struct{}{}:
 	default:
 		a.log().Warn("github: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -168,7 +174,7 @@ func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 	}
 	w.WriteHeader(http.StatusOK)
 	a.dispatchAsync(func() {
-		defer func() { <-a.sem }()
+		defer func() { <-sem }()
 		f()
 	})
 }
@@ -241,6 +247,9 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
 	a.logger = deps.Logger
+	// Fresh per-connection dispatch semaphore: a slot a hung handler never
+	// releases dies with this connection instead of leaking across reconnects.
+	a.sem = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	// Snapshot the reaction cutoff now, not when the poller goroutine starts:

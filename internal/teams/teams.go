@@ -84,8 +84,9 @@ type adapter struct {
 	inflight       atomic.Int64
 	// dispatchSem is a counting semaphore (capacity maxConcurrentDispatch) that
 	// bounds in-flight dispatch goroutines: the handler acquires a slot before
-	// acking and sheds load with 503 when it is full. Allocated once in newAdapter
-	// so the bound is adapter-wide across reconnects.
+	// acking and sheds load with 503 when it is full. Re-created per Connect and
+	// captured at acquire, so a slot a context-ignoring handler never releases is
+	// confined to that connection rather than leaking for the adapter's lifetime.
 	dispatchSem chan struct{}
 	convs       map[string]conversation // conversationID -> reply routing info
 	convOrder   []string                // FIFO insertion order for bounded eviction

@@ -144,6 +144,9 @@ type adapter struct {
 	// dispatchSem is a counting semaphore (capacity maxConcurrentDispatch) that
 	// bounds concurrent dispatch goroutines. A non-blocking acquire before acking
 	// returns 503 on saturation; the slot is released when the goroutine returns.
+	// Re-created per Connect and captured at acquire, so a slot a context-ignoring
+	// handler never releases is confined to that connection rather than leaking for
+	// the adapter's lifetime.
 	dispatchSem chan struct{}
 }
 
@@ -243,6 +246,9 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
 	a.logger = deps.Logger
+	// Fresh per-connection dispatch semaphore: a slot a hung handler never
+	// releases dies with this connection instead of leaking across reconnects.
+	a.dispatchSem = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	go serve(srv, ln, deps.Done)
@@ -303,9 +309,14 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 
 	// Bound concurrent dispatch: acquire a slot BEFORE acking so a saturated
 	// dispatcher returns 503 (Meta retries) instead of spawning an unbounded
-	// goroutine. The slot is released when the dispatch goroutine returns.
+	// goroutine. The slot is released when the dispatch goroutine returns. Snapshot
+	// the per-connection semaphore once so the acquire here and the release below
+	// target the SAME channel across a reconnect that swaps a.dispatchSem.
+	a.mu.Lock()
+	sem := a.dispatchSem
+	a.mu.Unlock()
 	select {
-	case a.dispatchSem <- struct{}{}:
+	case sem <- struct{}{}:
 	default:
 		a.log().Warn("whatsapp: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -321,7 +332,7 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
-		defer func() { <-a.dispatchSem }()
+		defer func() { <-sem }()
 		for _, m := range messages {
 			if m.Reaction != nil {
 				// An empty emoji means the reaction was removed; scope is
