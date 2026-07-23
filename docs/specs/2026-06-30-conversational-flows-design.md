@@ -1,8 +1,8 @@
 # Conversational Flows — Design Spec
 
 - **Date:** 2026-06-30
-- **Branch:** `worktree-conversational-flows` (investigation only; no code shipped yet)
-- **Status:** Design investigation — pre-approval (revised after multi-lens review)
+- **Branch:** `worktree-conversational-flows`
+- **Status:** Implemented (see the README's [Conversational flows](../../README.md#conversational-flows) section); the §-references below remain the deferred-work index.
 
 ## Goal
 
