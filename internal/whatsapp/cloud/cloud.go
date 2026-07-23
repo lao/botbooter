@@ -307,6 +307,7 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	select {
 	case a.dispatchSem <- struct{}{}:
 	default:
+		a.log().Warn("whatsapp: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
