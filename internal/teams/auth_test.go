@@ -464,6 +464,25 @@ func TestPublicKey_NoUsableKeys(t *testing.T) {
 	asserts.Error(t, err, "empty JWKS should error")
 }
 
+// TestFetchJWKS_IgnoresParentCancellation guards the shared-cache refresh: a
+// JWKS fetch runs on behalf of every in-flight request, so a single client
+// canceling its request must not abort the refresh. publicKey advances the
+// rate-limit clock (keysAt) before fetching, so an aborted fetch would also burn
+// the 1-minute refresh window and 401 subsequent legitimate requests. fetchJWKS
+// therefore detaches from the caller's cancellation; its own 15s timeout still
+// bounds it.
+func TestFetchJWKS_IgnoresParentCancellation(t *testing.T) {
+	a := testAdapter(t) // openIDURL points at a working JWKS server
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // caller's request is already gone
+
+	keys, err := a.fetchJWKS(ctx)
+
+	asserts.NoError(t, err, "fetchJWKS must ignore parent cancellation")
+	asserts.NotNil(t, keys[testKID], "JWKS still fetched despite a canceled request context")
+}
+
 func TestFetchJWKS_MissingURI(t *testing.T) {
 	openid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{}`)

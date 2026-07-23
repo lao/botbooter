@@ -30,13 +30,40 @@ type adapter struct {
 	client *slackapi.Client
 	socket *socketmode.Client
 
-	// Per-connection dispatch state, guarded by mu. A dedicated dispatcher
-	// goroutine drains queue in order so a slow handler cannot freeze the event
-	// pump, and Disconnect waits on drained so in-flight work is not abandoned.
+	// ackFn, when non-nil, replaces the socket client's Ack. It is a test seam
+	// for observing acknowledgements without a live WebSocket connection; in
+	// production it is nil and ack delegates to a.socket.Ack.
+	ackFn func(socketmode.Request)
+
+	// Per-connection dispatch state, guarded by mu.
+	//
+	// Ordering/throughput contract (intentional — do not "optimize" this into a
+	// worker pool without preserving it): a single dedicated dispatcher goroutine
+	// drains queue strictly in enqueue order, so handlers observe events in the
+	// order Slack delivered them and never run concurrently. The event pump acks
+	// each event up front (prepareDispatch, on the pump goroutine) and only then
+	// enqueues its dispatch, so a slow handler does not delay the ack of the event
+	// it is handling. That decoupling is not unbounded, though: if handlers are
+	// slower than arrival the buffered queue (dispatchBuffer) fills, the pump
+	// blocks on the enqueue, and acking of *subsequent* events stalls behind it —
+	// past Slack's ~3s ack window that surfaces as redelivery, i.e. duplicate
+	// dispatches. A consumer needing high concurrent throughput must fan out
+	// inside its own handler; the adapter keeps strict in-order delivery by
+	// design. Disconnect waits on drained so in-flight work is not abandoned.
 	mu             sync.Mutex
 	queue          chan func()
 	drained        chan struct{}
 	detachedCancel context.CancelFunc
+}
+
+// ack acknowledges a Socket Mode request, routing through the ackFn test seam
+// when one is installed and otherwise the socket client's Ack.
+func (a *adapter) ack(req socketmode.Request) {
+	if a.ackFn != nil {
+		a.ackFn(req)
+		return
+	}
+	a.socket.Ack(req)
 }
 
 // startDispatcher launches the in-order dispatch goroutine for one connection
@@ -319,16 +346,22 @@ func parseSlackTimestamp(ts string) time.Time {
 // prepareDispatch acknowledges evt on the event-pump goroutine and returns a
 // closure that dispatches it, or nil when evt carries nothing to dispatch. Ack
 // stays on the pump so it is never delayed behind queued handler work.
+//
+// Every payload carrying a Request is acked, not just Events API messages:
+// slash-command and interactive payloads ride the same Socket Mode connection,
+// and an un-acked Request makes Slack show the user an error and redeliver. Only
+// Events API payloads are dispatched, so those other Request-bearing types are
+// acked-and-dropped here rather than falling through un-acked.
 func (a *adapter) prepareDispatch(ctx context.Context, evt socketmode.Event, deps core.AdapterDeps) func() {
+	if evt.Request != nil {
+		a.ack(*evt.Request)
+	}
 	if evt.Type != socketmode.EventTypeEventsAPI {
 		return nil
 	}
 	payload, ok := evt.Data.(slackevents.EventsAPIEvent)
 	if !ok {
 		return nil
-	}
-	if evt.Request != nil {
-		a.socket.Ack(*evt.Request)
 	}
 	return func() { a.handleEventsAPI(ctx, payload, deps) }
 }

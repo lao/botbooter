@@ -49,7 +49,10 @@ token* (`xapp-…`) and a *bot token* (`xoxb-…`).
 ```go
 import "github.com/lao/botbooter/slack"
 
-bot := slack.New(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
+bot, err := slack.New(slack.Config{
+	AppToken: os.Getenv("SLACK_APP_TOKEN"), // xapp-…
+	BotToken: os.Getenv("SLACK_BOT_TOKEN"), // xoxb-…
+})
 ```
 
 **Environment variables** (read by the bundled example):
@@ -68,6 +71,13 @@ It's almost always one of:
 - **The bot isn't in the channel**: run `/invite @your-bot`.
 - **Re-install skipped after a scope change**: scopes only take effect once
   you re-install the app.
+
+**Reactions.** To make `bot.OnReaction` fire, also subscribe the app to the
+`reaction_added` Events API event (step 4) and grant the
+[`reactions:read`](https://docs.slack.dev/reference/scopes/reactions.read/)
+bot-token scope (step 3). Without both, reactions are never delivered. Slack's
+`reaction_added` event carries no bot flag, so the adapter cannot filter other
+bots' reactions — guard reply-emitting reaction handlers against loops.
 
 **Official docs:** [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/) · [`connections:write` scope](https://docs.slack.dev/reference/scopes/connections.write/) · [Your apps dashboard](https://api.slack.com/apps)
 
@@ -101,6 +111,12 @@ bot, err := discord.New(os.Getenv("DISCORD_BOT_TOKEN"))
 | Variable | Value |
 |---|---|
 | `DISCORD_BOT_TOKEN` | bot token from step 1 |
+
+**Reactions.** The constructor requests the message-reaction gateway intents,
+but they must **also** be enabled for the app in the Discord developer portal
+(*Bot → Privileged Gateway Intents*) for `bot.OnReaction` to fire. The adapter
+drops reactions from bot users in guilds; DM reactions carry no member record,
+so a bot reactor in a DM is not filtered.
 
 **Official docs:** [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway) · [What are Privileged Intents?](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents)
 
@@ -145,6 +161,12 @@ plaintext**, treat it as a secret and never log it. Each successful resolve
 logs a one-line warning to that effect; set the
 `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING` environment variable to any non-empty
 value to silence it.
+
+**Reactions.** Reaction updates are delivered in **private chats**, and in
+**groups only when the bot is an administrator**. The adapter requests the
+`message_reaction` update in addition to the default set, so `bot.OnReaction`
+works out of the box once the admin/private-chat requirement is met; reactions
+from bot users are dropped.
 
 **Official docs:** [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api) · [getUpdates / long polling](https://core.telegram.org/bots/api#getupdates)
 
@@ -235,6 +257,10 @@ window; outside it, Meta requires a pre-approved template (not yet supported).
 - **`Send` fails**: an expired token, or you're outside the 24-hour window
   (a template message is required there).
 
+**Reactions.** Reactions arrive on the **same inbound webhook** as messages, so
+no extra configuration is needed — `bot.OnReaction` fires once the webhook is
+verified. An empty-emoji reaction is treated as a reaction removal (dropped).
+
 **Official docs:** [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks](https://developers.facebook.com/docs/graph-api/webhooks/getting-started) · [Webhook components](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components)
 
 ### WhatsApp Web (whatsmeow)
@@ -271,6 +297,12 @@ bot, err := wameow.New(wameow.Config{}) // zero value works
   `wameow.ErrLoggedOut` sentinel; reconnecting cannot recover it. Re-link by
   building a fresh bot and running it again to scan a new QR (delete the
   session DB first if the stale session lingers).
+
+**Reactions.** Reactions arrive over the **same websocket** as messages, so
+nothing extra needs configuring — `bot.OnReaction` fires automatically. Replies
+are **unthreaded**: this adapter has no quoted-reply egress yet, so
+`bot.ReplyToMessage` falls back to a plain send. An empty-emoji reaction is
+treated as a removal (dropped).
 
 Caveats: this drives a **linked (usually personal) account over the unofficial
 Web protocol**; WhatsApp's terms restrict automation on personal accounts, so
@@ -404,6 +436,9 @@ not supported.
   conversation (the serviceUrl is learned from inbound messages).
 - **Endpoint never hit**, the Azure Bot messaging endpoint must be your public
   `https://…/api/messages` and reach `Addr` through the proxy.
+
+**Reactions.** The Teams adapter does not surface reaction events, so
+`bot.OnReaction` never fires — the echo/command path works, reactions do not.
 
 **Official docs:** [Create a bot for Teams](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/create-a-bot-for-teams) · [Azure Bot quickstart](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework dashboard](https://dev.botframework.com/bots) · [Connector authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication) · [Send & receive messages](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-create-messages) · [ngrok](https://ngrok.com/download)
 

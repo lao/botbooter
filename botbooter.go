@@ -17,6 +17,11 @@
 // Cloud API webhook, needs a Meta Business account and a public HTTPS URL) and
 // whatsapp/whatsmeow (WhatsApp Web multidevice protocol via whatsmeow, QR-linked
 // to a phone, no Meta account or webhook needed).
+//
+// Every type here is a re-exported alias of its [internal/core] counterpart, so
+// the full method and field documentation lives on the core types (pkg.go.dev
+// resolves the [core.Bot]-style links to them). The summaries below capture the
+// contracts most consumers need from the public import path.
 package botbooter
 
 import "github.com/lao/botbooter/internal/core"
@@ -58,9 +63,17 @@ const (
 )
 
 type (
-	// Bot is the platform-agnostic chat bot. See [core.Bot].
+	// Bot is the platform-agnostic chat bot. Register every command handler,
+	// middleware, flow (HandleFlow) and reaction handler BEFORE calling Connect
+	// or Run; registering after Connect races the dispatch goroutine. After
+	// Connect, Connect/Run/Disconnect/Send are safe to call concurrently. See
+	// [core.Bot].
 	Bot = core.Bot
-	// Message is an incoming message handed to handlers. See [core.Message].
+	// Message is an incoming message handed to handlers. UserID, ChannelID and
+	// Content are always set; the other normalized fields (AuthorName, ReplyToID,
+	// Timestamp, MentionedUserIDs) are best-effort per platform, and Raw carries
+	// the platform's untouched event for the matching typed accessor. See
+	// [core.Message].
 	Message = core.Message
 	// Command pairs a regexp pattern with a handler. See [core.Command].
 	Command = core.Command

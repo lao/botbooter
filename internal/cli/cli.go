@@ -1,4 +1,11 @@
 // Package cli is the local CLI adapter for botbooter. It implements core.Adapter.
+//
+// Security: this adapter is for trusted local input only. parseMessage treats
+// any whitespace-separated token that names an existing local file as an
+// attachment and opens it to sniff its content type, so a message can cause the
+// process to read arbitrary files the operator can access. Wire it only to a
+// trusted local source (an operator's terminal); never feed it network or
+// otherwise untrusted data.
 package cli
 
 import (
@@ -35,6 +42,11 @@ func newAdapter(in io.Reader, out io.Writer) *adapter {
 
 // New creates a CLI bot backed by the given reader and writer. A nil in or out
 // defaults to os.Stdin or os.Stdout respectively.
+//
+// The reader must carry trusted local input only: any token that names an
+// existing local file is opened as an attachment, so untrusted input can make
+// the process read arbitrary accessible files. Never back it with a network or
+// otherwise untrusted source.
 func New(in io.Reader, out io.Writer) *core.Bot {
 	return core.New(core.CLIBotType, newAdapter(in, out))
 }
@@ -116,10 +128,18 @@ func RawData(m *core.Message) (*Message, bool) {
 
 func parseMessage(line string) *Message {
 	msg := &Message{Text: line}
+	var seen map[string]struct{}
 	for _, token := range strings.Fields(line) {
 		if !looksLikePath(token) {
 			continue
 		}
+		if _, dup := seen[token]; dup {
+			continue
+		}
+		if seen == nil {
+			seen = make(map[string]struct{})
+		}
+		seen[token] = struct{}{}
 		if att, ok := fileAttachment(token); ok {
 			msg.Attachments = append(msg.Attachments, att)
 		}

@@ -21,6 +21,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 - **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
+- **Emoji reactions** — register `bot.OnReaction` once and reply to reactions uniformly across Slack, Discord, Telegram, WhatsApp and GitHub (see [Reactions](#reactions)).
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
 - **Context-first & graceful shutdown** — handlers receive a `context.Context`; `Run(ctx)` / `Start()` connect and shut down cleanly on cancellation or `SIGINT`/`SIGTERM`.
 - **Resilient dispatch** — a panicking handler is recovered and logged instead of taking down the bot.
@@ -73,6 +74,8 @@ go run ./_examples/basic whatsapp   # WhatsApp Cloud API flavor: uses WA_TOKEN /
 go run ./_examples/basic whatsmeow  # WhatsApp Web flavor: no credentials — scan the QR on first run (+ optional WA_MEOW_DB)
 go run ./_examples/basic teams      # uses TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (+ optional TEAMS_APP_TENANT_ID / TEAMS_PATH)
 go run ./_examples/basic github     # uses GITHUB_TOKEN / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR (+ optional GITHUB_PATH)
+
+go run ./_examples/reactions slack  # same platform args; replies when someone adds an emoji reaction (see Reactions below)
 ```
 
 ## Concepts
@@ -144,7 +147,7 @@ bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botboote
 
 For a raw, platform-specific anchor there's **`botbooter.WithThreadID(id)`** — the adapter uses the string verbatim (a Slack `thread_ts`, or a reply/quote message id elsewhere) and it wins over `InReplyTo`. You own platform-correctness with it. Per-platform anchor semantics, the precedence and fallback rules, and how `ReplyToID` vs `ID` are chosen are documented in [_docs/platforms.md](_docs/platforms.md#threaded-replies).
 
-Fallback is automatic and safe: **Teams**, **GitHub** (issue comment threads are flat — a reply already lands in the conversation) and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send — a send never fails just because a message can't be threaded. `Reply` returns an error only when the bot has no adapter or `m` is `nil`.
+Fallback is automatic and safe: **Teams**, **GitHub** (issue comment threads are flat — a reply already lands in the conversation) and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send. **Threading never adds a failure mode** — it can only make a send that would have succeeded land in a thread; the send can still fail for the ordinary reasons any send can (no adapter, a `nil` message to `Reply`, or a platform/transport error the underlying send surfaces).
 
 ### Conversational flows
 
@@ -185,6 +188,10 @@ Things to know (v1):
   it times out (idle TTL, default 10m via `Timeout`; any reply — even a rejected or
   empty one — slides the deadline, so only going silent expires it). In a
   public channel this means a flow consumes everyone's messages — run flows in DMs.
+  Register `OnCancel(fn)` / `OnTimeout(fn)` on the flow to react to those two
+  exits; note the timeout callback fires only if the user's next message arrives
+  before the background sweeper reclaims the expired state (see the `Flow.OnTimeout`
+  godoc for the exact contract).
 - **`Secret()`** keeps an answer out of framework logs and any future serialized
   `Store` state. It is **not** encryption, does not police your own middleware, and
   does not hide the answer from other members of a public channel.
@@ -194,6 +201,44 @@ Things to know (v1):
   user who sends faster than prompts arrive may have an answer matched to a later step.
 - **Restart needs cancel.** Re-triggering a flow while it is active is consumed as an
   answer; cancel first to start over.
+
+### Reactions
+
+Emoji reactions are a **second ingress path** alongside messages. Register a
+handler with `bot.OnReaction` and reply to the reacted message with
+`bot.ReplyToMessage` — the same handler runs on Slack, Discord, Telegram,
+WhatsApp (both flavors) and GitHub:
+
+```go
+bot.OnReaction(func(ctx context.Context, b *botbooter.Bot, r *botbooter.Reaction) {
+	// r.Emoji renders as-is on its origin platform: a unicode char on most
+	// platforms, ":thumbsup:" on Slack, "<:name:id>" for a Discord custom emoji.
+	_ = b.ReplyToMessage(ctx, r.ChannelID, r.MessageID, "Thanks for the "+r.Emoji+" reaction!")
+})
+```
+
+Unlike commands, reaction handlers are **not** regex-matched (branch on
+`r.Emoji` yourself), run **all** registered handlers (each recovered
+independently), and **bypass the middleware chain**. `ReplyToMessage` threads
+its reply under the reacted message where the platform supports it and otherwise
+falls back to a plain send.
+
+Things to know (v1):
+
+- **Added-only.** Removed reactions are dropped; there is no reaction egress
+  (you can't add a reaction, only reply with a message).
+- **`r.Emoji` is not normalized across platforms** — it is whatever renders
+  as-is on the platform it came from. Read `r.Raw` via the typed accessor
+  (`slack.RawReaction`, `discord.RawReaction`, …) for the platform's original
+  values.
+- **Per-platform delivery differs.** Slack needs the `reaction_added` event +
+  `reactions:read` scope; Discord needs the reaction intents enabled; Telegram
+  delivers group reactions only when the bot is an admin; GitHub has **no
+  reaction webhook** and instead **polls** opted-in repos (`Config.ReactionPollRepos`);
+  Teams surfaces no reaction events. See
+  [_docs/platforms.md](_docs/platforms.md) and `_examples/reactions/main.go`.
+- **Slack can't filter other bots' reactions** (the event carries no bot flag),
+  so guard reply-emitting handlers against cross-bot loops.
 
 ### Attachments
 
@@ -249,6 +294,12 @@ session := discord.Session(bot)    // *discordgo.Session
 tg := telegram.Client(bot)         // *bot.Bot
 wa := whatsmeow.Client(bot)        // *whatsmeow.Client (WhatsApp Web flavor)
 gh := github.Client(bot)           // *go-github Client — labels, reactions, checks, anything beyond replies
+
+// Webhook adapters bound with ":0" report their actual listen address:
+addr := github.Addr(bot)           // also cloud.Addr, teams.Addr — the resolved host:port
+
+// Route the framework's own logs (panic recovery, poll errors, …) to your logger:
+bot.SetLogger(slog.Default())      // any *slog.Logger; a method on the Bot itself, platform-agnostic
 ```
 
 ### Lifecycle
@@ -322,13 +373,16 @@ Alternatives:
 - [ ] WeChat, Mastodon adapters
 - [ ] Richer message types (blocks, embeds)
 - [x] Conversational flows — multi-step forms via `HandleFlow` (linear, in-memory, single-instance)
+- [x] Emoji reactions — reply to reactions via `OnReaction` / `ReplyToMessage` (Slack, Discord, Telegram, WhatsApp, GitHub-polled)
 - [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend
 
 ### Conversational flows — deferred work
 
 v1 flows are **linear, plain-text, in-memory and single-instance** (see the caveats
-under [Conversational flows](#conversational-flows)). The following each reuse the v1
-engine with no state migration:
+under [Conversational flows](#conversational-flows)). The §-numbered references below
+point at the original [design spec](docs/specs/2026-06-30-conversational-flows-design.md),
+kept as the deferred-work index. The following each reuse the v1 engine with no state
+migration:
 
 1. **Branching.** Add via `Next func(Answers) string` (step id → next step id) or
    `AskIf(cond, …)`. The state already stores `Answers`, so branching needs no migration.

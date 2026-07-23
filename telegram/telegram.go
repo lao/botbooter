@@ -11,9 +11,11 @@ import (
 	tgint "github.com/lao/botbooter/internal/telegram"
 )
 
-// New creates a Telegram bot from a BotFather token. It returns an error only
-// if go-telegram rejects the token at construction; an invalid token otherwise
-// surfaces when Run or Connect starts polling.
+// New creates a Telegram bot from a BotFather token. It returns an error only if
+// go-telegram rejects the token's format at construction (e.g. an empty token).
+// Token validity and API reachability are checked by a getMe probe when Connect
+// starts, so a wrong-but-well-formed token surfaces as an error from Run/Connect
+// rather than a poll loop that retries forever and delivers nothing.
 func New(token string) (*botbooter.Bot, error) {
 	return tgint.New(token)
 }

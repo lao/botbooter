@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -255,6 +256,113 @@ func TestHandleWebhook_Rejections(t *testing.T) {
 			asserts.Equal(t, len(got), 0, "nothing dispatched")
 		})
 	}
+}
+
+// A push/pull_request delivery larger than the old 1 MiB cap but within the
+// new one must be accepted and dispatched, not dropped at the body reader.
+// GitHub push and pull_request payloads (many commits, large PR bodies) can be
+// many MiB, up to GitHub's 25 MiB webhook ceiling; capping at 1 MiB silently
+// dropped real deliveries.
+func TestHandleWebhook_LargePushWithinCap(t *testing.T) {
+	cfg := patConfig()
+	var got []*gogithub.PushEvent
+	done := make(chan struct{}, 1)
+	cfg.OnPush = func(_ context.Context, event *gogithub.PushEvent) {
+		got = append(got, event)
+		done <- struct{}{}
+	}
+	a, err := newAdapter(cfg)
+	asserts.NoError(t, err, "new adapter")
+
+	// Pad an ignored field so the body clears the old 1 MiB cap while staying
+	// well under the new one; the real event fields must still parse.
+	pad := strings.Repeat("a", 2<<20) // 2 MiB
+	payload := `{"ref": "refs/heads/main", "after": "def456",` +
+		` "repository": {"full_name": "lao/botbooter"}, "_pad": "` + pad + `"}`
+	asserts.True(t, len(payload) > 1<<20, "payload exceeds the old 1 MiB cap")
+
+	w := httptest.NewRecorder()
+	a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "push", payload), core.AdapterDeps{})
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, w.Code, http.StatusOK, "large authentic push should be 200")
+	asserts.Equal(t, len(got), 1, "large push dispatched, not dropped at the body cap")
+	asserts.Equal(t, got[0].GetAfter(), "def456", "full body parsed past the old cap")
+}
+
+// TestHandleWebhook_Routes403ToInjectedLogger proves the logger stored at
+// Connect carries the signature-rejection diagnostic, mirroring the Teams
+// sibling's TestHandleMessages_Routes401ToInjectedLogger.
+func TestHandleWebhook_Routes403ToInjectedLogger(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	var got []*core.Message
+	w := httptest.NewRecorder()
+
+	r := webhookRequest("hook-secret", "issue_comment", issueCommentCreated)
+	r.Header.Set("X-Hub-Signature-256", sign("wrong-secret", []byte(issueCommentCreated)))
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusForbidden, "bad signature should be 403")
+	asserts.True(t, strings.Contains(buf.String(), "rejected with 403"),
+		"the injected logger receives the rejection diagnostic")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
+// A saturated dispatch semaphore must answer 503 (GitHub retries) instead of
+// spawning an unbounded goroutine: with the bound forced to one slot, the
+// second concurrent in-flight delivery is refused while the first is accepted.
+func TestHandleWebhook_SaturationReturns503(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	a.sem = make(chan struct{}, 1) // force a one-slot bound
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	deps := core.AdapterDeps{Dispatch: func(context.Context, *core.Message) {
+		entered <- struct{}{}
+		<-release
+	}}
+
+	// First delivery acquires the only slot and blocks inside the handler.
+	w1 := httptest.NewRecorder()
+	a.handleWebhook(context.Background(), w1, webhookRequest("hook-secret", "issue_comment", issueCommentCreated), deps)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first dispatch never entered")
+	}
+	asserts.Equal(t, w1.Code, http.StatusOK, "first delivery acquires a slot and is acked")
+
+	// Second delivery: no slot free, so it must be refused, not acked or dispatched.
+	w2 := httptest.NewRecorder()
+	a.handleWebhook(context.Background(), w2, webhookRequest("hook-secret", "issue_comment", issueCommentCreated), deps)
+	asserts.Equal(t, w2.Code, http.StatusServiceUnavailable, "saturated dispatch returns 503")
+
+	close(release)
+	drainCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.drainDispatch(drainCtx)
+	asserts.Equal(t, a.inflight.Load(), int64(0), "slot released after the handler returns")
+}
+
+// A saturated read semaphore must answer 503 before the (up to maxRequestBytes)
+// body is buffered, so a flood of large POSTs cannot exhaust memory ahead of the
+// HMAC check.
+func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
+	a, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "new adapter")
+	a.readSem = make(chan struct{}, 1)
+	a.readSem <- struct{}{} // occupy the only inbound slot
+
+	var got []*core.Message
+	w := httptest.NewRecorder()
+	a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "issue_comment", issueCommentCreated), captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusServiceUnavailable, "saturated read gate returns 503")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
 }
 
 func selfIdentityServer(t *testing.T) *httptest.Server {

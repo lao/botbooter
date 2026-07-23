@@ -38,7 +38,7 @@ func validConfig() Config {
 func testAdapter() *adapter {
 	cfg := validConfig()
 	cfg.Path = defaultPath
-	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: http.DefaultClient}
+	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: http.DefaultClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch)}
 }
 
 // sign returns the X-Hub-Signature-256 header value for body under secret.
@@ -415,6 +415,73 @@ func TestHandleWebhook_RoutesWarningToInjectedLogger(t *testing.T) {
 	asserts.Equal(t, w.Code, http.StatusOK, "an unparseable body is still acked 200")
 	asserts.True(t, strings.Contains(buf.String(), "unparseable body"),
 		"the injected logger receives the parse-failure warning")
+}
+
+// TestHandleWebhook_RoutesBadSignatureWarningToInjectedLogger proves the 403
+// signature-rejection path warns through the adapter's injected logger, matching
+// the Teams/github sibling shape so an operator can diagnose a misconfigured
+// AppSecret or a spoofing attempt.
+func TestHandleWebhook_RoutesBadSignatureWarningToInjectedLogger(t *testing.T) {
+	a := testAdapter()
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	body := []byte(textWebhook)
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
+	r.Header.Set(signatureHeader, sign("wrong-secret", body))
+	w := httptest.NewRecorder()
+
+	a.handleWebhook(context.Background(), w, r, captureDeps(&[]*core.Message{}, nil))
+
+	asserts.Equal(t, w.Code, http.StatusForbidden, "bad signature should be 403")
+	asserts.True(t, strings.Contains(buf.String(), "signature"),
+		"the injected logger receives the signature-rejection warning")
+}
+
+// TestHandleWebhook_SaturationReturns503 guards the counting-semaphore bound: with
+// the dispatch semaphore forced to capacity 1, a second delivery arriving while the
+// first is still dispatching cannot acquire a slot and is rejected with 503 (Meta
+// retries) rather than spawning an unbounded goroutine.
+func TestHandleWebhook_SaturationReturns503(t *testing.T) {
+	a := testAdapter()
+	a.dispatchSem = make(chan struct{}, 1) // capacity 1
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {
+			started <- struct{}{}
+			<-release // hold the only slot until released
+		},
+	}
+
+	body := []byte(textWebhook)
+
+	// First request acquires the single slot and blocks in dispatch.
+	r1 := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
+	r1.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w1 := httptest.NewRecorder()
+	a.handleWebhook(context.Background(), w1, r1, deps)
+	asserts.Equal(t, w1.Code, http.StatusOK, "first request is accepted (200)")
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first dispatch never started")
+	}
+
+	// Second request cannot acquire the slot -> 503, and must not dispatch.
+	r2 := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
+	r2.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	w2 := httptest.NewRecorder()
+	a.handleWebhook(context.Background(), w2, r2, deps)
+	asserts.Equal(t, w2.Code, http.StatusServiceUnavailable, "a saturated dispatcher returns 503")
+
+	// Release the first dispatch and let the goroutine drain so the slot frees.
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.drainDispatch(ctx)
 }
 
 func TestHandleWebhook_StatusOnlyIgnored(t *testing.T) {
