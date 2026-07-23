@@ -457,7 +457,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 	// Otherwise advance, slide the TTL, and send the next prompt. The in-memory
 	// store volatile-holds the full state (secrets included, per the Secret()
 	// contract); secret exclusion happens only at the future durable-Store
-	// boundary via serializableState.
+	// boundary.
 	state.Step++
 	slideTTL()
 	return true, send(flow.steps[state.Step].prompt)

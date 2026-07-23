@@ -47,8 +47,15 @@ type AskOption func(*flowStep)
 
 // Validate attaches a validator to a step. When it returns a non-nil error the
 // engine re-prompts the same step — using err.Error() as the nudge when non-empty
-// — and neither stores the answer nor advances. The validator runs under the
-// conversation's lock, so keep it fast and non-blocking.
+// — and neither stores the answer nor advances.
+//
+// The validator runs synchronously while the conversation holds its shard lock, so
+// keep it fast and non-blocking. It is meant for cheap in-process checks (length,
+// format, a regexp match). Do NOT perform I/O from it: a network or database call —
+// an email-uniqueness lookup, say — blocks the shard for its whole duration, stalling
+// not just this conversation but every other one whose key hashes to the same one of
+// the striped shards. Defer work like that to OnComplete, which runs after the lock
+// is released.
 func Validate(fn func(string) error) AskOption {
 	return func(s *flowStep) { s.validate = fn }
 }
@@ -163,49 +170,6 @@ func (f *Flow) validate() error {
 		return fmt.Errorf("botbooter: flow %q: %w", f.id, ErrFlowNoOnComplete)
 	}
 	return nil
-}
-
-// secretKeys returns the set of answer keys marked Secret(), or nil if none.
-func (f *Flow) secretKeys() map[string]bool {
-	secrets := make(map[string]bool)
-	for _, s := range f.steps {
-		if s.secret {
-			secrets[s.key] = true
-		}
-	}
-	if len(secrets) == 0 {
-		return nil
-	}
-	return secrets
-}
-
-// serializableState returns a copy of state holding only the answers safe to
-// persist: answers from Secret() steps are omitted, so a durable Store never
-// receives them. It does not mutate state. flow must be the registered flow for
-// state.FlowID; a nil flow returns state unchanged.
-//
-// v1 has no durable Store: the only ConversationStore is the volatile in-memory
-// one, which legitimately holds secrets (the Secret() contract keeps them in
-// volatile memory only). This is therefore the seam the future Store path applies
-// at its persist boundary — it is intentionally not yet wired into advance, which
-// would strip secrets from the in-memory store and starve OnComplete.
-func serializableState(state ConversationState, flow *Flow) ConversationState {
-	if flow == nil {
-		return state
-	}
-	secrets := flow.secretKeys()
-	if len(secrets) == 0 {
-		return state
-	}
-	answers := make(map[string]string, len(state.Answers))
-	for k, v := range state.Answers {
-		if secrets[k] {
-			continue
-		}
-		answers[k] = v
-	}
-	state.Answers = answers
-	return state
 }
 
 // HandleFlow registers flow under pattern: a message matching pattern with no

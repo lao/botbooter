@@ -3,7 +3,6 @@ package core
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"strconv"
@@ -251,30 +250,6 @@ func TestFlow_UnregisteredFlowIDFallsThrough(t *testing.T) {
 	asserts.False(t, handled, "state for an unregistered flow falls through to the command table")
 	_, ok := bot.conversations.store.Get(key)
 	asserts.False(t, ok, "stale state is reaped, not left to panic later")
-}
-
-func TestFlow_SecretExcludedFromSerializedState(t *testing.T) {
-	bot := New(SlackBotType, &recordingAdapter{})
-	f := NewFlow("signup").Ask("name", "name?").Ask("password", "pw?", Secret()).OnComplete(noopComplete)
-	asserts.NoError(t, bot.HandleFlow("^signup$", f), "register")
-
-	state := ConversationState{
-		FlowID:  "signup",
-		Step:    2,
-		Answers: map[string]string{"name": "Alice", "password": "hunter2"},
-	}
-
-	ser := serializableState(state, f)
-
-	_, hasPw := ser.Answers["password"]
-	asserts.False(t, hasPw, "secret key is excluded from the serialized state")
-	asserts.Equal(t, ser.Answers["name"], "Alice", "non-secret answers are retained")
-
-	payload, err := json.Marshal(ser)
-	asserts.NoError(t, err, "marshal serialized state")
-	asserts.False(t, strings.Contains(string(payload), "hunter2"), "secret value never appears in the serialized payload")
-
-	asserts.Equal(t, state.Answers["password"], "hunter2", "serialization does not mutate the live state")
 }
 
 func TestFlow_PanicInValidatorDoesNotWedgeShard(t *testing.T) {
