@@ -19,6 +19,12 @@ import (
 	"github.com/lao/botbooter/internal/core"
 )
 
+// getMeTimeout bounds the Connect-path getMe probe so an unreachable-but-non-
+// rejecting API surfaces as an error promptly even when the run context carries no
+// deadline and Disconnect is never called. Mirrors the Teams adapter's
+// jwksFetchTimeout.
+const getMeTimeout = 15 * time.Second
+
 type adapter struct {
 	newClient func() (*bot.Bot, error)
 	selfID    int64
@@ -169,13 +175,24 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		// path, on purpose: core.Bot.Connect holds b.mu across adapter.Connect and
 		// relies on it being non-blocking, so a synchronous network probe would let
 		// a slow/unreachable API stall the Bot's lock — and any concurrent
-		// Disconnect — for the probe's duration. ctx is core's run context, which
-		// Disconnect cancels, so a hung probe unblocks on teardown.
-		if _, err := tg.GetMe(ctx); err != nil {
+		// Disconnect — for the probe's duration.
+		//
+		// The probe carries its own getMeTimeout bound derived from ctx. Disconnect
+		// cancels ctx so a probe unblocks on teardown, but a run context with no
+		// deadline whose owner never calls Disconnect (e.g. a Start() waiting only
+		// on SIGINT) would otherwise let an unreachable-but-non-rejecting API hang
+		// the probe forever — never polling, never surfacing an error. The bound
+		// makes an unresponsive endpoint fail fast via Done, the whole point of
+		// probing. cancel runs before Start (not deferred) so the timer is released
+		// rather than held for the poll loop's lifetime.
+		probeCtx, cancel := context.WithTimeout(ctx, getMeTimeout)
+		_, err := tg.GetMe(probeCtx)
+		cancel()
+		if err != nil {
 			if ctx.Err() != nil {
 				deps.Done(ctx.Err()) // shutdown during the probe, not a token failure
 			} else {
-				deps.Done(fmt.Errorf("telegram: getMe probe failed (check the bot token): %w", err))
+				deps.Done(fmt.Errorf("telegram: getMe probe failed (check the bot token or API reachability): %w", err))
 			}
 			return
 		}
