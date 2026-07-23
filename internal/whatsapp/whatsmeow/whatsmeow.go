@@ -62,8 +62,12 @@ var ErrLoggedOut = errors.New("whatsmeow: logged out, session must be re-linked"
 
 // The following sentinels are the remaining terminal (permanent-disconnect)
 // conditions whatsmeow signals alongside ErrLoggedOut. whatsmeow does not
-// auto-reconnect after any of them, so each is reported through Run to end the
-// run loop instead of leaving the bot silently connected-but-dead. Check for
+// auto-reconnect after any of them — each maps to an event implementing
+// whatsmeow's events.PermanentDisconnect interface, the class it dispatches only
+// after it has suppressed auto-reconnect (an expectDisconnect() call gates every
+// emission site) — so each is reported through Run to end the run loop instead
+// of leaving the bot silently connected-but-dead. Transient rejections (503/500,
+// keepalive blips) are handled inside whatsmeow and never surface here. Check for
 // them with errors.Is; the reported error wraps a sentinel plus any detail the
 // event carried.
 var (
