@@ -375,6 +375,10 @@ func TestBot_HandleFlow_SentinelErrors(t *testing.T) {
 		bot := New(SlackBotType, &recordingAdapter{})
 		asserts.ErrorIs(t, bot.HandleFlow("^f$", NewFlow("f").Ask("", "a?").OnComplete(noopComplete)), ErrFlowEmptyStepKey, "empty-step-key sentinel")
 	})
+	t.Run("EmptyStepPrompt", func(t *testing.T) {
+		bot := New(SlackBotType, &recordingAdapter{})
+		asserts.ErrorIs(t, bot.HandleFlow("^f$", NewFlow("f").Ask("a", "  ").OnComplete(noopComplete)), ErrFlowEmptyStepPrompt, "empty-step-prompt sentinel")
+	})
 	t.Run("DuplicateKey", func(t *testing.T) {
 		bot := New(SlackBotType, &recordingAdapter{})
 		f := NewFlow("f").Ask("a", "a?").Ask("a", "b?").OnComplete(noopComplete)
@@ -395,7 +399,7 @@ func TestBot_HandleFlow_SentinelErrors(t *testing.T) {
 	})
 	t.Run("NilFlow", func(t *testing.T) {
 		bot := New(SlackBotType, &recordingAdapter{})
-		asserts.Error(t, bot.HandleFlow("^x$", nil), "a nil flow returns an error, not a panic")
+		asserts.ErrorIs(t, bot.HandleFlow("^x$", nil), ErrFlowNil, "a nil flow returns the sentinel, not a panic")
 	})
 }
 

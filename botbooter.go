@@ -35,9 +35,11 @@ var (
 
 // Errors returned by [Bot.HandleFlow]; check them with errors.Is.
 var (
+	ErrFlowNil               = core.ErrFlowNil
 	ErrFlowEmptyID           = core.ErrFlowEmptyID
 	ErrFlowNoSteps           = core.ErrFlowNoSteps
 	ErrFlowEmptyStepKey      = core.ErrFlowEmptyStepKey
+	ErrFlowEmptyStepPrompt   = core.ErrFlowEmptyStepPrompt
 	ErrFlowDuplicateKey      = core.ErrFlowDuplicateKey
 	ErrFlowNoOnComplete      = core.ErrFlowNoOnComplete
 	ErrFlowAlreadyRegistered = core.ErrFlowAlreadyRegistered
