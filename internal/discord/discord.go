@@ -30,6 +30,14 @@ func New(token string) (*core.Bot, error) {
 	return core.New(core.DiscordBotType, &adapter{session: dg}), nil
 }
 
+// Connect opens the gateway session and registers the message/reaction
+// handlers. It deliberately never calls deps.Done: discordgo is configured with
+// ShouldReconnectOnError=true (its default), so the session reconnects on
+// transient errors and emits no terminal signal for this adapter to forward.
+// Run therefore exits only via context cancellation or an explicit Disconnect,
+// never via Done. The absent deps.Done call is intentional, not an oversight; a
+// spurious Done here would tear down a session that discordgo is still keeping
+// alive.
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	removeMsg := a.session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		a.onMessage(ctx, s, m, deps)
@@ -137,6 +145,15 @@ func toMessage(m *discordgo.MessageCreate) *core.Message {
 }
 
 // Disconnect removes the message handler and closes the gateway session.
+//
+// Unlike the Slack and webhook (WhatsApp Cloud/Teams/GitHub) siblings, this does
+// NOT wait for in-flight dispatch to drain. discordgo invokes each registered
+// handler on its own goroutine, so onMessage/onReaction calls already running
+// when Disconnect fires may keep executing (and dispatch to consumer handlers)
+// after Disconnect and Run have returned. Removing the handler only stops new
+// invocations; closing the session only stops new gateway events. A code drain
+// is out of scope; callers needing a hard quiescence barrier must impose it
+// themselves.
 func (a *adapter) Disconnect() error {
 	a.mu.Lock()
 	remove := a.removeHandler

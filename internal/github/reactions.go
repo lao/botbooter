@@ -411,7 +411,10 @@ func (a *adapter) pollReactions(ctx, dispatchCtx context.Context, deps core.Adap
 // reactions only for comments whose total count changed since the previous
 // cycle. A comment's count moves from prev to next only after its reactions
 // were handled, so an error retries that comment next cycle instead of
-// silently dropping its reactions.
+// silently dropping its reactions. Change detection is by reactions.total_count
+// delta, so a reaction removed and a different one added between two cycles
+// (net-zero count change) is missed — the same partial-coverage tradeoff as the
+// newest-comments-only window.
 func (a *adapter) pollRepoOnce(ctx, dispatchCtx context.Context, deps core.AdapterDeps, repo repoRef, prev, next map[int64]int, cutoff time.Time) error {
 	// Issue number 0 lists comments across every issue and PR in the repo,
 	// which is what makes one request per repo sufficient.
@@ -463,11 +466,11 @@ func (a *adapter) dispatchCommentReactions(ctx, dispatchCtx context.Context, dep
 			continue
 		}
 		r := toReaction(repo, issue, comment, reaction)
-		a.inflight.Add(1)
-		go func() {
-			defer a.inflight.Add(-1)
-			deps.DispatchReaction(dispatchCtx, r)
-		}()
+		// Reuse dispatchAsync so reaction handlers ride the same inflight
+		// counter Disconnect's drain waits on. The webhook path's dispatch
+		// semaphore is intentionally not applied here (see ackAndDispatch): the
+		// poller has no HTTP response to 503 and its cadence already bounds it.
+		a.dispatchAsync(func() { deps.DispatchReaction(dispatchCtx, r) })
 	}
 	return nil
 }

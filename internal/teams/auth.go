@@ -208,9 +208,13 @@ func (a *adapter) lookupCached(kid string) (*jwksKey, bool, error) {
 // fetchJWKS resolves the Bot Connector OpenID metadata to its jwks_uri and decodes
 // the RSA signing keys (with their channel endorsements) into a kid-indexed map.
 func (a *adapter) fetchJWKS(ctx context.Context) (map[string]*jwksKey, error) {
-	// Bound the two-hop resolution independently of the caller's context so a
-	// hung endpoint can't outlast the server's WriteTimeout.
-	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
+	// Detach from the caller's cancellation: this refresh serves the shared key
+	// cache for every in-flight request, and publicKey advances the rate-limit
+	// clock (keysAt) before calling here. If one client canceling its request
+	// aborted the fetch, that failure would also burn the 1-minute refresh window
+	// and 401 subsequent legitimate requests. The own 15s timeout below still
+	// bounds the two-hop resolution independently of the server's WriteTimeout.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), jwksFetchTimeout)
 	defer cancel()
 
 	var meta struct {

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -191,6 +192,46 @@ func TestAccessToken_Caches(t *testing.T) {
 		asserts.Equal(t, tok, "tok", "token value")
 	}
 	asserts.Equal(t, hits, 1, "token minted once and cached")
+}
+
+// TestAccessToken_ConcurrentMintCoalesces proves the single-flight: a burst of
+// concurrent cold Sends must mint one token, not one per caller. tokenMu is held
+// so every goroutine passes its first (empty) cache check and blocks on the mint
+// lock; releasing it lets one caller mint while the rest re-check the freshly
+// cached token (mirroring the JWKS fetchMu coalescing test).
+func TestAccessToken_ConcurrentMintCoalesces(t *testing.T) {
+	var mints atomic.Int64
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "tok", "expires_in": 3600})
+	}))
+	defer tokenSrv.Close()
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.tokenURL = tokenSrv.URL
+
+	const n = 8
+	started := make(chan struct{}, n)
+	results := make(chan error, n)
+	a.tokenMu.Lock()
+	for i := 0; i < n; i++ {
+		go func() {
+			started <- struct{}{}
+			_, err := a.accessToken(context.Background())
+			results <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		<-started
+	}
+	time.Sleep(20 * time.Millisecond) // let all callers reach the mint lock
+	a.tokenMu.Unlock()
+
+	for i := 0; i < n; i++ {
+		asserts.NoError(t, <-results, "accessToken")
+	}
+	asserts.Equal(t, mints.Load(), int64(1), "concurrent cold mints coalesced into a single token request")
 }
 
 // TestAccessToken_Network exercises the real Azure AD client-credentials flow.

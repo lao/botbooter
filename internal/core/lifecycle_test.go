@@ -64,6 +64,33 @@ func TestBot_Connect_Success(t *testing.T) {
 	asserts.NoError(t, bot.Disconnect(), "final teardown")
 }
 
+func TestBot_dispatchChain_RecomposedOnReconnect(t *testing.T) {
+	var dispatch func(m *Message)
+	fake := &fakeAdapter{onConnect: func(_ context.Context, deps AdapterDeps) {
+		dispatch = func(m *Message) { deps.Dispatch(context.Background(), m) }
+	}}
+	bot := New(SlackBotType, fake)
+
+	// First run has no middleware; the first dispatch is what froze the chain
+	// under the old compose-once-on-first-dispatch behavior.
+	asserts.NoError(t, bot.Connect(context.Background()), "first Connect")
+	dispatch(&Message{Content: "hi"})
+	asserts.NoError(t, bot.Disconnect(), "first Disconnect")
+
+	// Register middleware between runs, then reconnect: the reused Bot must pick
+	// it up (the chain is recomposed on every Connect).
+	mwCalls := 0
+	bot.AddMiddleware(func(ctx context.Context, b *Bot, m *Message, next CommandHandler) {
+		mwCalls++
+		next(ctx, b, m)
+	})
+	asserts.NoError(t, bot.Connect(context.Background()), "reconnect")
+	dispatch(&Message{Content: "hi"})
+	asserts.Equal(t, mwCalls, 1, "middleware registered between runs runs after reconnect")
+
+	asserts.NoError(t, bot.Disconnect(), "final teardown")
+}
+
 func TestBot_Connect_AdapterError(t *testing.T) {
 	sentinel := errors.New("connect boom")
 	fake := &fakeAdapter{connectErr: sentinel}

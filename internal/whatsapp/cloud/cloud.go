@@ -46,6 +46,12 @@ const (
 	// API payloads are a few KB.
 	maxRequestBytes = 1 << 20 // 1 MiB
 
+	// maxConcurrentDispatch bounds in-flight dispatch goroutines: the handler
+	// acquires a slot before acking and returns 503 (which Meta retries) when the
+	// dispatcher is saturated, so a burst of deliveries cannot spawn unbounded
+	// goroutines.
+	maxConcurrentDispatch = 256
+
 	// maxErrorBodyBytes caps how much of a non-2xx response body is read into errors.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
 
@@ -135,6 +141,13 @@ type adapter struct {
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
 	logger         *slog.Logger // set from AdapterDeps at Connect; guarded by mu
+	// dispatchSem is a counting semaphore (capacity maxConcurrentDispatch) that
+	// bounds concurrent dispatch goroutines. A non-blocking acquire before acking
+	// returns 503 on saturation; the slot is released when the goroutine returns.
+	// Re-created per Connect and captured at acquire, so a slot a context-ignoring
+	// handler never releases is confined to that connection rather than leaking for
+	// the adapter's lifetime.
+	dispatchSem chan struct{}
 }
 
 // log returns the Bot's logger handed over at Connect, or slog.Default()
@@ -193,7 +206,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient}, nil
+	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch)}, nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
@@ -233,6 +246,9 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
 	a.logger = deps.Logger
+	// Fresh per-connection dispatch semaphore: a slot a hung handler never
+	// releases dies with this connection instead of leaking across reconnects.
+	a.dispatchSem = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	go serve(srv, ln, deps.Done)
@@ -278,15 +294,36 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 		return
 	}
 	if !validateSignature(a.cfg.AppSecret, r.Header.Get(signatureHeader), body) {
+		// Warn (no secret/body) so an operator can spot a misconfigured AppSecret
+		// or a spoofing attempt; mirrors the Teams/github sibling's rejection log.
+		a.log().Warn("whatsapp: rejecting webhook with invalid signature")
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 
 	messages := parseWebhook(a.log(), body)
-	w.WriteHeader(http.StatusOK)
 	if len(messages) == 0 {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	// Bound concurrent dispatch: acquire a slot BEFORE acking so a saturated
+	// dispatcher returns 503 (Meta retries) instead of spawning an unbounded
+	// goroutine. The slot is released when the dispatch goroutine returns. Snapshot
+	// the per-connection semaphore once so the acquire here and the release below
+	// target the SAME channel across a reconnect that swaps a.dispatchSem.
+	a.mu.Lock()
+	sem := a.dispatchSem
+	a.mu.Unlock()
+	select {
+	case sem <- struct{}{}:
+	default:
+		a.log().Warn("whatsapp: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 
 	// Dispatch on the detached context: core cancels runCtx *before* Disconnect's
 	// drain waits for this handler, so a reply threaded onto runCtx would fail
@@ -295,6 +332,7 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
+		defer func() { <-sem }()
 		for _, m := range messages {
 			if m.Reaction != nil {
 				// An empty emoji means the reaction was removed; scope is

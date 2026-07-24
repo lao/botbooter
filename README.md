@@ -21,6 +21,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 - **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
+- **Emoji reactions** — register `bot.OnReaction` once and reply to reactions uniformly across Slack, Discord, Telegram, WhatsApp and GitHub (see [Reactions](#reactions)).
 - **Platform-agnostic attachments** — read image/file attachments uniformly across platforms.
 - **Context-first & graceful shutdown** — handlers receive a `context.Context`; `Run(ctx)` / `Start()` connect and shut down cleanly on cancellation or `SIGINT`/`SIGTERM`.
 - **Resilient dispatch** — a panicking handler is recovered and logged instead of taking down the bot.
@@ -73,6 +74,8 @@ go run ./_examples/basic whatsapp   # WhatsApp Cloud API flavor: uses WA_TOKEN /
 go run ./_examples/basic whatsmeow  # WhatsApp Web flavor: no credentials — scan the QR on first run (+ optional WA_MEOW_DB)
 go run ./_examples/basic teams      # uses TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (+ optional TEAMS_APP_TENANT_ID / TEAMS_PATH)
 go run ./_examples/basic github     # uses GITHUB_TOKEN / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR (+ optional GITHUB_PATH)
+
+go run ./_examples/reactions slack  # same platform args; replies when someone adds an emoji reaction (see Reactions below)
 ```
 
 ## Concepts
@@ -144,7 +147,109 @@ bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botboote
 
 For a raw, platform-specific anchor there's **`botbooter.WithThreadID(id)`** — the adapter uses the string verbatim (a Slack `thread_ts`, or a reply/quote message id elsewhere) and it wins over `InReplyTo`. You own platform-correctness with it. Per-platform anchor semantics, the precedence and fallback rules, and how `ReplyToID` vs `ID` are chosen are documented in [_docs/platforms.md](_docs/platforms.md#threaded-replies).
 
-Fallback is automatic and safe: **Teams**, **GitHub** (issue comment threads are flat — a reply already lands in the conversation) and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send — a send never fails just because a message can't be threaded. `Reply` returns an error only when the bot has no adapter or `m` is `nil`.
+Fallback is automatic and safe: **Teams**, **GitHub** (issue comment threads are flat — a reply already lands in the conversation) and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send. **Threading never adds a failure mode** — it can only make a send that would have succeeded land in a thread; the send can still fail for the ordinary reasons any send can (no adapter, a `nil` message to `Reply`, or a platform/transport error the underlying send surfaces).
+
+### Conversational flows
+
+A `Flow` runs a multi-step, context-aware dialog — ask a question, wait for that
+user's reply, optionally validate it, advance to the next — without hand-writing a
+per-user state machine. Register it like a command; a matching message starts it,
+and each later message from that conversation is routed to the active flow.
+
+```go
+signup := botbooter.NewFlow("signup"). // id must be stable (load-bearing for persistence)
+	Ask("name", "What's your name?").
+	Ask("email", "What's your email?", botbooter.Validate(validEmail)).
+	Ask("password", "Choose a password.", botbooter.Secret()).
+	OnComplete(func(ctx context.Context, b *botbooter.Bot, m *botbooter.Message, a botbooter.Answers) {
+		createUser(a.Get("name"), a.Get("email"), a.Get("password"))
+		_ = b.SendMessageContext(ctx, m.ChannelID, "You're all set 🎉")
+	})
+
+if err := bot.HandleFlow("^sign ?up$", signup); err != nil {
+	log.Fatal(err)
+}
+```
+
+`HandleFlow` validates the flow and returns an `errors.Is`-checkable sentinel
+(`ErrFlowNil`, `ErrFlowEmptyID`, `ErrFlowNoSteps`, `ErrFlowEmptyStepKey`,
+`ErrFlowEmptyStepPrompt`, `ErrFlowDuplicateKey`, `ErrFlowNoOnComplete`,
+`ErrFlowAlreadyRegistered`) — plus the pattern error from a bad regexp.
+`Validate(fn)` re-prompts the same step on a non-nil error (using `err.Error()` as
+the nudge); an empty/whitespace reply is a non-answer and also re-prompts. Ordinary
+answers are trimmed of surrounding whitespace before storage; a `Secret()` step
+keeps its exact bytes (leading/trailing whitespace can matter in a password).
+
+Things to know (v1):
+
+- **DM-intended.** While a flow is active it shadows the command table, so *every*
+  message in that conversation becomes an answer until it completes, the user types
+  the cancel word (default `"cancel"`, set with `CancelWord`, disable with `""`), or
+  it times out (idle TTL, default 10m via `Timeout`; any reply the flow receives —
+  even a rejected or empty one — slides the deadline, so only going silent expires
+  it). In a public channel this shadows only the flow-starting user's own messages
+  there — not everyone's — so that user can't run other commands until it ends; run
+  flows in DMs.
+  Register `OnCancel(fn)` / `OnTimeout(fn)` on the flow to react to those two
+  exits; note the timeout callback fires only if the user's next message arrives
+  before the background sweeper reclaims the expired state (see the `Flow.OnTimeout`
+  godoc for the exact contract). The message that discovers the expiry is consumed
+  either way: it runs `OnTimeout` if set, otherwise it is dropped rather than
+  falling through to the command table (a late reply is likelier a stale flow answer
+  than a fresh command), so a post-timeout `help` gets no reply — the message after
+  it is handled normally.
+- **Attachment-less "service" messages don't reach a flow on some platforms.**
+  Slack, Telegram and the whatsmeow flavor drop messages with no text, caption or
+  attachment (stickers, locations, member joins, …) before dispatch, mirroring their
+  ordinary message handling. Mid-flow this means such a message neither answers a
+  step (no empty-answer re-prompt) nor slides the idle TTL — a text reply does both.
+- **`Secret()`** keeps an answer out of framework logs and any future serialized
+  `Store` state. It is **not** encryption, does not police your own middleware, and
+  does not hide the answer from other members of a public channel.
+- **In-memory only.** In-flight flows live in memory and are lost on restart;
+  v1 is single-instance. (A pluggable `Store` and multi-instance are on the roadmap.)
+- **Best-effort ordering.** State is never corrupted under concurrent delivery, but a
+  user who sends faster than prompts arrive may have an answer matched to a later step.
+- **Restart needs cancel.** Re-triggering a flow while it is active is consumed as an
+  answer; cancel first to start over.
+
+### Reactions
+
+Emoji reactions are a **second ingress path** alongside messages. Register a
+handler with `bot.OnReaction` and reply to the reacted message with
+`bot.ReplyToMessage` — the same handler runs on Slack, Discord, Telegram,
+WhatsApp (both flavors) and GitHub:
+
+```go
+bot.OnReaction(func(ctx context.Context, b *botbooter.Bot, r *botbooter.Reaction) {
+	// r.Emoji renders as-is on its origin platform: a unicode char on most
+	// platforms, ":thumbsup:" on Slack, "<:name:id>" for a Discord custom emoji.
+	_ = b.ReplyToMessage(ctx, r.ChannelID, r.MessageID, "Thanks for the "+r.Emoji+" reaction!")
+})
+```
+
+Unlike commands, reaction handlers are **not** regex-matched (branch on
+`r.Emoji` yourself), run **all** registered handlers (each recovered
+independently), and **bypass the middleware chain**. `ReplyToMessage` threads
+its reply under the reacted message where the platform supports it and otherwise
+falls back to a plain send.
+
+Things to know (v1):
+
+- **Added-only.** Removed reactions are dropped; there is no reaction egress
+  (you can't add a reaction, only reply with a message).
+- **`r.Emoji` is not normalized across platforms** — it is whatever renders
+  as-is on the platform it came from. Read `r.Raw` via the typed accessor
+  (`slack.RawReaction`, `discord.RawReaction`, …) for the platform's original
+  values.
+- **Per-platform delivery differs.** Slack needs the `reaction_added` event +
+  `reactions:read` scope; Discord needs the reaction intents enabled; Telegram
+  delivers group reactions only when the bot is an admin; GitHub has **no
+  reaction webhook** and instead **polls** opted-in repos (`Config.ReactionPollRepos`);
+  Teams surfaces no reaction events. See
+  [_docs/platforms.md](_docs/platforms.md) and `_examples/reactions/main.go`.
+- **Slack can't filter other bots' reactions** (the event carries no bot flag),
+  so guard reply-emitting handlers against cross-bot loops.
 
 ### Attachments
 
@@ -200,6 +305,12 @@ session := discord.Session(bot)    // *discordgo.Session
 tg := telegram.Client(bot)         // *bot.Bot
 wa := whatsmeow.Client(bot)        // *whatsmeow.Client (WhatsApp Web flavor)
 gh := github.Client(bot)           // *go-github Client — labels, reactions, checks, anything beyond replies
+
+// Webhook adapters bound with ":0" report their actual listen address:
+addr := github.Addr(bot)           // also cloud.Addr, teams.Addr — the resolved host:port
+
+// Route the framework's own logs (panic recovery, poll errors, …) to your logger:
+bot.SetLogger(slog.Default())      // any *slog.Logger; a method on the Bot itself, platform-agnostic
 ```
 
 ### Lifecycle
@@ -272,8 +383,45 @@ Alternatives:
 - [x] Unify attachment URL retrieval for all implementations
 - [ ] WeChat, Mastodon adapters
 - [ ] Richer message types (blocks, embeds)
+- [x] Conversational flows — multi-step forms via `HandleFlow` (linear, in-memory, single-instance)
+- [x] Emoji reactions — reply to reactions via `OnReaction` / `ReplyToMessage` (Slack, Discord, Telegram, WhatsApp, GitHub-polled)
 - [ ] Pluggable `Store` module (persistent key-value brain), composed via `botbooter.New(adapter, opts...)` — in-memory default, optional Redis backend
-- [ ] **Conversational flows** (multi-step, context-aware dialogs) — a handler can pause and own the *next* message from the same user instead of re-routing it, so a sign-up form (name → email → address → profession → age → password) asks one question, waits for the reply, validates, then advances to the next. Per-user state lives in the pluggable `Store` above; the goal is a declarative, minimal-boilerplate API for defining the steps.
+
+### Conversational flows — deferred work
+
+v1 flows are **linear, plain-text, in-memory and single-instance** (see the caveats
+under [Conversational flows](#conversational-flows)). The following deferred items each
+reuse the v1 engine with no state migration:
+
+1. **Branching.** Add via `Next func(Answers) string` (step id → next step id) or
+   `AskIf(cond, …)`. The state already stores `Answers`, so branching needs no migration.
+2. **DM-only / mention-gated flows.** Requires a cross-platform `Message.IsDirect` (and/or
+   "addressed to bot") signal that `Message` lacks today. Until then, channel scoping is
+   documented, not enforced.
+3. **Command allowlist during a flow.** An opt-in set of global commands (e.g. `help`) that
+   pierce an active flow, instead of cancel/expiry being the only exits.
+4. **`Store`-backed persistence** and **blocking `Ask`** (with non-blocking
+   delivery + atomic-clear requirements).
+5. **Multi-instance / horizontal scaling.** Gated on the shared `Store` (item 4) **plus** a
+   concurrency redesign — the in-process striped locks must be replaced by store-level
+   atomicity, because the validator is user Go code and cannot run inside a Redis
+   transaction. Plan: **optimistic compare-and-swap** on the `Version` field — read
+   `(state, version)` → run validator in Go → write only if `version` is unchanged; on
+   conflict the other replica already advanced, so drop (or re-read) the message. One CAS
+   wins → no double-advance. Residual issues to handle then: (a) the prompt send happens
+   outside the CAS, so two replicas can both validate-and-send before either writes →
+   **duplicate prompt**; make sends idempotent (key by inbound message id) or accept the
+   rare dup. (b) Platform delivery constraints remain even with a shared store —
+   **Discord** needs gateway **sharding** (one replica owns a conversation) to stop
+   duplicate event delivery; **Telegram** must switch from getUpdates to **webhook** mode
+   (getUpdates is single-consumer). Until all of this lands, v1 is single-instance.
+6. **Normalized validators.** `Validate(func(string) (string, error))` storing the parsed
+   value, so `OnComplete` does not re-parse (e.g. `age` to int). v1 keeps the simpler
+   `func(string) error` plus `Answers.Lookup`.
+7. **Replace-active-flow.** v1 decision: a `HandleFlow` trigger received *during* an active
+   flow is consumed as input (the command table is shadowed); to restart, the user cancels
+   first. Documented. A future reserved "restart" word or replace-on-retrigger can layer on.
+
 
 ## Contributing
 

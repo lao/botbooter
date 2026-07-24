@@ -212,6 +212,49 @@ func TestOnEventLoggedOut(t *testing.T) {
 	asserts.ErrorIs(t, doneErr, ErrLoggedOut, "logout surfaces ErrLoggedOut")
 }
 
+// TestOnEventTerminal drives each permanent-disconnect event through onEvent and
+// asserts it ends the run loop exactly once with the matching sentinel.
+// whatsmeow does not auto-reconnect after these, so an unmapped event would
+// strand the bot silently connected-but-dead.
+func TestOnEventTerminal(t *testing.T) {
+	cases := []struct {
+		name    string
+		event   any
+		wantErr error
+	}{
+		{"StreamReplaced", &events.StreamReplaced{}, ErrStreamReplaced},
+		{"ClientOutdated", &events.ClientOutdated{}, ErrClientOutdated},
+		{"TemporaryBan", &events.TemporaryBan{Code: events.TempBanSentToTooManyPeople}, ErrTemporaryBan},
+		{"CATRefreshError", &events.CATRefreshError{Error: errors.New("cat boom")}, ErrCATRefresh},
+		{"ConnectFailure", &events.ConnectFailure{Reason: events.ConnectFailureGeneric, Message: "nope"}, ErrConnectFailure},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			var doneErr error
+			report := func(err error) { calls++; doneErr = err }
+
+			(&adapter{}).onEvent(context.Background(), tc.event, core.AdapterDeps{}, report)
+
+			asserts.Equal(t, calls, 1, "Done fires exactly once")
+			asserts.ErrorIs(t, doneErr, tc.wantErr, "surfaces the matching sentinel")
+		})
+	}
+}
+
+// TestSingleRunAfterDisconnect proves a store-owning bot is single-run: once
+// Disconnect has closed the owned store, a second Connect fails fast with
+// ErrClosed rather than erroring deep inside whatsmeow.
+func TestSingleRunAfterDisconnect(t *testing.T) {
+	a, err := newAdapter(Config{DBPath: filepath.Join(t.TempDir(), "wa.db")})
+	asserts.NoError(t, err, "newAdapter")
+
+	asserts.NoError(t, a.Disconnect(), "disconnect closes the owned store")
+
+	err = a.Connect(context.Background(), core.AdapterDeps{})
+	asserts.ErrorIs(t, err, ErrClosed, "reconnecting a retired store-owning bot returns ErrClosed")
+}
+
 func TestAttachments(t *testing.T) {
 	a := &adapter{}
 	msg := func(m *waProto.Message) *core.Message {

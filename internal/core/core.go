@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -214,14 +215,21 @@ type AdapterDeps struct {
 	Dispatch            func(ctx context.Context, m *Message)
 	DispatchReaction    func(ctx context.Context, r *Reaction)
 	HasReactionHandlers bool
-	Done                func(err error)
-	Disconnect          func() error
-	Logger              *slog.Logger // always non-nil
+	// Done reports that this connection's event loop terminated. Call it AT MOST
+	// ONCE per connection: it writes to a size-1 buffered channel, so a redundant
+	// Done is at best silently dropped and at worst blocks the caller forever
+	// (when Run was woken by ctx/Disconnect and never drains the channel). An
+	// adapter that can emit several terminal events (whatsmeow) must collapse them
+	// into a single Done — e.g. behind a per-connection sync.Once.
+	Done       func(err error)
+	Disconnect func() error
+	Logger     *slog.Logger // always non-nil
 }
 
-// Bot is the platform-agnostic chat bot. Register handlers and middleware
-// before Connect; after that, Connect/Run/Disconnect/Send are safe to call
-// concurrently. Registering after Connect races the dispatch goroutine.
+// Bot is the platform-agnostic chat bot. Register handlers, middleware, and flows
+// (HandleFlow — and the Flow builder calls behind it) before Connect; after that,
+// Connect/Run/Disconnect/Send are safe to call concurrently. Registering, or
+// mutating a registered Flow, after Connect races the dispatch goroutine.
 type Bot struct {
 	BotType BotType
 
@@ -233,6 +241,19 @@ type Bot struct {
 	reactionHandlers      []ReactionHandler
 	setupErrs             []error // registration errors, surfaced by Connect
 	logger                *slog.Logger
+
+	conversations *conversationManager
+	flows         map[string]*Flow
+
+	// dispatchChain is the middleware chain wrapped around the terminal
+	// flow/command handler. Connect composes it once per connection from the
+	// current middleware snapshot and reuses it for every message; a reconnect
+	// re-snapshots, so a Bot reused across runs picks up middleware registered
+	// between runs. Middleware is register-before-Connect, so the snapshot is
+	// stable during a run; the inner handler still reads live Bot state (commands,
+	// flows) on each call. Stored atomically so a straggler dispatch from a prior
+	// connection can read it while a reconnect stores a fresh chain, race-free.
+	dispatchChain atomic.Pointer[CommandHandler]
 
 	mu   sync.Mutex
 	conn *connection
@@ -249,6 +270,11 @@ type connection struct {
 	discOnce sync.Once // scopes adapter.Disconnect to exactly one true teardown
 	discErr  error     // adapter.Disconnect result, recorded once and shared by all true callers
 	adapter  Adapter
+	// sweeperDone is closed by the conversation sweeper goroutine when it exits
+	// (nil when no sweeper started for this connection). It is a test-observable
+	// hook for asserting the background goroutine is gone after teardown; the
+	// production teardown path does not wait on it.
+	sweeperDone <-chan struct{}
 }
 
 // teardown cancels the run context and closes runDone exactly once. It runs the
@@ -279,7 +305,12 @@ func (c *connection) teardown(disconnectAdapter bool) error {
 
 // New creates a Bot of the given type backed by adapter.
 func New(botType BotType, adapter Adapter) *Bot {
-	return &Bot{BotType: botType, adapter: adapter}
+	return &Bot{
+		BotType:       botType,
+		adapter:       adapter,
+		conversations: newConversationManager(),
+		flows:         make(map[string]*Flow),
+	}
 }
 
 // AdapterAs returns the Bot's adapter as T, reporting whether it is that type.
@@ -329,6 +360,12 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 // decide at Connect whether to run it ([AdapterDeps].HasReactionHandlers) — on
 // GitHub, a handler registered only after Connect means no reaction poller
 // starts and OnReaction never fires for that connection.
+//
+// Cross-bot reaction loops are handler-owned on Slack: its reaction_added event
+// carries no bot flag, so the adapter cannot drop another bot's reaction the way
+// Telegram/Discord/GitHub do. A handler that emits a reply (e.g. ReplyToMessage)
+// in response to a reaction can therefore ping-pong with another auto-reacting
+// bot — guard such handlers (e.g. by author, emoji, or a rate limit).
 func (b *Bot) OnReaction(h ReactionHandler) {
 	b.reactionHandlers = append(b.reactionHandlers, h)
 }
@@ -380,6 +417,11 @@ func (b *Bot) Connect(ctx context.Context) error {
 	if err := errors.Join(b.setupErrs...); err != nil {
 		return err
 	}
+	// Compose the dispatch chain from the current middleware snapshot, redone on
+	// every Connect so a Bot reused across a reconnect reflects middleware
+	// registered between runs. Register-before-Connect keeps it stable during a run.
+	chain := b.composeDispatchChain()
+	b.dispatchChain.Store(&chain)
 	runCtx, cancel := context.WithCancel(ctx)
 	c := &connection{
 		cancel:  cancel,
@@ -408,6 +450,27 @@ func (b *Bot) Connect(ctx context.Context) error {
 		return err
 	}
 	b.conn = c
+
+	// Start the conversation sweeper on the per-connection run context so it stops
+	// when this connection is torn down and a reconnect installs a fresh one. The
+	// in-memory flow state itself is per-Bot and survives a transient reconnect;
+	// only background sweeping pauses for that window (lazy expiry still applies).
+	// Gated on registered flows so a bot that never calls HandleFlow spins up no
+	// background goroutine. This gate is read once at Connect: a flow registered
+	// AFTER Connect still dispatches (composeDispatchChain's advance reads b.flows
+	// live) but gets no background sweeper until the next reconnect, so its expired
+	// state is only lazily reaped on the user's next message. Flows, like
+	// middleware, are meant to be registered before Connect.
+	//
+	// teardown cancels the old connection's runCtx but does not wait for its
+	// sweeper to observe cancellation and exit (production teardown never blocks
+	// on sweeperDone), so a fast reconnect can briefly run two sweepers against
+	// the shared per-Bot conversationManager. That overlap is benign: sweep
+	// re-checks expiry under each shard lock before deleting, so a concurrent
+	// double-sweep is idempotent.
+	if b.conversations != nil && len(b.flows) > 0 {
+		c.sweeperDone = b.conversations.startSweeper(runCtx, defaultSweepInterval, b.log())
+	}
 	return nil
 }
 
@@ -479,7 +542,11 @@ func (b *Bot) Run(ctx context.Context) error {
 	case loopErr = <-c.done:
 	}
 
-	disconnectErr := b.Disconnect()
+	// Tear down the connection Run OWNS, not whatever b.conn currently points at.
+	// If a reconnect superseded c while Run was blocked, b.Disconnect() would tear
+	// down the live successor; disconnectConn(c) instead scopes teardown to c and
+	// degrades to a no-op adapter teardown when c is no longer installed.
+	disconnectErr := b.disconnectConn(c)
 
 	// Graceful shutdown (ctx canceled, or a local Disconnect canceling runCtx)
 	// surfaces as loopErr echoing the canceling context's error; swallow it so
@@ -580,7 +647,10 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 //     API token used to send). Short-lived; consume promptly.
 //   - Teams: a pre-authorized link carrying a short-lived token — consume
 //     promptly, never log or cache. Inline images may need an Authorization
-//     header this adapter does not yet supply.
+//     header this adapter does not yet supply. The URL is sender-influenced
+//     (it rides in on the inbound Activity), so treat it as an SSRF hazard:
+//     validate the host/scheme before fetching, never let it target an internal
+//     address.
 //   - CLI: a local filesystem path (open with os.Open), not an HTTP URL.
 func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error) {
 	if b.adapter == nil {
@@ -594,7 +664,8 @@ func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string,
 
 // dispatch routes message through the middleware chain to the first matching
 // command. A panic in any handler or middleware is recovered and logged so it
-// cannot take down the event loop.
+// cannot take down the event loop. The middleware chain is composed once per
+// connection (in Connect) and reused, since middleware is registered before Connect.
 func (b *Bot) dispatch(ctx context.Context, message *Message) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -602,7 +673,28 @@ func (b *Bot) dispatch(ctx context.Context, message *Message) {
 		}
 	}()
 
+	if p := b.dispatchChain.Load(); p != nil {
+		(*p)(ctx, b, message)
+		return
+	}
+	// No connection was ever established (e.g. a unit test calling dispatch
+	// directly); compose on the fly from the current middleware.
+	b.composeDispatchChain()(ctx, b, message)
+}
+
+// composeDispatchChain wraps the terminal flow/command handler in the registered
+// middleware, inner-to-outer, so registration order equals execution order. The
+// returned handler closes over the middleware snapshot but reads live Bot state
+// (flows, commands, unknownCommandHandler) on every call, so composing it once is
+// equivalent to rebuilding it per message.
+func (b *Bot) composeDispatchChain() CommandHandler {
 	handler := func(ctx context.Context, bot *Bot, message *Message) {
+		// An active flow for this conversation consumes the message before the
+		// command table; advance reports false (and we fall through) when no flow
+		// is active or its state outlived its registration.
+		if len(bot.flows) > 0 && bot.conversations != nil && bot.conversations.advance(ctx, bot, message) {
+			return
+		}
 		for i := range bot.commands {
 			if bot.commands[i].match(message.Content) {
 				bot.commands[i].Handler(ctx, bot, message)
@@ -622,6 +714,5 @@ func (b *Bot) dispatch(ctx context.Context, message *Message) {
 			middleware(ctx, bot, message, next)
 		}
 	}
-
-	final(ctx, b, message)
+	return final
 }

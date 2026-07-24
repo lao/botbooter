@@ -47,10 +47,11 @@ func emojiReaction(e string) models.ReactionType {
 	return models.ReactionType{Type: models.ReactionTypeTypeEmoji, ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: e}}
 }
 
-// newStubAdapter wires an adapter to an httptest Bot API server, mirroring New
+// newStubAdapterRaw wires an adapter to an httptest Bot API server, mirroring New
 // without real network I/O. It builds the client from the production
-// clientOptions, so tests exercise the same option set New installs.
-func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
+// clientOptions, so tests exercise the same option set New installs. The handler
+// has full control of every Bot API method, including getMe.
+func newStubAdapterRaw(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -63,6 +64,22 @@ func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapt
 	asserts.NoError(t, err, "bot.New for stub server")
 	a.client = tg
 	return a
+}
+
+// newStubAdapter is newStubAdapterRaw with Connect's getMe probe pre-answered by
+// a stub bot user, so a test's handler only has to cover the methods it cares
+// about. (Connect probes getMe to fail fast on a bad token; the returned id is
+// irrelevant — the adapter's self id comes from the token prefix / selfID.)
+func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
+	t.Helper()
+	return newStubAdapterRaw(t, selfID, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getMe") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"stub"}}`))
+			return
+		}
+		handler(w, r)
+	})
 }
 
 func TestOnReaction(t *testing.T) {
@@ -332,6 +349,23 @@ func TestOnUpdate(t *testing.T) {
 		// An update with no deps on its context (delivered outside Connect) must be
 		// dropped, not panic — exercises the depsFrom == nil guard.
 		(&adapter{selfID: selfID}).onUpdate(context.Background(), nil, userMessage("hi", ""))
+	})
+
+	t.Run("EmptyServiceMessageSkipped", func(t *testing.T) {
+		// A sticker-only message (and, likewise, member-join/location/pinned service
+		// messages) has no text, no caption, and no attachment the adapter surfaces,
+		// so it must not be dispatched as an empty-Content command. Mirrors Slack and
+		// whatsmeow.
+		var got *core.Message
+		a, ctx := newCaptureAdapter(selfID, &got)
+
+		a.onUpdate(ctx, nil, &models.Update{Message: &models.Message{
+			From:    &models.User{ID: 7},
+			Chat:    models.Chat{ID: 100},
+			Sticker: &models.Sticker{FileID: "s1"},
+		}})
+
+		asserts.True(t, got == nil, "an empty service message is not dispatched to the command table")
 	})
 }
 
@@ -818,19 +852,22 @@ func TestConnect_PollsWithFullAllowedUpdates(t *testing.T) {
 	}
 }
 
-// TestConnect_FreshClientPerConnection proves each Connect builds its own *bot.Bot,
-// so a canceled run's buffered updates die with its client instead of being drained,
-// and dispatched, by the next connection.
-func TestConnect_FreshClientPerConnection(t *testing.T) {
+// TestConnect_FirstReusesNewClientThenFreshPerReconnect proves the first Connect
+// runs the poll loop on the New-time client (so a pre-Connect RegisterHandler on
+// Client(bot) survives), while every reconnect builds a fresh *bot.Bot (so a
+// canceled run's buffered updates die with its client instead of being drained,
+// and dispatched, by the successor connection).
+func TestConnect_FirstReusesNewClientThenFreshPerReconnect(t *testing.T) {
 	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
 	})
+	newTime := a.client
 
 	base := a.newClient
-	var clients []*bot.Bot
+	var built []*bot.Bot
 	a.newClient = func() (*bot.Bot, error) {
 		c, err := base()
-		clients = append(clients, c)
+		built = append(built, c)
 		return c, err
 	}
 
@@ -839,14 +876,136 @@ func TestConnect_FreshClientPerConnection(t *testing.T) {
 		Done:     func(error) {},
 	}
 
-	for i := 0; i < 2; i++ {
-		ctx, cancel := context.WithCancel(context.Background())
-		asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail")
-		cancel()
-	}
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	asserts.NoError(t, a.Connect(ctx1, deps), "first Connect should not fail")
+	asserts.True(t, a.currentClient() == newTime, "first Connect reuses the New-time client")
+	asserts.Equal(t, len(built), 0, "first Connect builds no fresh client")
+	cancel1()
 
-	asserts.Equal(t, len(clients), 2, "each Connect builds its own client")
-	asserts.True(t, clients[0] != clients[1], "connections use distinct *bot.Bot instances")
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	asserts.NoError(t, a.Connect(ctx2, deps), "reconnect should not fail")
+	asserts.Equal(t, len(built), 1, "reconnect builds exactly one fresh client")
+	asserts.True(t, a.currentClient() != newTime, "reconnect swaps in a distinct *bot.Bot")
+	cancel2()
+}
+
+// TestConnect_ReusesNewTimeClientForRegisteredHandlers is the I2 behavioral proof:
+// a raw handler registered on Client(bot) BEFORE Connect must fire, which only
+// happens if the first Connect runs the poll loop on that same New-time client
+// rather than discarding it for a fresh one.
+func TestConnect_ReusesNewTimeClientForRegisteredHandlers(t *testing.T) {
+	var served atomic.Bool
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") && !served.Swap(true) {
+			_, _ = w.Write([]byte(`{"ok":true,"result":[{"update_id":1,"message":{` +
+				`"message_id":1,"date":1,"chat":{"id":100,"type":"private"},` +
+				`"from":{"id":7,"is_bot":false,"first_name":"U"},"text":"ping"}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+
+	fired := make(chan struct{}, 1)
+	a.client.RegisterHandler(bot.HandlerTypeMessageText, "ping", bot.MatchTypeExact,
+		func(context.Context, *bot.Bot, *models.Update) {
+			select {
+			case fired <- struct{}{}:
+			default:
+			}
+		})
+
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(error) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail")
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a handler registered before Connect never fired: the poll loop ran on a different client")
+	}
+}
+
+// TestConnect_GetMeProbeFailsFast proves an invalid token surfaces as an error
+// from Run (via Done) instead of the poll loop silently retrying a 401 forever.
+// The probe runs off the Connect path — Connect stays non-blocking, since
+// core.Bot holds its mutex across adapter.Connect — so the error arrives on Done,
+// not from Connect's return.
+func TestConnect_GetMeProbeFailsFast(t *testing.T) {
+	a := newStubAdapterRaw(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/getMe") {
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":401,"description":"Unauthorized"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+
+	done := make(chan error, 1)
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(err error) { done <- err },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect returns without blocking on the probe")
+	select {
+	case err := <-done:
+		asserts.Error(t, err, "an invalid token surfaces via Run/Done, not an infinite silent 401 retry")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the getMe probe failure was never reported via Done")
+	}
+}
+
+// chanLogHandler is a race-free slog.Handler for observing log records emitted
+// from the poll-loop goroutine: it forwards each record's message on a channel
+// (dropping if full) so a test can await it without sharing a buffer.
+type chanLogHandler struct{ ch chan string }
+
+func (h chanLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h chanLogHandler) Handle(_ context.Context, r slog.Record) error {
+	select {
+	case h.ch <- r.Message:
+	default:
+	}
+	return nil
+}
+func (h chanLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h chanLogHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestConnect_PollErrorRoutedToLogger proves a getUpdates failure in the poll
+// loop reaches the logger injected at Connect, rather than go-telegram's default
+// handler writing to the stdlib log.
+func TestConnect_PollErrorRoutedToLogger(t *testing.T) {
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+
+	logs := make(chan string, 8)
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(error) {},
+		Logger:   slog.New(chanLogHandler{ch: logs}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail (getMe is answered)")
+
+	select {
+	case msg := <-logs:
+		asserts.True(t, strings.Contains(msg, "poll error"),
+			"a poll-loop failure is routed to the injected logger: "+msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("poll error was not routed to the injected logger")
+	}
 }
 
 func TestConnect_DispatchesUpdate(t *testing.T) {
