@@ -39,8 +39,8 @@ func New(cfg Config) (*botbooter.Bot, error) {
 }
 
 // RawEvent returns the typed Note Hook payload carried on m, reporting whether m
-// originated from GitLab. Exactly one of RawEvent(m).IssueComment or
-// RawEvent(m).MergeComment is non-nil.
+// originated from GitLab. On a GitLab message exactly one of the returned
+// [Message]'s IssueComment and MergeComment fields is non-nil.
 func RawEvent(m *botbooter.Message) (*Message, bool) {
 	return gitlabint.RawEvent(m)
 }

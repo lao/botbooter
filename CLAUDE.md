@@ -65,7 +65,7 @@ Emoji-reaction handling is a **second, optional ingress path** alongside message
 - `Disconnect` clears `b.conn` only **after** the adapter's teardown returns (webhook drains can take seconds), so a Connect racing a slow Disconnect gets `ErrAlreadyConnected` instead of starting a second live session on the shared adapter. Concurrent teardowns of the same connection serialize on its `sync.Once`.
 - `Run` **swallows the context's own cancellation error**: a clean Ctrl-C surfaces as `nil`, not `context.Canceled`, because callers commonly do `log.Fatal(bot.Run(ctx))` and shouldn't exit non-zero on graceful shutdown.
 - Adapters differ in teardown: Slack/CLI loops stop purely from context cancellation (their `Disconnect` is a no-op); Discord must `Close()` the session and remove its handler, and it watches `ctx.Done()` to call `deps.Disconnect()`. The whatsmeow adapter follows the Discord shape (remove handler + close websocket, plus closing its own session store).
-- Every platform drops the bot's own and other bots' messages to avoid reply loops (`isBotMessage` for Slack, the `Author.Bot`/self-ID checks for Discord, `Info.IsFromMe` for whatsmeow).
+- Every platform drops the bot's **own** messages to avoid reply loops (`isBotMessage` for Slack, the `Author.Bot`/self-ID checks for Discord, `Info.IsFromMe` for whatsmeow, `isSelfOrBotUser` for GitHub, `isSelfUser` for GitLab). Dropping *other* bots' messages needs the platform to mark them, so it is not universal: GitLab note webhooks carry no bot flag, so its filter is self-only and another bot's notes still dispatch.
 
 ### CLI adapter caveat
 
