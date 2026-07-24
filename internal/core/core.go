@@ -38,6 +38,7 @@ const (
 	TeamsBotType
 	WhatsMeowBotType
 	GitHubBotType
+	GitLabBotType
 )
 
 // String returns the lowercase platform name for t, or "BotType(n)" for an
@@ -60,6 +61,8 @@ func (t BotType) String() string {
 		return "whatsmeow"
 	case GitHubBotType:
 		return "github"
+	case GitLabBotType:
+		return "gitlab"
 	default:
 		return fmt.Sprintf("BotType(%d)", int(t))
 	}
