@@ -14,6 +14,7 @@ require (
 	github.com/google/go-github/v88 v88.0.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/slack-go/slack v0.12.1
+	gitlab.com/gitlab-org/api/client-go v1.46.0
 	go.mau.fi/whatsmeow v0.0.0-20260622185415-5f04eac6dbbb
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.53.0
@@ -38,7 +39,6 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/vektah/gqlparser/v2 v2.5.27 // indirect
-	gitlab.com/gitlab-org/api/client-go v1.46.0 // indirect
 	go.mau.fi/libsignal v0.2.2 // indirect
 	go.mau.fi/util v0.9.10 // indirect
 	golang.org/x/crypto v0.53.0 // indirect

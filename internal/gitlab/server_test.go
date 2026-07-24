@@ -86,6 +86,16 @@ const (
   "project": {"path_with_namespace": "acme/widgets"}
 }`
 	pingEvent = `{"event_name": "push"}`
+	// Pre-16.11 GitLab (and older self-hosted) omit object_attributes.action on
+	// note deliveries entirely; an absent action must be treated as a create.
+	issueNoteNoAction = `{
+  "object_kind": "note",
+  "user": {"id": 58, "username": "octocat"},
+  "project": {"path_with_namespace": "acme/widgets"},
+  "object_attributes": {"id": 20, "note": "/deploy", "noteable_type": "Issue",
+    "author_id": 58, "system": false},
+  "issue": {"iid": 17}
+}`
 )
 
 // failingListener makes Serve return err immediately, exercising the serve error
@@ -166,6 +176,23 @@ func TestHandleWebhook_DispatchesConfidentialNote(t *testing.T) {
 
 	asserts.Equal(t, len(got), 1, "confidential note dispatched")
 	asserts.Equal(t, got[0].ChannelID, "acme/widgets#17", "issue channel id")
+}
+
+// GitLab omitted object_attributes.action on note deliveries before 16.11, so an
+// absent action must be treated as a create — otherwise every comment on an
+// older self-hosted instance is silently dropped. An explicit "update" (an edit)
+// is still dropped; see TestHandleWebhook_AckedButDropped/EditedNote.
+func TestHandleWebhook_AbsentActionDispatches(t *testing.T) {
+	a, err := newAdapter(testConfig())
+	asserts.NoError(t, err, "new adapter")
+	var got []*core.Message
+	done := make(chan struct{}, 1)
+
+	a.handleWebhook(context.Background(), httptest.NewRecorder(), webhookRequest("hook-secret", "Note Hook", issueNoteNoAction), captureDeps(&got, done))
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, len(got), 1, "note with absent action dispatched as a create")
+	asserts.Equal(t, got[0].Content, "/deploy", "content")
 }
 
 func TestHandleWebhook_DispatchesMergeComment(t *testing.T) {

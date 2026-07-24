@@ -114,12 +114,19 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 }
 
 // dropComment reports whether a note must be ignored: a system note (an
-// automated change like a label or title edit — never a real message), an edit
-// rather than a new note (only the "create" action is a fresh message), or one
-// the bot itself authored (the reply-loop guard, by author id since GitLab note
-// webhooks carry no reliable bot flag).
+// automated change like a label or title edit — never a real message), an
+// explicit edit (an action other than "create"), or one the bot itself authored
+// (the reply-loop guard, by author id since GitLab note webhooks carry no
+// reliable bot flag).
+//
+// object_attributes.action was only added to note deliveries in GitLab 16.11, so
+// an older or self-hosted instance (which Config.BaseURL explicitly targets)
+// sends new-note hooks with an empty action. An empty action is therefore
+// treated as a create — dropping only a *known* non-create action — so the core
+// comment path is not silently blackholed on those instances. The system and
+// self filters still apply regardless.
 func (a *adapter) dropComment(system bool, action gogitlab.CommentEventAction, authorID int64) bool {
-	return system || action != gogitlab.CommentEventActionCreate || a.isSelfUser(authorID)
+	return system || (action != "" && action != gogitlab.CommentEventActionCreate) || a.isSelfUser(authorID)
 }
 
 // handleMerge routes a Merge Request Hook to cfg.OnMergeRequest. Parsing happens
