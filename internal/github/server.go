@@ -23,7 +23,7 @@ const signatureHeader = "X-Hub-Signature-256"
 // invalid-but-authentic payloads are acked too.
 func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	// Bound concurrent inbound processing before reading the (up to
-	// maxRequestBytes) body: the body must be read to verify its HMAC, so this
+	// a.maxRequestBytes) body: the body must be read to verify its HMAC, so this
 	// caps the memory an unauthenticated flood of large POSTs can buffer. Held
 	// only across read+verify+parse (this function); the dispatch goroutine has
 	// its own bound (ackAndDispatch).
@@ -45,7 +45,7 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	// sibling-adapter pattern): a body we cannot read is the client's 400; a
 	// body that fails HMAC is a 403. The one-shot ValidatePayload cannot
 	// distinguish the two.
-	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, a.maxRequestBytes))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return

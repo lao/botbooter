@@ -237,7 +237,9 @@ func TestHandleWebhook_Rejections(t *testing.T) {
 			return r
 		}, http.StatusForbidden},
 		{"OversizedBody", func() *http.Request {
-			big := strings.Repeat("a", maxRequestBytes+1)
+			// patConfig registers no large-event callback, so its cap is
+			// smallRequestBytes; a body one byte over it trips MaxBytesReader.
+			big := strings.Repeat("a", smallRequestBytes+1)
 			r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(big))
 			r.Header.Set("X-Hub-Signature-256", sign("hook-secret", []byte(big)))
 			return r
@@ -348,7 +350,7 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	asserts.Equal(t, a.inflight.Load(), int64(0), "slot released after the handler returns")
 }
 
-// A saturated read semaphore must answer 503 before the (up to maxRequestBytes)
+// A saturated read semaphore must answer 503 before the (up to a.maxRequestBytes)
 // body is buffered, so a flood of large POSTs cannot exhaust memory ahead of the
 // HMAC check.
 func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {

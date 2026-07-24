@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"testing"
 
+	gogithub "github.com/google/go-github/v88/github"
 	"github.com/lao/botbooter/internal/asserts"
 	"github.com/lao/botbooter/internal/core"
 )
@@ -70,6 +72,29 @@ func TestNewAdapter_DefaultPath(t *testing.T) {
 
 	asserts.NoError(t, err, "valid PAT config")
 	asserts.Equal(t, a.cfg.Path, "/webhook", "default path")
+}
+
+// The inbound body cap follows the configured capability: a bot that handles
+// only issue_comment caps at smallRequestBytes, and registering either
+// large-event callback raises it to largeRequestBytes. This keeps a plain
+// issue_comment bot from buffering 25 MiB per request (16*25 MiB pre-auth) that
+// it can never parse, while push/PR handlers still get GitHub's full ceiling.
+func TestNewAdapter_RequestByteLimitFollowsConfig(t *testing.T) {
+	base, err := newAdapter(patConfig())
+	asserts.NoError(t, err, "issue_comment-only config")
+	asserts.Equal(t, base.maxRequestBytes, int64(smallRequestBytes), "no large-event callback caps small")
+
+	push := patConfig()
+	push.OnPush = func(context.Context, *gogithub.PushEvent) {}
+	withPush, err := newAdapter(push)
+	asserts.NoError(t, err, "OnPush config")
+	asserts.Equal(t, withPush.maxRequestBytes, int64(largeRequestBytes), "OnPush raises the cap")
+
+	pr := patConfig()
+	pr.OnPullRequest = func(context.Context, *gogithub.PullRequestEvent) {}
+	withPR, err := newAdapter(pr)
+	asserts.NoError(t, err, "OnPullRequest config")
+	asserts.Equal(t, withPR.maxRequestBytes, int64(largeRequestBytes), "OnPullRequest raises the cap")
 }
 
 // Guards the ghinstallation nil-RoundTripper panic: App mode with the default
