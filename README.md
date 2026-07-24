@@ -187,8 +187,9 @@ Things to know (v1):
   the cancel word (default `"cancel"`, set with `CancelWord`, disable with `""`), or
   it times out (idle TTL, default 10m via `Timeout`; any reply the flow receives —
   even a rejected or empty one — slides the deadline, so only going silent expires
-  it). In a
-  public channel this means a flow consumes everyone's messages — run flows in DMs.
+  it). In a public channel this shadows only the flow-starting user's own messages
+  there — not everyone's — so that user can't run other commands until it ends; run
+  flows in DMs.
   Register `OnCancel(fn)` / `OnTimeout(fn)` on the flow to react to those two
   exits; note the timeout callback fires only if the user's next message arrives
   before the background sweeper reclaims the expired state (see the `Flow.OnTimeout`
