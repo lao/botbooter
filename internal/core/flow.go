@@ -186,6 +186,13 @@ func (f *Flow) validate() error {
 // and dispatch goroutines read its steps and callbacks concurrently, so a later
 // builder call (Ask, OnComplete, Timeout, …) on the same *Flow while the Bot is
 // connected is a data race. Finish building before calling HandleFlow.
+//
+// HandleFlow itself must also run before Connect. It writes the unsynchronized
+// b.flows map that dispatch reads on every message; unlike a slice-append race,
+// Go's runtime turns a concurrent map read/write into a fatal, unrecoverable
+// crash that dispatch's recover cannot catch. Registering a flow while connected
+// (e.g. from an admin command or config reload) is therefore process-fatal, not
+// merely racy.
 func (b *Bot) HandleFlow(pattern string, flow *Flow) error {
 	if flow == nil {
 		return ErrFlowNil
