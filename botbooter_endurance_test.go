@@ -11,6 +11,7 @@ package botbooter_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
 	"sync/atomic"
@@ -56,7 +57,7 @@ loop:
 	for {
 		select {
 		case err := <-runErr:
-			t.Fatalf("bot stopped before the endurance window elapsed: %v", err)
+			t.Fatalf("bot stopped before the endurance window elapsed: bot.Run returned %v", err)
 		case <-deadline:
 			break loop
 		case <-ticker.C:
@@ -65,6 +66,9 @@ loop:
 			}
 			sent++
 		}
+	}
+	if sent == 0 {
+		t.Fatal("no drive calls were made; is the configured duration shorter than the tick interval?")
 	}
 
 	cancel()
@@ -75,17 +79,38 @@ loop:
 		t.Fatal("bot.Run did not return within 10s of cancellation")
 	}
 
+	// Both the SUT and the driver reach their platform over net/http, which parks
+	// two goroutines per pooled connection for IdleConnTimeout (90s by default)
+	// after the last request. Those are idle keep-alives, not leaks, but they
+	// outlive the settle window and would read as one — retire them first.
+	closeIdleHTTPConns()
 	loadtest.AssertNoGoroutineLeak(t, before)
 	return sent
 }
 
-func enduranceDuration(envName string, def time.Duration) time.Duration {
-	if v := os.Getenv(envName); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
+// closeIdleHTTPConns retires the keep-alive connections pooled in the shared
+// default transport, which both the slack-go and discordgo clients use.
+func closeIdleHTTPConns() {
+	if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr.CloseIdleConnections()
 	}
-	return def
+}
+
+// enduranceDuration reads a duration override from envName, falling back to def
+// when it is unset. A set-but-unparseable value fails the test rather than
+// silently running the default, matching requireEnv's fail-loudly handling of
+// the other endurance variables.
+func enduranceDuration(t *testing.T, envName string, def time.Duration) time.Duration {
+	t.Helper()
+	v := os.Getenv(envName)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		t.Fatalf("%s=%q is not a valid duration: %v", envName, v, err)
+	}
+	return d
 }
 
 func requireEnv(t *testing.T, name string) string {
@@ -119,7 +144,7 @@ func TestEndurance_Slack_SustainedConnection(t *testing.T) {
 
 	driver := slackapi.New(driverToken)
 	cfg := enduranceConfig{
-		duration: enduranceDuration("BOTBOOTER_SLACK_ENDURANCE_DURATION", 2*time.Minute),
+		duration: enduranceDuration(t, "BOTBOOTER_SLACK_ENDURANCE_DURATION", 2*time.Minute),
 		interval: 2 * time.Second, // stay under Slack's ~1 msg/sec/channel limit
 	}
 	sent := runEnduranceSmoke(t, bot, cfg, func(i int) error {
@@ -128,6 +153,9 @@ func TestEndurance_Slack_SustainedConnection(t *testing.T) {
 	})
 
 	t.Logf("slack endurance: sent %d, received %d", sent, recv.Load())
+	// The >= sent/2 bound tolerates the pre-roll window and the odd dropped
+	// delivery; the > 0 bound keeps it from passing vacuously on a short run.
+	asserts.True(t, recv.Load() > 0, "bot received at least one driven message")
 	asserts.True(t, recv.Load() >= int64(sent/2), "bot kept receiving messages across the window")
 }
 
@@ -166,7 +194,7 @@ func TestEndurance_Discord_SustainedConnection(t *testing.T) {
 	defer func() { _ = driver.Close() }()
 
 	cfg := enduranceConfig{
-		duration: enduranceDuration("BOTBOOTER_DISCORD_ENDURANCE_DURATION", 2*time.Minute),
+		duration: enduranceDuration(t, "BOTBOOTER_DISCORD_ENDURANCE_DURATION", 2*time.Minute),
 		interval: 1500 * time.Millisecond, // stay under Discord's ~5 msg / 5s channel limit
 	}
 	sent := runEnduranceSmoke(t, bot, cfg, func(i int) error {
@@ -176,6 +204,7 @@ func TestEndurance_Discord_SustainedConnection(t *testing.T) {
 
 	if driverIsUser {
 		t.Logf("discord endurance (user driver): sent %d, received %d", sent, recv.Load())
+		asserts.True(t, recv.Load() > 0, "bot received at least one driven message")
 		asserts.True(t, recv.Load() >= int64(sent/2), "bot kept receiving messages across the window")
 		return
 	}

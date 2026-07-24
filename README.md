@@ -351,10 +351,21 @@ documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 make all        # fmt + vet (both incl. _examples) + lint + test-race
 make test-race  # race detector
 make cover      # coverage report
+make bench      # dispatch benchmarks with allocation stats
+make soak       # load/soak/overload tests on their own, under -race
+make endurance  # opt-in sustained-connection smokes against real platforms
 make run-cli    # run the example bot in CLI mode
 ```
 
-The suite runs under the race detector and is hermetic by default. The single test that touches the Slack network is opt-in, enabled by setting the `BOTBOOTER_SLACK_NETWORK_TEST` environment variable (see `botbooter_test.go`).
+The suite runs under the race detector and is hermetic by default: the load, soak and overload tests drive a real `Bot` through an in-memory adapter and touch no network. The tests that do reach a real platform are opt-in, each gated on an environment variable:
+
+| Variable | Test |
+|---|---|
+| `BOTBOOTER_SLACK_NETWORK_TEST` | connect/disconnect smoke in `botbooter_test.go` |
+| `BOTBOOTER_SLACK_ENDURANCE_TEST` | Slack endurance smoke (`make endurance`) |
+| `BOTBOOTER_DISCORD_ENDURANCE_TEST` | Discord endurance smoke (`make endurance`) |
+
+The endurance smokes additionally need credentials for both a bot under test and a separate driver identity — `BOTBOOTER_SLACK_{SUT_APP_TOKEN,SUT_BOT_TOKEN,DRIVER_TOKEN,CHANNEL_ID}` and `BOTBOOTER_DISCORD_{SUT_TOKEN,DRIVER_TOKEN,CHANNEL_ID}` — plus an optional `BOTBOOTER_{SLACK,DISCORD}_ENDURANCE_DURATION` override (default 2m; keep it under the target's 15m timeout). See the file comments in `botbooter_endurance_test.go`.
 
 ## DEMO
 

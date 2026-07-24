@@ -9,18 +9,16 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
+	"github.com/lao/botbooter/internal/asserts"
 	"github.com/lao/botbooter/internal/core"
 )
 
 // Adapter is a core.Adapter that drives a real Bot's dispatch pipeline from a
-// test. It records how many times Send is called so tests can assert on handler
-// replies, but it sends nothing over a network.
+// test. It sends nothing over a network: Send discards its message.
 type Adapter struct {
 	dispatch func(ctx context.Context, m *core.Message)
-	sends    atomic.Int64
 }
 
 // New returns a real *core.Bot wired to a fresh Adapter, plus that Adapter.
@@ -43,24 +41,14 @@ func (a *Adapter) Connect(_ context.Context, deps core.AdapterDeps) error {
 // Disconnect satisfies core.Adapter; there is nothing to tear down.
 func (a *Adapter) Disconnect() error { return nil }
 
-// Send records the call and discards the message.
+// Send discards the message.
 func (a *Adapter) Send(_ context.Context, _, _ string, _ core.SendOptions) error {
-	a.sends.Add(1)
 	return nil
 }
 
 // Attachments satisfies core.Adapter; synthetic messages carry no attachments.
 func (a *Adapter) Attachments(_ *core.Message) ([]core.Attachment, error) {
 	return nil, nil
-}
-
-// Sends reports how many times Send was invoked (i.e. handlers that replied).
-func (a *Adapter) Sends() int64 { return a.sends.Load() }
-
-// Dispatch pushes a single message synchronously through the captured pipeline.
-// The Bot must be connected first.
-func (a *Adapter) Dispatch(ctx context.Context, m *core.Message) {
-	a.dispatch(ctx, m)
 }
 
 // Pump dispatches total messages across workers goroutines and blocks until all
@@ -115,12 +103,11 @@ func (g *Gauge) Leave() { g.cur.Add(-1) }
 func (g *Gauge) Peak() int64 { return g.peak.Load() }
 
 // AssertNoGoroutineLeak fails t if the live goroutine count does not settle back
-// to at most before within roughly a second. It calls runtime.GC first to let
-// finished goroutines wind down. Do not run callers with t.Parallel, since
-// runtime.NumGoroutine is process-global.
-func AssertNoGoroutineLeak(t testing.TB, before int) {
+// to at most before within roughly a second — teardown is asynchronous, so the
+// count is polled rather than sampled once. Do not run callers with t.Parallel,
+// since runtime.NumGoroutine is process-global.
+func AssertNoGoroutineLeak(t asserts.TestingT, before int) {
 	t.Helper()
-	runtime.GC()
 	for i := 0; i < 100; i++ {
 		if runtime.NumGoroutine() <= before {
 			return

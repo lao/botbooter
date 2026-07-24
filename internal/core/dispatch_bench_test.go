@@ -12,23 +12,34 @@ import (
 // message matches commands[0] (best case: dispatch stops at the first command);
 // otherwise it matches none, so dispatch scans every command and falls through
 // to the unknown-command handler (worst case for the linear scan).
-func benchBot(numCommands, numMiddleware int, matchFirst bool) (*Bot, *Message) {
-	b := New(CLIBotType, nil)
+//
+// The Bot is connected before it is returned. That is what makes these numbers
+// production-representative: Connect composes the middleware chain once and
+// stores it, so dispatch takes the atomic-load fast path. Benchmarking an
+// unconnected Bot would instead measure dispatch's compose-on-the-fly fallback
+// and charge every iteration for a chain rebuild no real message ever pays for.
+func benchBot(b *testing.B, numCommands, numMiddleware int, matchFirst bool) (*Bot, *Message) {
+	b.Helper()
+	bot := New(CLIBotType, &stubAdapter{})
 	noop := func(_ context.Context, _ *Bot, _ *Message) {}
 	for i := 0; i < numCommands; i++ {
-		b.AddHandler(Command{Pattern: fmt.Sprintf("^cmd%04d$", i), Handler: noop})
+		bot.AddHandler(Command{Pattern: fmt.Sprintf("^cmd%04d$", i), Handler: noop})
 	}
-	b.SetUnknownCommandHandler(noop)
+	bot.SetUnknownCommandHandler(noop)
 	for i := 0; i < numMiddleware; i++ {
-		b.AddMiddleware(func(ctx context.Context, bot *Bot, m *Message, next CommandHandler) {
+		bot.AddMiddleware(func(ctx context.Context, bot *Bot, m *Message, next CommandHandler) {
 			next(ctx, bot, m)
 		})
 	}
+	if err := bot.Connect(context.Background()); err != nil {
+		b.Fatalf("connect bench bot: %v", err)
+	}
+	b.Cleanup(func() { _ = bot.Disconnect() })
 	content := "nomatchcontent"
 	if matchFirst {
 		content = "cmd0000"
 	}
-	return b, &Message{Content: content}
+	return bot, &Message{Content: content}
 }
 
 func benchDispatch(b *testing.B, bot *Bot, msg *Message) {
@@ -44,14 +55,14 @@ func benchDispatch(b *testing.B, bot *Bot, msg *Message) {
 // BenchmarkDispatch_SingleCommand_Match is the baseline: one command, no
 // middleware, message matches it.
 func BenchmarkDispatch_SingleCommand_Match(b *testing.B) {
-	bot, msg := benchBot(1, 0, true)
+	bot, msg := benchBot(b, 1, 0, true)
 	benchDispatch(b, bot, msg)
 }
 
 // BenchmarkDispatch_SingleCommand_Unknown measures the fall-through cost: one
 // command, no match, unknown-command handler invoked.
 func BenchmarkDispatch_SingleCommand_Unknown(b *testing.B) {
-	bot, msg := benchBot(1, 0, false)
+	bot, msg := benchBot(b, 1, 0, false)
 	benchDispatch(b, bot, msg)
 }
 
@@ -60,7 +71,7 @@ func BenchmarkDispatch_SingleCommand_Unknown(b *testing.B) {
 func BenchmarkDispatch_ScaleCommands(b *testing.B) {
 	for _, n := range []int{1, 10, 100, 1000} {
 		b.Run(fmt.Sprintf("cmds=%d", n), func(b *testing.B) {
-			bot, msg := benchBot(n, 0, false)
+			bot, msg := benchBot(b, n, 0, false)
 			benchDispatch(b, bot, msg)
 		})
 	}
@@ -72,29 +83,30 @@ func BenchmarkDispatch_ScaleCommands(b *testing.B) {
 func BenchmarkDispatch_ScaleCommands_MatchFirst(b *testing.B) {
 	for _, n := range []int{1, 10, 100, 1000} {
 		b.Run(fmt.Sprintf("cmds=%d", n), func(b *testing.B) {
-			bot, msg := benchBot(n, 0, true)
+			bot, msg := benchBot(b, n, 0, true)
 			benchDispatch(b, bot, msg)
 		})
 	}
 }
 
-// BenchmarkDispatch_ScaleMiddleware quantifies the per-dispatch middleware-chain
-// rebuild (core.dispatch reconstructs the closure chain on every call). Watch
-// allocs/op grow with the middleware count.
+// BenchmarkDispatch_ScaleMiddleware quantifies the per-message cost of walking an
+// N-deep middleware chain. The chain itself is composed once at Connect, so this
+// measures call depth, not construction: allocs/op stays at 0 no matter how many
+// middlewares are registered, and only time/op grows.
 func BenchmarkDispatch_ScaleMiddleware(b *testing.B) {
 	for _, n := range []int{0, 1, 5, 10, 50} {
 		b.Run(fmt.Sprintf("mw=%d", n), func(b *testing.B) {
-			bot, msg := benchBot(1, n, true)
+			bot, msg := benchBot(b, 1, n, true)
 			benchDispatch(b, bot, msg)
 		})
 	}
 }
 
 // BenchmarkDispatch_Parallel measures concurrent throughput over the lock-free
-// command/middleware reads. Run with -cpu=1,4,8 to confirm it scales with cores
-// (no lock contention).
+// command reads and the atomically-loaded dispatch chain. Run with -cpu=1,4,8 to
+// confirm it scales with cores (no lock contention).
 func BenchmarkDispatch_Parallel(b *testing.B) {
-	bot, msg := benchBot(100, 0, false)
+	bot, msg := benchBot(b, 100, 0, false)
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()

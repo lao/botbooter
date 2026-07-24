@@ -11,17 +11,19 @@ import (
 )
 
 // TestDispatch_ConcurrentReads_RaceFree fires many concurrent dispatches through
-// one Bot to prove that the command/middleware reads in dispatch are race-free
-// (they take no lock; registration happens before any dispatch). Run under
-// -race. The exact hit/miss counts also prove no message is lost or
-// double-handled under concurrency.
+// one connected Bot to prove that the command reads and the shared dispatch
+// chain are race-free (they take no lock; registration happens before Connect,
+// which publishes the chain atomically). Connecting matters: an unconnected Bot
+// would exercise dispatch's compose-on-the-fly fallback instead of the chain
+// production actually shares between goroutines. Run under -race. The exact
+// hit/miss counts also prove no message is lost or double-handled.
 func TestDispatch_ConcurrentReads_RaceFree(t *testing.T) {
 	const (
 		workers    = 64
 		iterations = 200 // even: each worker emits an equal match/miss split
 	)
 
-	bot := New(CLIBotType, nil)
+	bot := New(CLIBotType, &stubAdapter{})
 	var hits, miss atomic.Int64
 
 	noop := func(_ context.Context, _ *Bot, _ *Message) {}
@@ -43,6 +45,9 @@ func TestDispatch_ConcurrentReads_RaceFree(t *testing.T) {
 	}
 
 	ctx := context.Background()
+	asserts.NoError(t, bot.Connect(ctx), "connect")
+	defer func() { asserts.NoError(t, bot.Disconnect(), "disconnect") }()
+
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
