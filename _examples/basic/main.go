@@ -12,7 +12,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -39,9 +38,6 @@ func main() {
 
 	b.AddMiddleware(loggingMiddleware)
 	b.HandleFunc("^echo ", b.echo)
-	if err := registerSignup(b.Bot); err != nil {
-		log.Fatal(err)
-	}
 	b.SetUnknownCommandHandler(b.unknownCommand)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -66,43 +62,4 @@ func (b *ExampleBot) echo(ctx context.Context, _ *botbooter.Bot, message *botboo
 	if err := b.Reply(ctx, message, reply); err != nil {
 		log.Println("failed to send message:", err)
 	}
-}
-
-// registerSignup wires a small multi-step sign-up flow, triggered by "signup".
-//
-// Flows are DM-intended: while one is active it shadows the command table, so
-// every message in that conversation becomes an answer until the form completes,
-// the user types the cancel word ("cancel"), or it times out. The "password" step
-// uses Secret(), which keeps the answer out of framework logs and any future
-// serialized Store state (it is not encryption, and not safe in a public channel).
-func registerSignup(b *botbooter.Bot) error {
-	signup := botbooter.NewFlow("signup").
-		Ask("name", "What's your name?").
-		Ask("email", "What's your email?", botbooter.Validate(validEmail)).
-		Ask("password", "Choose a password.", botbooter.Secret()).
-		OnComplete(func(ctx context.Context, bot *botbooter.Bot, m *botbooter.Message, a botbooter.Answers) {
-			// In a real bot this would create the account. User PII (name, email)
-			// is kept out of the log by default — like the password; add explicit,
-			// audited logging if you need it.
-			log.Printf("signup complete")
-			if err := bot.SendMessageContext(ctx, m.ChannelID, "You're all set 🎉"); err != nil {
-				log.Println("failed to send completion message:", err)
-			}
-		}).
-		OnCancel(func(ctx context.Context, bot *botbooter.Bot, m *botbooter.Message) {
-			if err := bot.SendMessageContext(ctx, m.ChannelID, "No worries — signup cancelled."); err != nil {
-				log.Println("failed to send cancel message:", err)
-			}
-		})
-
-	return b.HandleFlow("^signup$", signup)
-}
-
-// validEmail is a deliberately minimal, illustrative check — not a real email
-// validator. A production bot would use a proper parser (e.g. net/mail.ParseAddress).
-func validEmail(s string) error {
-	if !strings.Contains(s, "@") {
-		return errors.New("that doesn't look like an email — try again")
-	}
-	return nil
 }
