@@ -2,8 +2,8 @@
 
 How to provision credentials for each platform botbooter supports. Slack,
 Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp,
-Microsoft Teams and GitHub need cloud credentials plus a public HTTPS webhook;
-the CLI needs nothing.
+Microsoft Teams, GitHub and GitLab need cloud credentials plus a public HTTPS
+webhook; the CLI needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/_docs/platforms.md), pkg.go.dev renders the README but not this file.
 
@@ -15,6 +15,7 @@ the CLI needs nothing.
 - WhatsApp, [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks getting started](https://developers.facebook.com/docs/graph-api/webhooks/getting-started)
 - Microsoft Teams, [Azure Bot resource](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication)
 - GitHub, [Webhooks](https://docs.github.com/webhooks) · [Creating a GitHub App](https://docs.github.com/apps/creating-github-apps) · [Personal access tokens](https://docs.github.com/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+- GitLab, [Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/) · [Webhook events](https://docs.gitlab.com/user/project/integrations/webhook_events/) · [Personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/)
 - CLI, [`_examples/basic`](../_examples/basic) and the [README Quickstart](../README.md#quickstart)
 
 ---
@@ -578,6 +579,117 @@ comment bodies are markdown.
 
 ---
 
+## GitLab
+
+botbooter listens for **Note Hook webhook events** — comments on issues *and* on
+merge requests — and replies by creating notes through the REST API
+([client-go](https://gitlab.com/gitlab-org/api/client-go)). Like WhatsApp, Teams
+and GitHub, the adapter runs its own webhook server: it binds a local `Addr`, and
+you put a **TLS-terminating reverse proxy** (or ngrok while developing) in front
+and register the public HTTPS URL as the project or group webhook URL.
+
+One auth mode: a **GitLab access token** — [personal](https://docs.gitlab.com/user/profile/personal_access_tokens/),
+[project](https://docs.gitlab.com/user/project/settings/project_access_tokens/)
+or [group](https://docs.gitlab.com/user/group/settings/group_access_tokens/) —
+with the **`api`** scope and at least the **Reporter** role on the target
+projects. The bot comments as that token's account, and resolves its own user id
+at connect (`GET /user`) so it never replies to itself. Self-hosted instances are
+supported through `Config.BaseURL`.
+
+#### Step 1, Create the webhook
+
+On the project (*Settings → Webhooks → Add new webhook*) or on the group
+(*Settings → Webhooks*):
+
+- **URL**: your public `https://…/webhook` endpoint (from ngrok or your proxy;
+  you can create the webhook after step 3 if you don't have it yet).
+- **Secret token**: a random string; the adapter **requires** it and rejects
+  with `401` any request whose `X-Gitlab-Token` header does not match — checked
+  *before* the body is read.
+- **Trigger**: *Comments*, plus *Confidential comments* to also answer on
+  confidential issues and merge requests (GitLab delivers those under a separate
+  trigger). Add *Merge request events* / *Push events* only if you set the
+  matching `Config` callback; every other enabled trigger is acked and ignored.
+
+#### Step 2, Run the bot
+
+```go
+import "github.com/lao/botbooter/gitlab"
+
+bot, err := gitlab.New(gitlab.Config{
+	Token:  os.Getenv("GITLAB_TOKEN"),  // glpat-… (personal, project or group)
+	Secret: os.Getenv("GITLAB_SECRET"), // the webhook's "Secret token"
+	Addr:   ":8080",                    // a bare "8080" is accepted
+})
+```
+
+Optional `gitlab.Config` fields: `Path` (webhook route, default `/webhook`),
+`BaseURL` (a self-hosted instance, e.g. `https://gitlab.example.com`; empty
+targets gitlab.com and the `/api/v4` suffix is appended for you), `HTTPClient`
+(the outbound API client; defaults to a 30-second timeout), and two callbacks
+that route further deliveries on the same endpoint — `OnMergeRequest` (actions
+`open`, `reopen`, `update`; MRs the bot authored are dropped) and `OnPush`
+(unfiltered — ref filtering is the callback's job). Both run on dispatch
+goroutines covered by the shutdown drain, so hand long work off and return.
+Unset, those deliveries are acked and dropped. There is **no reaction ingress**
+in v1 (GitLab's native Emoji webhook is a future slice), and no attachments —
+note bodies are markdown.
+
+#### Step 3, Expose the local server
+
+```bash
+ngrok http 8080
+```
+
+Point the webhook's URL at `https://…/webhook`, then comment on any issue or
+merge request in a watched project. Comment from an account **other than the
+bot's**: the adapter drops the bot's own notes by author id, but GitLab note
+webhooks carry no bot flag, so *other* bots' notes are still dispatched — guard
+reply-emitting handlers if two bots share a project.
+
+`Message.ChannelID` is GitLab-native — `group/project#iid` for an issue,
+`group/project!iid` for a merge request — so replies land on the same thread;
+`gitlab.RawEvent(m)` returns a `*gitlab.Message` with exactly one of
+`IssueComment` (`*gogitlab.IssueCommentEvent`) and `MergeComment`
+(`*gogitlab.MergeCommentEvent`) set, and `gitlab.Client(bot)` exposes the
+authenticated client-go client for anything beyond commenting — labels, awards,
+pipelines. `gitlab.Addr(bot)` reports the bound address when you bind `:0`.
+
+System notes (label/title changes and other automated activity) and edits are
+acked and dropped; commit and snippet comments have no reply target in v1 and
+are dropped too. Every delivery is acked `200` *before* dispatch so slow
+handlers cannot make GitLab disable the hook.
+
+**Environment variables** (suggested names; the config is plain Go):
+
+| Variable | Value |
+|---|---|
+| `GITLAB_TOKEN` | access token with the `api` scope; required |
+| `GITLAB_SECRET` | webhook secret token; required |
+| `GITLAB_ADDR` | local bind address, e.g. `:8080` (a bare port is accepted) |
+| `GITLAB_PATH` | optional webhook route; defaults to `/webhook` |
+| `GITLAB_BASE_URL` | optional self-hosted instance URL; defaults to gitlab.com |
+
+#### No response?
+
+- **`401` on every delivery** (webhook *Recent events* tab): the webhook's
+  secret token does not match `Secret`.
+- **`200` but no reply**: the note's author is the bot itself (ignored by
+  design), the note was a system note or an edit, or no registered pattern
+  matched. Also check the startup log — if the token cannot resolve `GET /user`
+  the bot shuts down (a bot that cannot recognize itself would reply-loop).
+- **Replies fail / `Send` errors**: the token lacks the `api` scope or the
+  Reporter role on that project. A malformed channel id unwraps as
+  `gitlab.ErrBadChannelID` with `errors.Is`.
+- **Endpoint never hit**: the webhook URL must be your public
+  `https://…/webhook` and reach `Addr` through the proxy; only `POST` is
+  accepted on the route. Confidential issues/MRs need the *Confidential
+  comments* trigger, not just *Comments*.
+
+**Official docs:** [Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/) · [Comment events](https://docs.gitlab.com/user/project/integrations/webhook_events/#comment-events) · [Personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/) · [Notes API](https://docs.gitlab.com/api/notes/) · [ngrok](https://ngrok.com/download)
+
+---
+
 ## CLI
 
 No credentials, no portal, no setup. The CLI adapter reads from stdin and
@@ -630,6 +742,7 @@ Two options carry the anchor:
 | **WhatsApp (Web / whatsmeow)** | — (options ignored) | — | — | always a plain channel send (quoted replies are a possible follow-up) |
 | **Teams** | — (options ignored) | — | — | always a plain channel send |
 | **GitHub** | — (options ignored) | — | — | always a plain issue comment (issue comment threads are flat — a reply already lands in the conversation) |
+| **GitLab** | — (options ignored) | — | — | always a plain note (issue/MR note threads are flat — a reply already lands in the conversation) |
 | **CLI** | — (options ignored) | — | — | always a plain channel send |
 
 The reply anchor assumes you send to the message's **own channel**; e.g. a
@@ -661,7 +774,7 @@ pre-computed id.
 ### Fallback & errors
 
 A send degrades to a plain channel message when the adapter ignores the options
-(Teams, GitHub, CLI) **or** the anchor resolves to nothing — it never fails just because
+(Teams, GitHub, GitLab, CLI) **or** the anchor resolves to nothing — it never fails just because
 a message can't be threaded. The one loud exception is an explicit
 `WithThreadID` that a platform can't use (an id that isn't a positive message id
 on Telegram), which returns an error rather than silently dropping. `Reply` returns an error only
