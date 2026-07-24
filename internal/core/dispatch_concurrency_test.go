@@ -25,16 +25,12 @@ func TestDispatch_ConcurrentReads_RaceFree(t *testing.T) {
 	var hits, miss atomic.Int64
 
 	noop := func(_ context.Context, _ *Bot, _ *Message) {}
-	if err := bot.AddHandler(Command{Pattern: "^ping$", Handler: func(_ context.Context, _ *Bot, _ *Message) {
+	bot.AddHandler(Command{Pattern: "^ping$", Handler: func(_ context.Context, _ *Bot, _ *Message) {
 		hits.Add(1)
-	}}); err != nil {
-		t.Fatalf("AddHandler ping: %v", err)
-	}
+	}})
 	// Extra non-matching commands so each dispatch scans a multi-entry slice.
 	for i := 0; i < 4; i++ {
-		if err := bot.AddHandler(Command{Pattern: fmt.Sprintf("^extra%d$", i), Handler: noop}); err != nil {
-			t.Fatalf("AddHandler extra%d: %v", i, err)
-		}
+		bot.AddHandler(Command{Pattern: fmt.Sprintf("^extra%d$", i), Handler: noop})
 	}
 	bot.SetUnknownCommandHandler(func(_ context.Context, _ *Bot, _ *Message) {
 		miss.Add(1)

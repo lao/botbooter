@@ -27,12 +27,12 @@ func TestOverload_SequentialDriver_HeadOfLineBlocking(t *testing.T) {
 	bot, a := loadtest.New()
 	var g loadtest.Gauge
 	var processed atomic.Int64
-	asserts.NoError(t, bot.HandleFunc("^msg$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
+	bot.HandleFunc("^msg$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
 		g.Enter()
 		time.Sleep(time.Millisecond) // stand in for slow work
 		g.Leave()
 		processed.Add(1)
-	}), "register handler")
+	})
 
 	ctx := context.Background()
 	asserts.NoError(t, bot.Connect(ctx), "connect")
@@ -62,12 +62,12 @@ func TestOverload_ConcurrentDriver_NoBackpressure(t *testing.T) {
 	var g loadtest.Gauge
 	var processed atomic.Int64
 	release := make(chan struct{})
-	asserts.NoError(t, bot.HandleFunc("^msg$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
+	bot.HandleFunc("^msg$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
 		g.Enter()
 		<-release // hold the slot until every worker is in flight
 		g.Leave()
 		processed.Add(1)
-	}), "register handler")
+	})
 
 	ctx := context.Background()
 	asserts.NoError(t, bot.Connect(ctx), "connect")

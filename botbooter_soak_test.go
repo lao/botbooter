@@ -21,9 +21,9 @@ func TestSoak_ConcurrentDispatch_ExactCounts(t *testing.T) {
 	bot, a := loadtest.New()
 
 	var hits, miss atomic.Int64
-	asserts.NoError(t, bot.HandleFunc("^ping$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
+	bot.HandleFunc("^ping$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
 		hits.Add(1)
-	}), "register ping handler")
+	})
 	bot.SetUnknownCommandHandler(func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
 		miss.Add(1)
 	})
@@ -54,13 +54,13 @@ func TestSoak_PanicHandlerDoesNotCorruptCounts(t *testing.T) {
 	bot, a := loadtest.New()
 
 	var ok, boom atomic.Int64
-	asserts.NoError(t, bot.HandleFunc("^ok$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
+	bot.HandleFunc("^ok$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
 		ok.Add(1)
-	}), "register ok handler")
-	asserts.NoError(t, bot.HandleFunc("^boom$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
+	})
+	bot.HandleFunc("^boom$", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
 		boom.Add(1)
 		panic("boom")
-	}), "register boom handler")
+	})
 
 	ctx := context.Background()
 	asserts.NoError(t, bot.Connect(ctx), "connect")

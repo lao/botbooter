@@ -21,8 +21,10 @@ import (
 	slackapi "github.com/slack-go/slack"
 
 	"github.com/lao/botbooter"
+	"github.com/lao/botbooter/discord"
 	"github.com/lao/botbooter/internal/asserts"
 	"github.com/lao/botbooter/internal/loadtest"
+	"github.com/lao/botbooter/slack"
 )
 
 type enduranceConfig struct {
@@ -108,11 +110,12 @@ func TestEndurance_Slack_SustainedConnection(t *testing.T) {
 	driverToken := requireEnv(t, "BOTBOOTER_SLACK_DRIVER_TOKEN")
 	channelID := requireEnv(t, "BOTBOOTER_SLACK_CHANNEL_ID")
 
-	bot := botbooter.InitAsSlackBot(appToken, botToken)
+	bot, err := slack.New(slack.Config{AppToken: appToken, BotToken: botToken})
+	asserts.NoError(t, err, "init slack SUT")
 	var recv atomic.Int64
-	asserts.NoError(t, bot.HandleFunc("^endurance", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
+	bot.HandleFunc("^endurance", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
 		recv.Add(1)
-	}), "register handler")
+	})
 
 	driver := slackapi.New(driverToken)
 	cfg := enduranceConfig{
@@ -149,13 +152,13 @@ func TestEndurance_Discord_SustainedConnection(t *testing.T) {
 	channelID := requireEnv(t, "BOTBOOTER_DISCORD_CHANNEL_ID")
 	driverAuth, driverIsUser := discordDriverAuth(t)
 
-	bot, err := botbooter.InitAsDiscordBot(sutToken)
+	bot, err := discord.New(sutToken)
 	asserts.NoError(t, err, "init discord SUT")
 
 	var recv atomic.Int64
-	asserts.NoError(t, bot.HandleFunc("^endurance", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
+	bot.HandleFunc("^endurance", func(_ context.Context, _ *botbooter.Bot, _ *botbooter.Message) {
 		recv.Add(1)
-	}), "register handler")
+	})
 
 	driver, err := discordgo.New(driverAuth)
 	asserts.NoError(t, err, "init discord driver")

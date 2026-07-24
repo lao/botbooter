@@ -1,35 +1,48 @@
-// Package botbooter is a small framework for building chat bots that behave the
-// same way across Slack, Discord, Telegram, WhatsApp and a local CLI. It is a
-// thin facade over the internal packages, so consumers keep a single import path.
+// Package botbooter holds the platform-agnostic shared types for building chat
+// bots that behave the same way across Slack, Discord, Telegram, WhatsApp,
+// Microsoft Teams, GitHub and a local CLI.
+//
+// This package is SDK-free: it imports no platform SDK and only re-exports the
+// shared types from internal/core. Construct a bot from one of the per-platform
+// packages — botbooter/slack, botbooter/discord, botbooter/telegram,
+// botbooter/whatsapp/cloud, botbooter/whatsapp/whatsmeow, botbooter/teams,
+// botbooter/github or botbooter/cli — each of which pulls in only its own
+// platform SDK (WhatsApp Cloud API and Teams speak REST APIs over plain HTTP
+// and need none; GitHub pulls google/go-github plus bradleyfalzon/ghinstallation
+// for GitHub App auth), then drive it through the shared types re-exported here.
+// A bot that uses one platform never compiles the other platforms' SDKs into
+// its binary.
+//
+// WhatsApp comes in two flavors selected by import path: whatsapp/cloud (Meta
+// Cloud API webhook, needs a Meta Business account and a public HTTPS URL) and
+// whatsapp/whatsmeow (WhatsApp Web multidevice protocol via whatsmeow, QR-linked
+// to a phone, no Meta account or webhook needed).
+//
+// Every type here is a re-exported alias of its [internal/core] counterpart, so
+// the full method and field documentation lives on the core types (pkg.go.dev
+// resolves the [core.Bot]-style links to them). The summaries below capture the
+// contracts most consumers need from the public import path.
 package botbooter
 
-import (
-	"context"
-	"io"
+import "github.com/lao/botbooter/internal/core"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
-	slackapi "github.com/slack-go/slack"
-	"github.com/slack-go/slack/slackevents"
-	"github.com/slack-go/slack/socketmode"
-
-	"github.com/lao/botbooter/internal/cli"
-	"github.com/lao/botbooter/internal/core"
-	"github.com/lao/botbooter/internal/discord"
-	"github.com/lao/botbooter/internal/slack"
-	"github.com/lao/botbooter/internal/telegram"
-	"github.com/lao/botbooter/internal/whatsapp"
-)
-
-// Errors returned by [Bot] methods and platform helpers.
+// Errors returned by [Bot] methods.
 var (
 	ErrUnknownBotType   = core.ErrUnknownBotType
 	ErrAlreadyConnected = core.ErrAlreadyConnected
-	// ErrMissingWhatsAppConfig is returned by InitAsWhatsAppBot when a required
-	// WhatsAppConfig field is empty.
-	ErrMissingWhatsAppConfig = whatsapp.ErrMissingConfig
-	ErrNotTelegramBot        = telegram.ErrNotTelegramBot
+	ErrNilMessage       = core.ErrNilMessage
+)
+
+// Errors returned by [Bot.HandleFlow]; check them with errors.Is.
+var (
+	ErrFlowNil               = core.ErrFlowNil
+	ErrFlowEmptyID           = core.ErrFlowEmptyID
+	ErrFlowNoSteps           = core.ErrFlowNoSteps
+	ErrFlowEmptyStepKey      = core.ErrFlowEmptyStepKey
+	ErrFlowEmptyStepPrompt   = core.ErrFlowEmptyStepPrompt
+	ErrFlowDuplicateKey      = core.ErrFlowDuplicateKey
+	ErrFlowNoOnComplete      = core.ErrFlowNoOnComplete
+	ErrFlowAlreadyRegistered = core.ErrFlowAlreadyRegistered
 )
 
 // BotType identifies the messaging platform a [Bot] is connected to.
@@ -42,15 +55,26 @@ const (
 	CLIBotType      = core.CLIBotType
 	TelegramBotType = core.TelegramBotType
 	WhatsAppBotType = core.WhatsAppBotType
+	TeamsBotType    = core.TeamsBotType
+	// WhatsMeowBotType is the WhatsApp Web (whatsmeow) flavor; WhatsAppBotType is
+	// the Meta Cloud API flavor.
+	WhatsMeowBotType = core.WhatsMeowBotType
+	GitHubBotType    = core.GitHubBotType
 )
 
 type (
-	// Bot is the platform-agnostic chat bot. See [core.Bot].
+	// Bot is the platform-agnostic chat bot. Register every command handler,
+	// middleware, flow (HandleFlow) and reaction handler BEFORE calling Connect
+	// or Run; registering after Connect races the dispatch goroutine. After
+	// Connect, Connect/Run/Disconnect/Send are safe to call concurrently. See
+	// [core.Bot].
 	Bot = core.Bot
-	// Message is an incoming message handed to handlers. See [core.Message].
+	// Message is an incoming message handed to handlers. UserID, ChannelID and
+	// Content are always set; the other normalized fields (AuthorName, ReplyToID,
+	// Timestamp, MentionedUserIDs) are best-effort per platform, and Raw carries
+	// the platform's untouched event for the matching typed accessor. See
+	// [core.Message].
 	Message = core.Message
-	// CLIMessage is the raw payload of a CLI message. See [core.CLIMessage].
-	CLIMessage = core.CLIMessage
 	// Command pairs a regexp pattern with a handler. See [core.Command].
 	Command = core.Command
 	// Attachment is a platform-agnostic file attachment. See [core.Attachment].
@@ -59,82 +83,38 @@ type (
 	CommandHandler = core.CommandHandler
 	// Middleware wraps message dispatch. See [core.Middleware].
 	Middleware = core.Middleware
-	// WhatsAppMessage is the parsed payload of a WhatsApp message. See [whatsapp.Message].
-	WhatsAppMessage = whatsapp.Message
-	// WhatsAppMedia identifies media attached to a WhatsApp message. See [whatsapp.Media].
-	WhatsAppMedia = whatsapp.Media
-	// WhatsAppConfig configures a WhatsApp Cloud API bot. See [whatsapp.Config].
-	WhatsAppConfig = whatsapp.Config
+
+	// Flow is a declarative multi-step conversational dialog. See [core.Flow].
+	Flow = core.Flow
+	// Answers is the read-only set of answers collected by a flow. See [core.Answers].
+	Answers = core.Answers
+	// AskOption configures a flow step (see [Validate], [Secret]). See [core.AskOption].
+	AskOption = core.AskOption
+
+	// Reaction is an emoji reaction added to a message. See [core.Reaction].
+	Reaction = core.Reaction
+	// ReactionHandler handles a reaction. See [core.ReactionHandler].
+	ReactionHandler = core.ReactionHandler
+	// SendOption modifies a send. See [core.SendOption].
+	SendOption = core.SendOption
 )
 
-// InitAsSlackBot creates a Slack bot that connects via Socket Mode.
-func InitAsSlackBot(appToken, botToken string) *Bot {
-	return slack.New(appToken, botToken)
-}
+// NewFlow starts building a multi-step conversational [Flow] with the given
+// stable id, registered via [Bot.HandleFlow]. See [core.NewFlow].
+func NewFlow(id string) *Flow { return core.NewFlow(id) }
 
-// InitAsDiscordBot creates a Discord bot that connects via the Gateway.
-func InitAsDiscordBot(token string) (*Bot, error) {
-	return discord.New(token)
-}
+// Validate attaches a validator to a flow step; a non-nil error re-prompts the
+// step. See [core.Validate].
+func Validate(fn func(string) error) AskOption { return core.Validate(fn) }
 
-// InitAsTelegramBot creates a Telegram bot that connects via the Bot API.
-func InitAsTelegramBot(token string) (*Bot, error) {
-	return telegram.New(token)
-}
+// Secret marks a flow step's answer sensitive: kept out of framework logs and any
+// future serialized Store state. It is not encryption. See [core.Secret].
+func Secret() AskOption { return core.Secret() }
 
-// InitAsCLIBot creates a local CLI bot.
-func InitAsCLIBot(in io.Reader, out io.Writer) *Bot {
-	return cli.New(in, out)
-}
+// InReplyTo anchors a send on m so the adapter posts into m's thread or
+// reply-chain, deriving the correct per-platform anchor. See [core.InReplyTo].
+func InReplyTo(m *Message) SendOption { return core.InReplyTo(m) }
 
-// InitAsWhatsAppBot creates a WhatsApp bot backed by the Meta Cloud API. It runs
-// an inbound webhook HTTP server at cfg.Addr, so put a TLS-terminating proxy in
-// front and register the public HTTPS URL in Meta's webhook settings. Inbound
-// media arrives as an id in Attachment.ExtraData (not a URL); resolve the bytes
-// with GET /{media-id} using your access token. It returns an error if a
-// required config field is missing.
-func InitAsWhatsAppBot(cfg WhatsAppConfig) (*Bot, error) {
-	return whatsapp.New(cfg)
-}
-
-// DiscordRawEvent returns the raw Discord event carried on m, reporting whether m originated from Discord.
-func DiscordRawEvent(m *Message) (*discordgo.MessageCreate, bool) { return discord.RawEvent(m) }
-
-// SlackRawEvent returns the raw Slack event carried on m, reporting whether m originated from Slack.
-func SlackRawEvent(m *Message) (*slackevents.MessageEvent, bool) { return slack.RawEvent(m) }
-
-// TelegramRawEvent returns the raw Telegram update carried on m, reporting whether m originated from Telegram.
-func TelegramRawEvent(m *Message) (*models.Update, bool) { return telegram.RawUpdate(m) }
-
-// CLIRawEvent returns the parsed CLI line carried on m, reporting whether m originated from the CLI adapter.
-func CLIRawEvent(m *Message) (*CLIMessage, bool) { return cli.RawData(m) }
-
-// WhatsAppRawEvent returns the parsed WhatsApp message carried on m, reporting
-// whether m originated from WhatsApp. AuthorName and Timestamp on the returned
-// value are enriched, not present in its Raw JSON.
-func WhatsAppRawEvent(m *Message) (*WhatsAppMessage, bool) { return whatsapp.RawMessage(m) }
-
-// DiscordSession returns the discordgo session backing b, or nil if b is not a Discord bot.
-func DiscordSession(b *Bot) *discordgo.Session { return discord.Session(b) }
-
-// SlackClient returns the Slack Web API client backing b, or nil if b is not a Slack bot.
-func SlackClient(b *Bot) *slackapi.Client { return slack.Client(b) }
-
-// SlackSocketClient returns the Socket Mode client backing b, or nil if b is not a Slack bot.
-func SlackSocketClient(b *Bot) *socketmode.Client { return slack.SocketClient(b) }
-
-// TelegramClient returns the go-telegram bot client backing b, or nil if b is not a Telegram bot.
-func TelegramClient(b *Bot) *bot.Bot { return telegram.Client(b) }
-
-// TelegramResolveAttachmentURL resolves a downloadable URL for a Telegram
-// attachment via the Bot API getFile method. The returned URL embeds the bot
-// token in plaintext — treat it as secret and do not log it. It returns [ErrNotTelegramBot] if b is not
-// a Telegram bot, and ("", nil) if att carries no Telegram file id.
-func TelegramResolveAttachmentURL(ctx context.Context, b *Bot, att Attachment) (string, error) {
-	return telegram.ResolveAttachmentURL(ctx, b, att)
-}
-
-// TelegramEnvSuppressURLWarning names the environment variable that silences the
-// plaintext-token warning [TelegramResolveAttachmentURL] logs on every
-// successful resolve. Set it to any non-empty value to opt out.
-const TelegramEnvSuppressURLWarning = telegram.EnvSuppressURLWarning
+// WithThreadID anchors a send on a raw native id the adapter uses verbatim; it
+// takes precedence over [InReplyTo]. See [core.WithThreadID].
+func WithThreadID(id string) SendOption { return core.WithThreadID(id) }

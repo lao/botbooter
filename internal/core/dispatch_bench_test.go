@@ -16,9 +16,7 @@ func benchBot(numCommands, numMiddleware int, matchFirst bool) (*Bot, *Message) 
 	b := New(CLIBotType, nil)
 	noop := func(_ context.Context, _ *Bot, _ *Message) {}
 	for i := 0; i < numCommands; i++ {
-		if err := b.AddHandler(Command{Pattern: fmt.Sprintf("^cmd%04d$", i), Handler: noop}); err != nil {
-			panic(err)
-		}
+		b.AddHandler(Command{Pattern: fmt.Sprintf("^cmd%04d$", i), Handler: noop})
 	}
 	b.SetUnknownCommandHandler(noop)
 	for i := 0; i < numMiddleware; i++ {

@@ -44,7 +44,7 @@ func (a *Adapter) Connect(_ context.Context, deps core.AdapterDeps) error {
 func (a *Adapter) Disconnect() error { return nil }
 
 // Send records the call and discards the message.
-func (a *Adapter) Send(_ context.Context, _, _ string) error {
+func (a *Adapter) Send(_ context.Context, _, _ string, _ core.SendOptions) error {
 	a.sends.Add(1)
 	return nil
 }
