@@ -113,7 +113,7 @@ func (a *adapter) clientOptions() []bot.Option {
 			a.log().Error("botbooter: telegram poll error", "err", err)
 		}),
 		bot.WithDebugHandler(func(format string, args ...any) {
-			a.log().Debug("botbooter: telegram: " + fmt.Sprintf(format, args...))
+			a.log().Debug("botbooter: telegram debug", "trace", fmt.Sprintf(format, args...))
 		}),
 	}
 }

@@ -389,22 +389,20 @@ Alternatives:
 ### Conversational flows — deferred work
 
 v1 flows are **linear, plain-text, in-memory and single-instance** (see the caveats
-under [Conversational flows](#conversational-flows)). The §-numbered references below
-point at the original [design spec](docs/specs/2026-06-30-conversational-flows-design.md),
-kept as the deferred-work index. The following each reuse the v1 engine with no state
-migration:
+under [Conversational flows](#conversational-flows)). The following deferred items each
+reuse the v1 engine with no state migration:
 
 1. **Branching.** Add via `Next func(Answers) string` (step id → next step id) or
    `AskIf(cond, …)`. The state already stores `Answers`, so branching needs no migration.
 2. **DM-only / mention-gated flows.** Requires a cross-platform `Message.IsDirect` (and/or
    "addressed to bot") signal that `Message` lacks today. Until then, channel scoping is
-   documented (§4), not enforced.
+   documented, not enforced.
 3. **Command allowlist during a flow.** An opt-in set of global commands (e.g. `help`) that
    pierce an active flow, instead of cancel/expiry being the only exits.
-4. **`Store`-backed persistence** (§5) and **§2 blocking `Ask`** (with the non-blocking
-   delivery + atomic-clear requirements already specified in §2).
+4. **`Store`-backed persistence** and **blocking `Ask`** (with non-blocking
+   delivery + atomic-clear requirements).
 5. **Multi-instance / horizontal scaling.** Gated on the shared `Store` (item 4) **plus** a
-   concurrency redesign — the §4 in-process striped locks must be replaced by store-level
+   concurrency redesign — the in-process striped locks must be replaced by store-level
    atomicity, because the validator is user Go code and cannot run inside a Redis
    transaction. Plan: **optimistic compare-and-swap** on the `Version` field — read
    `(state, version)` → run validator in Go → write only if `version` is unchanged; on
@@ -415,7 +413,7 @@ migration:
    rare dup. (b) Platform delivery constraints remain even with a shared store —
    **Discord** needs gateway **sharding** (one replica owns a conversation) to stop
    duplicate event delivery; **Telegram** must switch from getUpdates to **webhook** mode
-   (getUpdates is single-consumer). Until all of this lands, v1 is single-instance (§4, §5).
+   (getUpdates is single-consumer). Until all of this lands, v1 is single-instance.
 6. **Normalized validators.** `Validate(func(string) (string, error))` storing the parsed
    value, so `OnComplete` does not re-parse (e.g. `age` to int). v1 keeps the simpler
    `func(string) error` plus `Answers.Lookup`.

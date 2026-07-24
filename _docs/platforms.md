@@ -112,11 +112,13 @@ bot, err := discord.New(os.Getenv("DISCORD_BOT_TOKEN"))
 |---|---|
 | `DISCORD_BOT_TOKEN` | bot token from step 1 |
 
-**Reactions.** The constructor requests the message-reaction gateway intents,
-but they must **also** be enabled for the app in the Discord developer portal
-(*Bot → Privileged Gateway Intents*) for `bot.OnReaction` to fire. The adapter
-drops reactions from bot users in guilds; DM reactions carry no member record,
-so a bot reactor in a DM is not filtered.
+**Reactions.** The constructor requests the
+[`GUILD_MESSAGE_REACTIONS` and `DIRECT_MESSAGE_REACTIONS`](https://discord.com/developers/docs/events/gateway#list-of-intents)
+gateway intents so `bot.OnReaction` fires. Unlike the Message Content Intent
+above, these are **standard** (non-privileged) intents — requested in code, with
+no toggle to flip in the developer portal. The adapter drops reactions from bot
+users in guilds; DM reactions carry no member record, so a bot reactor in a DM is
+not filtered.
 
 **Official docs:** [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway) · [What are Privileged Intents?](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents)
 

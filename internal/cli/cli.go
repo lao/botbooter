@@ -1,11 +1,11 @@
 // Package cli is the local CLI adapter for botbooter. It implements core.Adapter.
 //
 // Security: this adapter is for trusted local input only. parseMessage treats
-// any whitespace-separated token that names an existing local file as an
-// attachment and opens it to sniff its content type, so a message can cause the
-// process to read arbitrary files the operator can access. Wire it only to a
-// trusted local source (an operator's terminal); never feed it network or
-// otherwise untrusted data.
+// any path-like token — one containing a slash or a dot — that names an existing
+// local file as an attachment and opens it to sniff its content type, so a
+// message can cause the process to read arbitrary files the operator can access.
+// Wire it only to a trusted local source (an operator's terminal); never feed it
+// network or otherwise untrusted data.
 package cli
 
 import (
@@ -43,10 +43,10 @@ func newAdapter(in io.Reader, out io.Writer) *adapter {
 // New creates a CLI bot backed by the given reader and writer. A nil in or out
 // defaults to os.Stdin or os.Stdout respectively.
 //
-// The reader must carry trusted local input only: any token that names an
-// existing local file is opened as an attachment, so untrusted input can make
-// the process read arbitrary accessible files. Never back it with a network or
-// otherwise untrusted source.
+// The reader must carry trusted local input only: any path-like token (one
+// containing a slash or a dot) that names an existing local file is opened as an
+// attachment, so untrusted input can make the process read arbitrary accessible
+// files. Never back it with a network or otherwise untrusted source.
 func New(in io.Reader, out io.Writer) *core.Bot {
 	return core.New(core.CLIBotType, newAdapter(in, out))
 }

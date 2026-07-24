@@ -81,8 +81,10 @@ func registerSignup(b *botbooter.Bot) error {
 		Ask("email", "What's your email?", botbooter.Validate(validEmail)).
 		Ask("password", "Choose a password.", botbooter.Secret()).
 		OnComplete(func(ctx context.Context, bot *botbooter.Bot, m *botbooter.Message, a botbooter.Answers) {
-			// In a real bot this would create the account; the password is never logged.
-			log.Printf("signup complete: name=%q email=%q", a.Get("name"), a.Get("email"))
+			// In a real bot this would create the account. User PII (name, email)
+			// is kept out of the log by default — like the password; add explicit,
+			// audited logging if you need it.
+			log.Printf("signup complete")
 			if err := bot.SendMessageContext(ctx, m.ChannelID, "You're all set 🎉"); err != nil {
 				log.Println("failed to send completion message:", err)
 			}
@@ -96,6 +98,8 @@ func registerSignup(b *botbooter.Bot) error {
 	return b.HandleFlow("^signup$", signup)
 }
 
+// validEmail is a deliberately minimal, illustrative check — not a real email
+// validator. A production bot would use a proper parser (e.g. net/mail.ParseAddress).
 func validEmail(s string) error {
 	if !strings.Contains(s, "@") {
 		return errors.New("that doesn't look like an email — try again")
