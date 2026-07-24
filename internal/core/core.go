@@ -456,7 +456,11 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// in-memory flow state itself is per-Bot and survives a transient reconnect;
 	// only background sweeping pauses for that window (lazy expiry still applies).
 	// Gated on registered flows so a bot that never calls HandleFlow spins up no
-	// background goroutine.
+	// background goroutine. This gate is read once at Connect: a flow registered
+	// AFTER Connect still dispatches (composeDispatchChain's advance reads b.flows
+	// live) but gets no background sweeper until the next reconnect, so its expired
+	// state is only lazily reaped on the user's next message. Flows, like
+	// middleware, are meant to be registered before Connect.
 	//
 	// teardown cancels the old connection's runCtx but does not wait for its
 	// sweeper to observe cancellation and exit (production teardown never blocks
