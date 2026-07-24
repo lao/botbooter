@@ -137,11 +137,14 @@ func (f *Flow) CancelWord(word string) *Flow {
 // empty or rejected answer — since any message counts as engagement. (Some adapters
 // drop attachment-less "service" messages — stickers, locations, member joins —
 // before the engine, so those neither answer a step nor slide the deadline.) Only
-// going quiet past the TTL lets the flow expire. A non-positive d is ignored and the
-// default applies — there is no "disable timeout" in v1 (an unbounded flow would
-// leak in-memory state).
+// going quiet past the TTL lets the flow expire. A non-positive d is ignored,
+// leaving any previously set timeout in place (or the 10m default when none was
+// set) — there is no "disable timeout" in v1 (an unbounded flow would leak
+// in-memory state).
 func (f *Flow) Timeout(d time.Duration) *Flow {
-	f.timeout = d
+	if d > 0 {
+		f.timeout = d
+	}
 	return f
 }
 
