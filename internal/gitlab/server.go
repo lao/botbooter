@@ -86,9 +86,11 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 }
 
 // validToken constant-time-compares the X-Gitlab-Token header against the
-// configured secret. ConstantTimeCompare returns 0 on a length mismatch, so an
-// empty or absent header is rejected without leaking the secret's length via
-// timing.
+// configured secret, so a wrong header of the right length cannot be recovered
+// byte by byte from response timing. ConstantTimeCompare short-circuits to 0 on
+// a length mismatch — that comparison is not constant-time, so the secret's
+// length remains observable; only its bytes are protected. An empty or absent
+// header takes that path and is rejected.
 func (a *adapter) validToken(r *http.Request) bool {
 	got := r.Header.Get(tokenHeader)
 	return subtle.ConstantTimeCompare([]byte(got), []byte(a.cfg.Secret)) == 1

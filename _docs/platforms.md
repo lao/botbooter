@@ -673,7 +673,10 @@ note visible to everyone who can see that issue.
 
 Every authentic delivery is acked `200` — *before* dispatch, and also when it is
 dropped, unreadable (over the body cap, or truncated) or shed under a
-concurrency bound; each of those drops is logged. GitLab **never re-delivers a
+concurrency bound. An unreadable or unparseable body and a shed delivery are
+logged as warnings; the filtered drops above (system, internal, edited and
+self-authored notes, commit and snippet comments, events with no callback set)
+are silent. GitLab **never re-delivers a
 failed webhook** and counts `4xx` and `5xx` alike toward auto-disabling it
 (temporarily after four consecutive failures, with backoff up to 24 h;
 permanently after forty), so a non-200 would lose that delivery *and* suppress
