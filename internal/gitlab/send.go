@@ -83,9 +83,10 @@ func validSegment(s string) bool {
 }
 
 // Send posts text as a note on the issue or merge request identified by
-// channelID. SendOptions is ignored — issue and merge-request note threads are
-// flat for the reply path (a note already lands in the originating
-// conversation), so v1 does not implement threaded replies. API errors are
+// channelID. SendOptions is ignored — a plain note already lands in the
+// originating conversation, and threading it into the discussion the note came
+// from (via the payload's discussion_id and the discussions API) is a
+// deliberate v1 omission, so v1 always posts a top-level note. API errors are
 // %w-wrapped, so callers can unwrap client-go's typed errors with errors.As.
 func (a *adapter) Send(ctx context.Context, channelID, text string, _ core.SendOptions) error {
 	project, iid, kind, err := parseChannelID(channelID)

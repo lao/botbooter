@@ -767,7 +767,7 @@ Two options carry the anchor:
 | **WhatsApp (Web / whatsmeow)** | — (options ignored) | — | — | always a plain channel send (quoted replies are a possible follow-up) |
 | **Teams** | — (options ignored) | — | — | always a plain channel send |
 | **GitHub** | — (options ignored) | — | — | always a plain issue comment (issue comment threads are flat — a reply already lands in the conversation) |
-| **GitLab** | — (options ignored) | — | — | always a plain note (issue/MR note threads are flat — a reply already lands in the conversation) |
+| **GitLab** | — (options ignored) | — | — | always a plain note (threading via GitLab discussions — the payload's `discussion_id` — is a deliberate v1 omission) |
 | **CLI** | — (options ignored) | — | — | always a plain channel send |
 
 The reply anchor assumes you send to the message's **own channel**; e.g. a

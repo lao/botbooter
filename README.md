@@ -149,7 +149,7 @@ bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botboote
 
 For a raw, platform-specific anchor there's **`botbooter.WithThreadID(id)`** — the adapter uses the string verbatim (a Slack `thread_ts`, or a reply/quote message id elsewhere) and it wins over `InReplyTo`. You own platform-correctness with it. Per-platform anchor semantics, the precedence and fallback rules, and how `ReplyToID` vs `ID` are chosen are documented in [_docs/platforms.md](_docs/platforms.md#threaded-replies).
 
-Fallback is automatic and safe: **Teams**, **GitHub** and **GitLab** (issue/MR comment threads are flat — a reply already lands in the conversation) and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send. **Threading never adds a failure mode** — it can only make a send that would have succeeded land in a thread; the send can still fail for the ordinary reasons any send can (no adapter, a `nil` message to `Reply`, or a platform/transport error the underlying send surfaces).
+Fallback is automatic and safe: **Teams**, **GitHub** (issue comment threads are flat — a reply already lands in the conversation), **GitLab** (a note already lands in the conversation; threading it into a GitLab discussion is a deliberate v1 omission) and **CLI** ignore the options (every send is plain), and an anchor that resolves to nothing degrades to a plain send. **Threading never adds a failure mode** — it can only make a send that would have succeeded land in a thread; the send can still fail for the ordinary reasons any send can (no adapter, a `nil` message to `Reply`, or a platform/transport error the underlying send surfaces).
 
 ### Conversational flows
 
