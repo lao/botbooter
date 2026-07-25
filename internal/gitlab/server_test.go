@@ -108,18 +108,6 @@ const (
     "author_id": 58, "system": false, "action": "create", "internal": true},
   "issue": {"iid": 17, "confidential": true}
 }`
-	// The same internal note on the same confidential issue, from an instance that
-	// predates the notes column's confidential -> internal rename and so sends the
-	// flag under the old key.
-	preRenameInternalNoteOnConfidentialIssue = `{
-  "object_kind": "note",
-  "event_type": "confidential_note",
-  "user": {"id": 58, "username": "octocat"},
-  "project": {"path_with_namespace": "acme/widgets"},
-  "object_attributes": {"id": 31, "note": "/deploy staging", "noteable_type": "Issue",
-    "author_id": 58, "system": false, "action": "create", "confidential": true},
-  "issue": {"iid": 17, "confidential": true}
-}`
 	// An internal note flagged on a merge request, where the noteable can never be
 	// confidential.
 	internalNoteOnMerge = `{
@@ -257,16 +245,15 @@ func TestHandleWebhook_DropsInternalNoteOnVisibleNoteable(t *testing.T) {
 
 // An internal note on a *confidential* issue is the delivery the noteable cannot
 // discriminate: it carries the same trigger and the same issue.confidential as a
-// regular comment there. The note's own internal flag settles it, under either
-// spelling, so a plain reply never publishes an internal thread to everyone who
-// can see the issue.
+// regular comment there. Only the note's own object_attributes.internal flag
+// settles it, so on GitLab 18.6+ (the first release that sends the flag) a plain
+// reply never publishes an internal thread to everyone who can see the issue.
 func TestHandleWebhook_DropsFlaggedInternalNote(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload string
 	}{
 		{"ConfidentialIssue", internalNoteOnConfidentialIssue},
-		{"ConfidentialIssuePreRenameFlag", preRenameInternalNoteOnConfidentialIssue},
 		{"MergeRequest", internalNoteOnMerge},
 	}
 	for _, tc := range cases {

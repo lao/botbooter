@@ -113,15 +113,16 @@ func (a *adapter) validToken(r *http.Request) bool {
 // Hook. GitLab picks that trigger when the note is internal *or* its noteable is
 // confidential, and Send can only create a plain note, so answering an internal
 // note would publish the internal thread. Internal notes are therefore dropped by
-// two filters: the note's own internal flag (side-parsed by internalNote — GitLab
-// sends it, client-go's typed events do not expose it), and the noteable's
-// confidentiality as the fallback for a payload that omits the flag, where a
-// confidential-trigger note on a non-confidential noteable is internal by
-// elimination. A note on a confidential issue is dispatched — the reply inherits
-// the issue's restricted audience. That leaves one gap the payload cannot close:
-// an internal note on a confidential issue whose delivery carries neither
-// spelling of the flag is indistinguishable from a regular comment there, and
-// dispatches.
+// two filters: the note's own internal flag (side-parsed by internalNote — only
+// GitLab 18.6+ sends it, and client-go's typed events do not expose it), and the
+// noteable's confidentiality, where a confidential-trigger note on a
+// non-confidential noteable is internal by elimination. A note on a confidential
+// issue is dispatched — the reply inherits the issue's restricted audience.
+//
+// The noteable filter is therefore the only one a pre-18.6 instance has, and it
+// cannot see past a confidential issue: there, an internal note looks exactly
+// like a regular comment and is dispatched, so the plain reply reaches everyone
+// who can see the issue. That is the general case below 18.6, not a rare edge.
 func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter, payload []byte, deps core.AdapterDeps, confidentialTrigger bool) {
 	parsed, err := gogitlab.ParseWebhook(gogitlab.EventTypeNote, payload)
 	if err != nil {
@@ -152,29 +153,28 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 	}
 }
 
-// internalNote reports the note's own internal flag. GitLab ships it in every
-// note delivery (it is in the hook builder's safe-attribute list), but
-// client-go's typed note events do not expose the field, so it is side-parsed
-// off the raw payload — which handleNote has already parsed once, so a failure
-// here means the flag is simply not there. Both spellings are read: the note's
-// column was named "confidential" before it was renamed "internal", and an
-// instance old enough to predate the rename (which Config.BaseURL explicitly
-// targets) sends the same flag under the old key.
+// internalNote reports the note's own object_attributes.internal flag, which
+// client-go's typed note events do not expose, so it is side-parsed off the raw
+// payload — which handleNote has already parsed once, so a failure here means the
+// flag is simply not there.
 //
-// An absent or unparseable flag reads false and leaves handleNote's noteable
-// discriminator in charge, so an instance whose payload predates both spellings
-// keeps exactly the behaviour it had before the flag was read.
+// GitLab only added "internal" to the note hook's safe-attribute list in 18.6
+// (lib/gitlab/hook_data/note_builder.rb); every release before that omits it, and
+// no release has ever sent the note's pre-rename "confidential" spelling there —
+// the only "confidential" key in a note delivery belongs to the noteable, and
+// reading it would drop ordinary comments on confidential issues. So on a
+// pre-18.6 instance this reads false and handleNote's noteable discriminator does
+// all the work, exactly as it did before the flag was read.
 func internalNote(payload []byte) bool {
 	var note struct {
 		ObjectAttributes struct {
-			Internal     bool `json:"internal"`
-			Confidential bool `json:"confidential"` // pre-rename spelling of Internal
+			Internal bool `json:"internal"`
 		} `json:"object_attributes"`
 	}
 	if err := json.Unmarshal(payload, &note); err != nil {
 		return false
 	}
-	return note.ObjectAttributes.Internal || note.ObjectAttributes.Confidential
+	return note.ObjectAttributes.Internal
 }
 
 // dropComment reports whether a note must be ignored: a system note (an
@@ -190,8 +190,16 @@ func internalNote(payload []byte) bool {
 // treated as a create — dropping only a *known* non-create action — so the core
 // comment path is not silently blackholed on those instances. The system, self
 // and internal filters still apply regardless.
+//
+// Filtered drops are silent, with one exception: the internal-note drop logs at
+// Debug, because an acked 200 with no reply is otherwise indistinguishable from a
+// broken handler and the reason is invisible in the payload the operator can see.
 func (a *adapter) dropComment(system, internal bool, action gogitlab.CommentEventAction, authorID int64) bool {
-	return system || internal || (action != "" && action != gogitlab.CommentEventActionCreate) || a.isSelfUser(authorID)
+	if internal {
+		a.log().Debug("gitlab: dropping internal note; a plain reply would widen its audience")
+		return true
+	}
+	return system || (action != "" && action != gogitlab.CommentEventActionCreate) || a.isSelfUser(authorID)
 }
 
 // handleMerge routes a Merge Request Hook to cfg.OnMergeRequest. Parsing happens
