@@ -49,13 +49,18 @@ const (
 
 	// The endpoint is public and each delivery is buffered whole before it is
 	// parsed, so the body cap bounds attacker-controllable buffering. The
-	// effective cap is chosen per adapter by requestByteLimit: Note payloads (the
-	// core path) are tens of KB, so a bot that handles only them caps at
-	// smallRequestBytes and never buffers megabytes it cannot use; Merge Request
-	// and Push deliveries (many commits, large descriptions) can be much larger,
-	// so a bot that registers OnMergeRequest/OnPush raises the cap to
-	// largeRequestBytes — it has opted into large events and the memory cost.
-	smallRequestBytes = 1 << 20  // 1 MiB (Note and unhandled events)
+	// effective cap is chosen per adapter by requestByteLimit. A Note payload
+	// carries the note plus the whole noteable, and GitLab caps a note body at
+	// ~1M characters and an issue/merge-request description at 1 MiB, so a
+	// legitimate comment on a long issue can approach a few MiB once JSON
+	// escaping and the rest of the object are counted: smallRequestBytes sits
+	// above that worst case (a dropped comment cannot be recovered — GitLab does
+	// not re-deliver) while still keeping a comment-only bot far below the tens of
+	// megabytes a large event can carry. Merge Request and Push deliveries (many
+	// commits, many changed paths) can be much larger, so a bot that registers
+	// OnMergeRequest/OnPush raises the cap to largeRequestBytes — it has opted
+	// into large events and the memory cost.
+	smallRequestBytes = 4 << 20  // 4 MiB (Note and unhandled events)
 	largeRequestBytes = 25 << 20 // 25 MiB (large Merge Request / Push deliveries)
 
 	// maxConcurrentReads bounds concurrent inbound processing (the body read +

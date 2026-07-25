@@ -458,7 +458,7 @@ func TestHandleWebhook_LargePushWithinCap(t *testing.T) {
 	a, err := newAdapter(cfg)
 	asserts.NoError(t, err, "new adapter")
 
-	pad := strings.Repeat("a", 2<<20) // 2 MiB
+	pad := strings.Repeat("a", smallRequestBytes+1) // one byte past the comment-path cap
 	payload := `{"object_kind": "push", "ref": "refs/heads/main", "after": "def456",` +
 		` "project": {"path_with_namespace": "acme/widgets"}, "_pad": "` + pad + `"}`
 	asserts.True(t, len(payload) > smallRequestBytes, "payload exceeds the small cap")

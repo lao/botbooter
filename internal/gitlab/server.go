@@ -60,7 +60,11 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 		// The body is over a.maxRequestBytes or the delivery was truncated. Both
 		// are acked: the payload is unusable either way, and a 4xx would trade one
 		// lost delivery for the bot's whole ingress (see handleWebhook's doc).
-		a.log().Warn("gitlab: discarding webhook with unreadable body", "error", err, "cap", a.maxRequestBytes)
+		// Log the sizes alongside the cap: read == cap means the body was over it,
+		// read < cap means the delivery was cut short, and content_length (-1 when
+		// the delivery is chunked) names how big it claimed to be.
+		a.log().Warn("gitlab: discarding webhook with unreadable body",
+			"error", err, "cap", a.maxRequestBytes, "read", len(payload), "content_length", r.ContentLength)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
