@@ -795,6 +795,47 @@ func TestConnect_DoesNotBlockOnSelfResolution(t *testing.T) {
 	waitForSelfID(t, a, 777)
 }
 
+// A hung self-identity probe must time out on the adapter's own budget rather
+// than wait on the HTTP client. Config.HTTPClient is a supported knob, and a
+// consumer-supplied client need not set a Timeout; with a run context that has
+// no deadline, an unreachable-but-non-rejecting API would otherwise hang the
+// probe forever — listener bound, Serve never started, deps.Done never called,
+// so Run blocks with no error while GitLab's deliveries time out in the backlog.
+func TestConnect_SelfIdentityProbeTimesOut(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release // never answer /user within the probe's budget
+		_, _ = w.Write([]byte(`{"id": 777, "username": "bot-account"}`))
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	a, err := newAdapter(testConfig())
+	asserts.NoError(t, err, "new adapter")
+	// testClient carries no Timeout of its own — the same shape as a
+	// consumer-supplied Config.HTTPClient that omits one, so nothing but the
+	// adapter's own budget can bound the probe.
+	a.client = testClient(t, srv)
+	// Set before Connect reads it; no concurrent access.
+	a.selfResolveBudget = 50 * time.Millisecond
+
+	failed := make(chan error, 1)
+	// A run context with no deadline whose owner never calls Disconnect.
+	asserts.NoError(t, a.Connect(context.Background(), core.AdapterDeps{
+		Done:       func(err error) { failed <- err },
+		Disconnect: func() error { return nil },
+	}), "Connect is non-blocking; the timeout arrives via Done")
+	defer func() { _ = a.Disconnect() }()
+
+	select {
+	case err := <-failed:
+		asserts.Error(t, err, "a hung identity probe must surface via Done")
+		asserts.ErrorIs(t, err, context.DeadlineExceeded, "the probe's own budget bounded it")
+	case <-time.After(2 * time.Second):
+		t.Fatal("hung identity probe never surfaced via deps.Done")
+	}
+}
+
 // A non-default cfg.Path must actually route: the webhook lands on the custom
 // route and the default route no longer exists.
 func TestConnect_CustomPathRoutes(t *testing.T) {

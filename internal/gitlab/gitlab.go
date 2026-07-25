@@ -81,6 +81,17 @@ const (
 
 	shutdownTimeout = 5 * time.Second
 	drainTimeout    = 5 * time.Second
+
+	// selfResolveTimeout bounds the Connect-path GET /user probe so an
+	// unreachable-but-non-rejecting API surfaces as an error promptly. The default
+	// HTTPClient carries a 30s timeout, but Config.HTTPClient is a supported knob
+	// and a consumer-supplied client need not set one; combined with a run context
+	// that has no deadline and an owner that never calls Disconnect, the probe
+	// would otherwise hang forever — with the listener already bound, so GitLab's
+	// deliveries pile up in the accept backlog and time out while Serve never
+	// starts and Run never returns an error. Mirrors the Telegram adapter's
+	// getMeTimeout.
+	selfResolveTimeout = 15 * time.Second
 )
 
 // ErrMissingConfig is returned by New when a required Config field is empty.
@@ -176,6 +187,11 @@ type adapter struct {
 	// rather than the constant so a test can shorten it and exercise the
 	// deadline-reached path in milliseconds instead of seconds.
 	drainBudget time.Duration
+	// selfResolveBudget bounds the Connect-path self-identity probe. Fixed at New
+	// to selfResolveTimeout and never reassigned afterwards; a field for the same
+	// reason as drainBudget — a test can shorten it to exercise the timeout path
+	// without waiting out the real bound.
+	selfResolveBudget time.Duration
 }
 
 // requestByteLimit picks the inbound body cap: largeRequestBytes only when a
@@ -262,11 +278,12 @@ func newAdapter(cfg Config) (*adapter, error) {
 	}
 
 	return &adapter{
-		cfg:             cfg,
-		client:          client,
-		sem:             make(chan struct{}, maxConcurrentDispatch),
-		readSem:         make(chan struct{}, maxConcurrentReads),
-		maxRequestBytes: requestByteLimit(cfg),
-		drainBudget:     drainTimeout,
+		cfg:               cfg,
+		client:            client,
+		sem:               make(chan struct{}, maxConcurrentDispatch),
+		readSem:           make(chan struct{}, maxConcurrentReads),
+		maxRequestBytes:   requestByteLimit(cfg),
+		drainBudget:       drainTimeout,
+		selfResolveBudget: selfResolveTimeout,
 	}, nil
 }

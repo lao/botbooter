@@ -339,7 +339,14 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		// is handled before the bot can recognize its own notes. A bot that cannot
 		// recognize itself is a reply-loop hazard, so failure is fatal via
 		// deps.Done rather than silent at dispatch.
-		selfID, err := a.resolveSelf(ctx)
+		//
+		// The probe carries its own selfResolveBudget bound derived from ctx, so an
+		// unresponsive endpoint fails fast via Done instead of leaving the listener
+		// bound with Serve never started. cancel runs before serve (not deferred) so
+		// the timer is released rather than held for the server's lifetime.
+		probeCtx, cancel := context.WithTimeout(ctx, a.selfResolveBudget)
+		selfID, err := a.resolveSelf(probeCtx)
+		cancel()
 		if err != nil {
 			_ = ln.Close()        // Serve never runs, so nothing else closes it
 			if ctx.Err() == nil { // a canceled startup is a shutdown, not a failure
