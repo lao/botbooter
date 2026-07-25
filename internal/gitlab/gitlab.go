@@ -11,8 +11,9 @@
 // in-flight dispatch. Bind a local Addr, put a TLS-terminating proxy in front,
 // and register the public HTTPS URL as the project (or group) webhook URL, with
 // the Comments trigger enabled — and Confidential comments too, to also answer
-// on confidential issues/MRs — (plus Merge request and Push events when the
-// matching callback is set) and a Secret token.
+// on confidential issues (internal notes are dropped: the reply path can only
+// create a plain note) — (plus Merge request and Push events when the matching
+// callback is set) and a Secret token.
 //
 // Unlike GitHub (which signs the body with an HMAC), GitLab authenticates a
 // delivery with a plain X-Gitlab-Token header compared against Config.Secret, so
@@ -60,15 +61,17 @@ const (
 	// maxConcurrentReads bounds concurrent inbound processing (the body read +
 	// parse). Even though the token is verified before the body is read, a flood
 	// of authenticated large POSTs could each buffer the request cap; this caps
-	// peak read memory at maxConcurrentReads times the effective cap. A
-	// saturating burst is shed with 503 (the sender retries), so legitimate
-	// traffic is not dropped. It is separate from maxConcurrentDispatch because a
-	// read is short-lived while a dispatch goroutine may run a slow handler.
+	// peak read memory at maxConcurrentReads times the effective cap. A delivery
+	// arriving past the bound is logged and acked 200 without being read: GitLab
+	// never re-delivers it either way, and a 503 would additionally push the hook
+	// toward being auto-disabled. It is separate from maxConcurrentDispatch because
+	// a read is short-lived while a dispatch goroutine may run a slow handler.
 	maxConcurrentReads = 16
 
 	// maxConcurrentDispatch bounds in-flight webhook dispatch goroutines. A
-	// delivery that would exceed it is answered 503 (the sender retries) instead
-	// of spawning an unbounded goroutine under a flood.
+	// delivery that would exceed it is logged and acked 200 without dispatching
+	// (see ackAndDispatch), instead of spawning an unbounded goroutine under a
+	// flood.
 	maxConcurrentDispatch = 256
 
 	shutdownTimeout = 5 * time.Second
@@ -151,7 +154,8 @@ type adapter struct {
 	inflight atomic.Int64
 	// sem bounds concurrent webhook dispatch goroutines (see
 	// maxConcurrentDispatch). A non-blocking acquire before the ack turns a
-	// saturating flood into 503s instead of unbounded goroutines. Re-created per
+	// saturating flood into logged, acked drops instead of unbounded
+	// goroutines. Re-created per
 	// Connect and captured at acquire, so a slot that a context-ignoring handler
 	// never releases is confined to that one connection.
 	sem chan struct{}

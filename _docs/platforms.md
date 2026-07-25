@@ -607,9 +607,9 @@ On the project (*Settings → Webhooks → Add new webhook*) or on the group
   with `401` any request whose `X-Gitlab-Token` header does not match — checked
   *before* the body is read.
 - **Trigger**: *Comments*, plus *Confidential comments* to also answer on
-  confidential issues and merge requests (GitLab delivers those under a separate
-  trigger). Add *Merge request events* / *Push events* only if you set the
-  matching `Config` callback; every other enabled trigger is acked and ignored.
+  confidential issues (GitLab delivers those under a separate trigger). Add
+  *Merge request events* / *Push events* only if you set the matching `Config`
+  callback; every other enabled trigger is acked and ignored.
 
 #### Step 2, Run the bot
 
@@ -657,8 +657,29 @@ pipelines. `gitlab.Addr(bot)` reports the bound address when you bind `:0`.
 
 System notes (label/title changes and other automated activity) and edits are
 acked and dropped; commit and snippet comments have no reply target in v1 and
-are dropped too. Every delivery is acked `200` *before* dispatch so slow
-handlers cannot make GitLab disable the hook.
+are dropped too.
+
+**Internal notes are dropped.** GitLab routes a note to the *Confidential
+comments* trigger when the note is internal **or** its noteable is confidential,
+and the payload carries no flag of its own to tell the two apart. Since replies
+are always plain notes, answering an internal note on a visible issue or merge
+request would publish the internal thread — so those deliveries are acked and
+dropped, using the noteable as the discriminator: a comment on a **confidential
+issue** dispatches (the reply inherits the issue's restricted audience), while a
+note on a non-confidential issue, or on any merge request (merge requests cannot
+be confidential), does not. The residue: an internal note *on a confidential
+issue* is indistinguishable from a regular one, so it is answered with a plain
+note visible to everyone who can see that issue.
+
+Every authentic delivery is acked `200` — *before* dispatch, and also when it is
+dropped, unreadable (over the body cap, or truncated) or shed under a
+concurrency bound; each of those drops is logged. GitLab **never re-delivers a
+failed webhook** and counts `4xx` and `5xx` alike toward auto-disabling it
+(temporarily after four consecutive failures, with backoff up to 24 h;
+permanently after forty), so a non-200 would lose that delivery *and* suppress
+the ones after it. Slow handlers likewise cannot make GitLab disable the hook.
+The one exception is the `401` on a bad secret token — there, a disabled hook is
+the right outcome.
 
 **Environment variables** (suggested names; the config is plain Go):
 
@@ -673,18 +694,22 @@ handlers cannot make GitLab disable the hook.
 #### No response?
 
 - **`401` on every delivery** (webhook *Recent events* tab): the webhook's
-  secret token does not match `Secret`.
+  secret token does not match `Secret`. GitLab treats those as failures and will
+  auto-disable the hook rather than keep delivering, so fix the token and send a
+  test request to re-enable it.
 - **`200` but no reply**: the note's author is the bot itself (ignored by
-  design), the note was a system note or an edit, or no registered pattern
-  matched. Also check the startup log — if the token cannot resolve `GET /user`
-  the bot shuts down (a bot that cannot recognize itself would reply-loop).
+  design), the note was a system note, an edit or an internal note, or no
+  registered pattern matched. Check the bot's log — an oversized/truncated body
+  or a saturated concurrency bound is acked `200` and logged as a warning. Also
+  check the startup log — if the token cannot resolve `GET /user` the bot shuts
+  down (a bot that cannot recognize itself would reply-loop).
 - **Replies fail / `Send` errors**: the token lacks the `api` scope or the
   Reporter role on that project. A malformed channel id unwraps as
   `gitlab.ErrBadChannelID` with `errors.Is`.
 - **Endpoint never hit**: the webhook URL must be your public
   `https://…/webhook` and reach `Addr` through the proxy; only `POST` is
-  accepted on the route. Confidential issues/MRs need the *Confidential
-  comments* trigger, not just *Comments*.
+  accepted on the route. Confidential issues need the *Confidential comments*
+  trigger, not just *Comments*.
 
 **Official docs:** [Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/) · [Comment events](https://docs.gitlab.com/user/project/integrations/webhook_events/#comment-events) · [Personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/) · [Notes API](https://docs.gitlab.com/api/notes/) · [ngrok](https://ngrok.com/download)
 

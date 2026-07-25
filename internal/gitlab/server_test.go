@@ -85,6 +85,18 @@ const (
   "user_id": 58, "user_username": "octocat",
   "project": {"path_with_namespace": "acme/widgets"}
 }`
+	// A comment on a confidential issue: GitLab delivers it on the Confidential
+	// Note Hook trigger with issue.confidential set, and the reply inherits the
+	// issue's restricted audience, so it dispatches.
+	confidentialIssueNote = `{
+  "object_kind": "note",
+  "event_type": "confidential_note",
+  "user": {"id": 58, "username": "octocat"},
+  "project": {"path_with_namespace": "acme/widgets"},
+  "object_attributes": {"id": 30, "note": "/deploy staging", "noteable_type": "Issue",
+    "author_id": 58, "system": false, "action": "create"},
+  "issue": {"iid": 17, "confidential": true}
+}`
 	pingEvent = `{"event_name": "push"}`
 	// Pre-16.11 GitLab (and older self-hosted) omit object_attributes.action on
 	// note deliveries entirely; an absent action must be treated as a create.
@@ -162,7 +174,7 @@ func TestHandleWebhook_DispatchesIssueComment(t *testing.T) {
 	asserts.True(t, raw.IssueComment != nil, "issue-comment raw set")
 }
 
-// A comment on a confidential issue/MR arrives under the separate "Confidential
+// A comment on a confidential issue arrives under the separate "Confidential
 // Note Hook" trigger but is shaped identically, so it must dispatch like a plain
 // note rather than being dropped as an unknown event.
 func TestHandleWebhook_DispatchesConfidentialNote(t *testing.T) {
@@ -171,11 +183,41 @@ func TestHandleWebhook_DispatchesConfidentialNote(t *testing.T) {
 	var got []*core.Message
 	done := make(chan struct{}, 1)
 
-	a.handleWebhook(context.Background(), httptest.NewRecorder(), webhookRequest("hook-secret", "Confidential Note Hook", issueNoteCreated), captureDeps(&got, done))
+	a.handleWebhook(context.Background(), httptest.NewRecorder(), webhookRequest("hook-secret", "Confidential Note Hook", confidentialIssueNote), captureDeps(&got, done))
 	awaitDispatch(t, done, 1)
 
 	asserts.Equal(t, len(got), 1, "confidential note dispatched")
 	asserts.Equal(t, got[0].ChannelID, "acme/widgets#17", "issue channel id")
+}
+
+// The Confidential Note Hook also fires for an *internal* note on a visible
+// issue or merge request. Send can only create a plain note, so answering one
+// would publish the internal thread: those deliveries are acked and dropped.
+// The discriminator is the noteable, since the note payload carries no flag —
+// a non-confidential issue, or any merge request (which cannot be confidential).
+func TestHandleWebhook_DropsInternalNoteOnVisibleNoteable(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"Issue", issueNoteCreated},
+		{"MergeRequest", mergeNoteCreated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := newAdapter(testConfig())
+			asserts.NoError(t, err, "new adapter")
+			var got []*core.Message
+			w := httptest.NewRecorder()
+
+			a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "Confidential Note Hook", tc.payload), captureDeps(&got, nil))
+
+			asserts.Equal(t, w.Code, http.StatusOK, "an internal note is acked, not rejected")
+			// Dispatch is async; give a stray one a moment to appear.
+			time.Sleep(20 * time.Millisecond)
+			asserts.Equal(t, len(got), 0, "internal note on a visible noteable is dropped")
+		})
+	}
 }
 
 // GitLab omitted object_attributes.action on note deliveries before 16.11, so an
@@ -246,12 +288,6 @@ func TestHandleWebhook_Rejections(t *testing.T) {
 			r.Header.Del("X-Gitlab-Token")
 			return r
 		}, http.StatusUnauthorized},
-		{"OversizedBody", func() *http.Request {
-			// testConfig registers no large-event callback, so its cap is
-			// smallRequestBytes; a body one byte over it trips MaxBytesReader.
-			big := strings.Repeat("a", smallRequestBytes+1)
-			return webhookRequest("hook-secret", "Note Hook", big)
-		}, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -286,12 +322,16 @@ func TestHandleWebhook_Routes401ToInjectedLogger(t *testing.T) {
 	asserts.Equal(t, len(got), 0, "nothing dispatched")
 }
 
-// A saturated dispatch semaphore must answer 503 (GitLab retries) instead of
-// spawning an unbounded goroutine.
-func TestHandleWebhook_SaturationReturns503(t *testing.T) {
+// A saturated dispatch semaphore must ack 200 and drop instead of spawning an
+// unbounded goroutine. It must NOT shed with 503: GitLab does not re-deliver a
+// failed webhook, so the delivery is lost either way, and the failure would count
+// toward auto-disabling the hook and suppress later deliveries too.
+func TestHandleWebhook_DispatchSaturationAcksAndDrops(t *testing.T) {
 	a, err := newAdapter(testConfig())
 	asserts.NoError(t, err, "new adapter")
 	a.sem = make(chan struct{}, 1) // force a one-slot bound
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
 
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -311,28 +351,56 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 
 	w2 := httptest.NewRecorder()
 	a.handleWebhook(context.Background(), w2, webhookRequest("hook-secret", "Note Hook", issueNoteCreated), deps)
-	asserts.Equal(t, w2.Code, http.StatusServiceUnavailable, "saturated dispatch returns 503")
+	asserts.Equal(t, w2.Code, http.StatusOK, "saturated dispatch acks 200 rather than shedding")
+	asserts.True(t, strings.Contains(buf.String(), "dispatch concurrency limit reached"),
+		"the drop is logged, since the ack hides it from GitLab")
 
 	close(release)
 	drainCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	a.drainDispatch(drainCtx)
 	asserts.Equal(t, a.inflight.Load(), int64(0), "slot released after the handler returns")
+	asserts.Equal(t, len(entered), 0, "the shed delivery never dispatched")
 }
 
-// A saturated read semaphore must answer 503 before the body is buffered.
-func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
+// A saturated read semaphore must ack 200 and drop before the body is buffered,
+// for the same reason as the dispatch bound.
+func TestHandleWebhook_ReadSaturationAcksAndDrops(t *testing.T) {
 	a, err := newAdapter(testConfig())
 	asserts.NoError(t, err, "new adapter")
 	a.readSem = make(chan struct{}, 1)
 	a.readSem <- struct{}{} // occupy the only inbound slot
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
 
 	var got []*core.Message
 	w := httptest.NewRecorder()
 	a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "Note Hook", issueNoteCreated), captureDeps(&got, nil))
 
-	asserts.Equal(t, w.Code, http.StatusServiceUnavailable, "saturated read gate returns 503")
+	asserts.Equal(t, w.Code, http.StatusOK, "saturated read gate acks 200 rather than shedding")
 	asserts.Equal(t, len(got), 0, "nothing dispatched")
+	asserts.True(t, strings.Contains(buf.String(), "inbound concurrency limit reached"), "the drop is logged")
+}
+
+// An unreadable body — over the cap, or a truncated delivery — is acked 200 and
+// logged, not answered 400: GitLab counts a 4xx toward auto-disabling the hook,
+// so one oversized or truncated delivery would take the bot's ingress offline.
+func TestHandleWebhook_OversizedBodyAcksAndDrops(t *testing.T) {
+	a, err := newAdapter(testConfig())
+	asserts.NoError(t, err, "new adapter")
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	// testConfig registers no large-event callback, so its cap is
+	// smallRequestBytes; a body one byte over it trips MaxBytesReader.
+	var got []*core.Message
+	w := httptest.NewRecorder()
+	big := strings.Repeat("a", smallRequestBytes+1)
+	a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "Note Hook", big), captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusOK, "an oversized body is acked, not rejected with 400")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+	asserts.True(t, strings.Contains(buf.String(), "unreadable body"), "the drop is logged")
 }
 
 func TestHandleWebhook_AckedButDropped(t *testing.T) {

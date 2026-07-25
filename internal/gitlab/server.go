@@ -23,9 +23,13 @@ const tokenHeader = "X-Gitlab-Token" //nolint:gosec // G101: HTTP header name, n
 // handleWebhook authenticates, reads, filters, acks and dispatches one webhook
 // delivery. The token is checked from the header BEFORE the body is read, so an
 // unauthenticated request is rejected without buffering anything. The ack (200)
-// is written before dispatch runs: GitLab retries slow deliveries and disables
-// hooks that fail persistently, so dropped and invalid-but-authentic payloads
-// are acked too.
+// is written before dispatch runs, and every authentic delivery is acked even
+// when it is dropped, unreadable or shed under load, because GitLab never
+// re-delivers a failed webhook and counts 4xx and 5xx alike toward
+// auto-disabling the hook (temporarily after four consecutive failures,
+// permanently after forty). A non-200 would therefore lose the delivery *and*
+// suppress later ones, so 401 on a bad token is the only failure worth
+// reporting — a wrong secret should stop the deliveries.
 func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	if !a.validToken(r) {
 		// Log the rejection so an operator can diagnose a secret-token mismatch
@@ -45,24 +49,33 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	select {
 	case a.readSem <- struct{}{}:
 	default:
-		a.log().Warn("gitlab: inbound concurrency limit reached; shedding with 503", "limit", maxConcurrentReads)
-		w.WriteHeader(http.StatusServiceUnavailable)
+		a.log().Warn("gitlab: inbound concurrency limit reached; acking and dropping delivery", "limit", maxConcurrentReads)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	defer func() { <-a.readSem }()
 
 	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, a.maxRequestBytes))
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		// The body is over a.maxRequestBytes or the delivery was truncated. Both
+		// are acked: the payload is unusable either way, and a 4xx would trade one
+		// lost delivery for the bot's whole ingress (see handleWebhook's doc).
+		a.log().Warn("gitlab: discarding webhook with unreadable body", "error", err, "cap", a.maxRequestBytes)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	switch gogitlab.HookEventType(r) {
-	case gogitlab.EventTypeNote, gogitlab.EventConfidentialNote:
-		// GitLab delivers comments on confidential issues/MRs under a separate
-		// "Confidential Note Hook" trigger; the payload is shaped identically and
-		// client-go parses both through the same case, so route them together.
-		a.handleNote(dispatchCtx, w, payload, deps)
+	case gogitlab.EventTypeNote:
+		a.handleNote(dispatchCtx, w, payload, deps, false)
+	case gogitlab.EventConfidentialNote:
+		// GitLab routes a note to the separate "Confidential Note Hook" trigger
+		// when the note is internal OR its noteable is confidential, so this
+		// trigger carries both comments on confidential issues (dispatched) and
+		// internal notes on visible ones (dropped — see handleNote). The payload is
+		// shaped identically and client-go parses both event types through the same
+		// case, so the same handler routes it.
+		a.handleNote(dispatchCtx, w, payload, deps, true)
 	case gogitlab.EventTypeMergeRequest:
 		a.handleMerge(dispatchCtx, w, payload)
 	case gogitlab.EventTypePush:
@@ -86,7 +99,18 @@ func (a *adapter) validToken(r *http.Request) bool {
 // commit and snippet comments (no reply target in v1) are acked and dropped. A
 // payload that cannot be parsed, or an unexpected noteable type, is acked too —
 // the delivery is authentic, and a 4xx would make GitLab mark the hook failing.
-func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter, payload []byte, deps core.AdapterDeps) {
+//
+// confidentialTrigger reports that the delivery arrived on the Confidential Note
+// Hook. GitLab picks that trigger when the note is internal *or* its noteable is
+// confidential, and the note payload carries no flag of its own to tell the two
+// apart, so the noteable's confidentiality is the discriminator: a
+// confidential-trigger note on a non-confidential noteable is an internal note on
+// a visible issue or merge request, and Send can only create a plain note, so
+// answering would publish the internal thread. Those are dropped. A note on a
+// confidential issue is dispatched — the reply inherits the issue's restricted
+// audience — which does mean an internal note *on a confidential issue* is
+// answered with a plain note visible to everyone who can see that issue.
+func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter, payload []byte, deps core.AdapterDeps, confidentialTrigger bool) {
 	parsed, err := gogitlab.ParseWebhook(gogitlab.EventTypeNote, payload)
 	if err != nil {
 		a.log().Warn("gitlab: discarding note webhook with unparseable body", "error", err)
@@ -96,14 +120,16 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 	switch event := parsed.(type) {
 	case *gogitlab.IssueCommentEvent:
 		oa := event.ObjectAttributes
-		if a.dropComment(oa.System, oa.Action, oa.AuthorID) {
+		if a.dropComment(oa.System, confidentialTrigger && !event.Issue.Confidential, oa.Action, oa.AuthorID) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		a.ackAndDispatch(w, func() { deps.Dispatch(dispatchCtx, toMessageFromIssueComment(event)) })
 	case *gogitlab.MergeCommentEvent:
 		oa := event.ObjectAttributes
-		if a.dropComment(oa.System, oa.Action, oa.AuthorID) {
+		// A merge request has no confidentiality of its own, so the confidential
+		// trigger can only mean the note itself is internal.
+		if a.dropComment(oa.System, confidentialTrigger, oa.Action, oa.AuthorID) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -115,6 +141,7 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 
 // dropComment reports whether a note must be ignored: a system note (an
 // automated change like a label or title edit — never a real message), an
+// internal note the reply path cannot answer in kind (see handleNote), an
 // explicit edit (an action other than "create"), or one the bot itself authored
 // (the reply-loop guard, by author id since GitLab note webhooks carry no
 // reliable bot flag).
@@ -123,10 +150,10 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 // an older or self-hosted instance (which Config.BaseURL explicitly targets)
 // sends new-note hooks with an empty action. An empty action is therefore
 // treated as a create — dropping only a *known* non-create action — so the core
-// comment path is not silently blackholed on those instances. The system and
-// self filters still apply regardless.
-func (a *adapter) dropComment(system bool, action gogitlab.CommentEventAction, authorID int64) bool {
-	return system || (action != "" && action != gogitlab.CommentEventActionCreate) || a.isSelfUser(authorID)
+// comment path is not silently blackholed on those instances. The system, self
+// and internal filters still apply regardless.
+func (a *adapter) dropComment(system, internal bool, action gogitlab.CommentEventAction, authorID int64) bool {
+	return system || internal || (action != "" && action != gogitlab.CommentEventActionCreate) || a.isSelfUser(authorID)
 }
 
 // handleMerge routes a Merge Request Hook to cfg.OnMergeRequest. Parsing happens
@@ -187,8 +214,10 @@ func (a *adapter) handlePush(dispatchCtx context.Context, w http.ResponseWriter,
 // ackAndDispatch bounds concurrent webhook dispatch with a counting semaphore
 // (maxConcurrentDispatch). It attempts a non-blocking acquire BEFORE acking: on
 // success it acks 200, runs f on a tracked dispatch goroutine, and releases the
-// slot when f returns; on saturation it answers 503 so GitLab retries the
-// delivery later instead of the adapter spawning unbounded goroutines.
+// slot when f returns; on saturation it logs and acks 200 without dispatching,
+// rather than spawning unbounded goroutines. Shedding with 503 would not save the
+// delivery — GitLab does not re-deliver it — and would push the hook toward
+// being auto-disabled, taking later deliveries with it.
 func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 	// Snapshot this connection's semaphore once: Connect installs a fresh one per
 	// connection, and the acquire below and the release in the dispatch goroutine
@@ -199,8 +228,8 @@ func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 	select {
 	case sem <- struct{}{}:
 	default:
-		a.log().Warn("gitlab: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
-		w.WriteHeader(http.StatusServiceUnavailable)
+		a.log().Warn("gitlab: dispatch concurrency limit reached; acking and dropping delivery", "limit", maxConcurrentDispatch)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
