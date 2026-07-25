@@ -135,11 +135,10 @@ type adapter struct {
 	// note webhooks carry no reliable bot flag, so the bot's own notes are
 	// recognized by author id. Written under mu by the serve goroutine before the
 	// first request is handled, read by the handler under mu; re-resolved on every
-	// Connect, never cleared on Disconnect (stale values are harmless with no
-	// server up). selfUsername is the matching username, kept for diagnostics.
-	selfID       int64
-	selfUsername string
-	srv          *http.Server
+	// Connect, never cleared on Disconnect (a stale value is harmless with no
+	// server up).
+	selfID int64
+	srv    *http.Server
 	// boundAddr is the listener's resolved address, so a cfg.Addr of ":0" is
 	// recoverable via Addr. Set with srv, cleared with it.
 	boundAddr string

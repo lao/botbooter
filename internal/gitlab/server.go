@@ -308,7 +308,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		// is handled before the bot can recognize its own notes. A bot that cannot
 		// recognize itself is a reply-loop hazard, so failure is fatal via
 		// deps.Done rather than silent at dispatch.
-		selfID, selfUsername, err := a.resolveSelf(ctx)
+		selfID, err := a.resolveSelf(ctx)
 		if err != nil {
 			_ = ln.Close()        // Serve never runs, so nothing else closes it
 			if ctx.Err() == nil { // a canceled startup is a shutdown, not a failure
@@ -318,7 +318,6 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		}
 		a.mu.Lock()
 		a.selfID = selfID
-		a.selfUsername = selfUsername
 		a.mu.Unlock()
 		serve(srv, ln, deps.Done)
 	}()
@@ -347,16 +346,16 @@ func serve(srv *http.Server, ln net.Listener, done func(error)) {
 	}
 }
 
-// resolveSelf resolves the bot's own account (id and username) for reply-loop
+// resolveSelf resolves the id of the bot's own account for reply-loop
 // prevention. GitLab note webhooks carry no reliable bot flag, so the bot's own
 // notes are recognized by author id; the token's user is that account for a
 // personal, project or group access token alike.
-func (a *adapter) resolveSelf(ctx context.Context) (int64, string, error) {
+func (a *adapter) resolveSelf(ctx context.Context) (int64, error) {
 	user, _, err := a.client.Users.CurrentUser(gogitlab.WithContext(ctx))
 	if err != nil {
-		return 0, "", fmt.Errorf("gitlab: resolve self identity: %w", err)
+		return 0, fmt.Errorf("gitlab: resolve self identity: %w", err)
 	}
-	return user.ID, user.Username, nil
+	return user.ID, nil
 }
 
 func (a *adapter) Disconnect() error {
