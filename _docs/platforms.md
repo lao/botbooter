@@ -664,12 +664,16 @@ comments* trigger when the note is internal **or** its noteable is confidential.
 Since replies are always plain notes, answering an internal note would publish
 the internal thread, so those deliveries are acked and dropped on the note's own
 `object_attributes.internal` flag — the adapter reads it straight off the payload
-because client-go's typed note events do not expose the field. The noteable is
-the fallback for a delivery that arrives without the flag: on that trigger, a
-note on a non-confidential issue, or on any merge request (merge requests cannot
-be confidential), is internal by elimination. A comment on a **confidential
-issue** still dispatches, and the reply inherits the issue's restricted
-audience.
+because client-go's typed note events do not expose the field, under both that
+key and the pre-rename `confidential` spelling an instance older than the rename
+sends. The noteable is the fallback for a delivery that arrives without the flag:
+on that trigger, a note on a non-confidential issue, or on any merge request
+(merge requests cannot be confidential), is internal by elimination. A comment on
+a **confidential issue** still dispatches, and the reply inherits the issue's
+restricted audience — which leaves one gap: on an instance that sends neither
+spelling, an internal note on a confidential issue looks exactly like a regular
+comment there and is dispatched, so the reply reaches everyone who can see the
+issue rather than only those who can see internal notes.
 
 Every authentic delivery is acked `200` — *before* dispatch, and also when it is
 dropped, unreadable (over the body cap, or truncated) or shed under a

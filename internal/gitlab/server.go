@@ -118,7 +118,10 @@ func (a *adapter) validToken(r *http.Request) bool {
 // confidentiality as the fallback for a payload that omits the flag, where a
 // confidential-trigger note on a non-confidential noteable is internal by
 // elimination. A note on a confidential issue is dispatched — the reply inherits
-// the issue's restricted audience.
+// the issue's restricted audience. That leaves one gap the payload cannot close:
+// an internal note on a confidential issue whose delivery carries neither
+// spelling of the flag is indistinguishable from a regular comment there, and
+// dispatches.
 func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter, payload []byte, deps core.AdapterDeps, confidentialTrigger bool) {
 	parsed, err := gogitlab.ParseWebhook(gogitlab.EventTypeNote, payload)
 	if err != nil {
@@ -149,25 +152,29 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 	}
 }
 
-// internalNote reports the note's own object_attributes.internal flag. GitLab
-// ships it in every note delivery (it is in the hook builder's safe-attribute
-// list), but client-go's typed note events do not expose the field, so it is
-// side-parsed off the raw payload — which handleNote has already parsed once, so
-// a failure here means the flag is simply not there.
+// internalNote reports the note's own internal flag. GitLab ships it in every
+// note delivery (it is in the hook builder's safe-attribute list), but
+// client-go's typed note events do not expose the field, so it is side-parsed
+// off the raw payload — which handleNote has already parsed once, so a failure
+// here means the flag is simply not there. Both spellings are read: the note's
+// column was named "confidential" before it was renamed "internal", and an
+// instance old enough to predate the rename (which Config.BaseURL explicitly
+// targets) sends the same flag under the old key.
 //
 // An absent or unparseable flag reads false and leaves handleNote's noteable
-// discriminator in charge, so an instance whose payload predates the field keeps
-// exactly the behaviour it had before the flag was read.
+// discriminator in charge, so an instance whose payload predates both spellings
+// keeps exactly the behaviour it had before the flag was read.
 func internalNote(payload []byte) bool {
 	var note struct {
 		ObjectAttributes struct {
-			Internal bool `json:"internal"`
+			Internal     bool `json:"internal"`
+			Confidential bool `json:"confidential"` // pre-rename spelling of Internal
 		} `json:"object_attributes"`
 	}
 	if err := json.Unmarshal(payload, &note); err != nil {
 		return false
 	}
-	return note.ObjectAttributes.Internal
+	return note.ObjectAttributes.Internal || note.ObjectAttributes.Confidential
 }
 
 // dropComment reports whether a note must be ignored: a system note (an
