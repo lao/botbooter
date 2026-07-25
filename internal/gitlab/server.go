@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -108,14 +109,14 @@ func (a *adapter) validToken(r *http.Request) bool {
 //
 // confidentialTrigger reports that the delivery arrived on the Confidential Note
 // Hook. GitLab picks that trigger when the note is internal *or* its noteable is
-// confidential, and the note payload carries no flag of its own to tell the two
-// apart, so the noteable's confidentiality is the discriminator: a
-// confidential-trigger note on a non-confidential noteable is an internal note on
-// a visible issue or merge request, and Send can only create a plain note, so
-// answering would publish the internal thread. Those are dropped. A note on a
-// confidential issue is dispatched — the reply inherits the issue's restricted
-// audience — which does mean an internal note *on a confidential issue* is
-// answered with a plain note visible to everyone who can see that issue.
+// confidential, and Send can only create a plain note, so answering an internal
+// note would publish the internal thread. Internal notes are therefore dropped by
+// two filters: the note's own internal flag (side-parsed by internalNote — GitLab
+// sends it, client-go's typed events do not expose it), and the noteable's
+// confidentiality as the fallback for a payload that omits the flag, where a
+// confidential-trigger note on a non-confidential noteable is internal by
+// elimination. A note on a confidential issue is dispatched — the reply inherits
+// the issue's restricted audience.
 func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter, payload []byte, deps core.AdapterDeps, confidentialTrigger bool) {
 	parsed, err := gogitlab.ParseWebhook(gogitlab.EventTypeNote, payload)
 	if err != nil {
@@ -123,10 +124,11 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	flagged := internalNote(payload)
 	switch event := parsed.(type) {
 	case *gogitlab.IssueCommentEvent:
 		oa := event.ObjectAttributes
-		if a.dropComment(oa.System, confidentialTrigger && !event.Issue.Confidential, oa.Action, oa.AuthorID) {
+		if a.dropComment(oa.System, flagged || (confidentialTrigger && !event.Issue.Confidential), oa.Action, oa.AuthorID) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -135,7 +137,7 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 		oa := event.ObjectAttributes
 		// A merge request has no confidentiality of its own, so the confidential
 		// trigger can only mean the note itself is internal.
-		if a.dropComment(oa.System, confidentialTrigger, oa.Action, oa.AuthorID) {
+		if a.dropComment(oa.System, flagged || confidentialTrigger, oa.Action, oa.AuthorID) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -143,6 +145,27 @@ func (a *adapter) handleNote(dispatchCtx context.Context, w http.ResponseWriter,
 	default:
 		w.WriteHeader(http.StatusOK) // commit/snippet comment: no reply target in v1
 	}
+}
+
+// internalNote reports the note's own object_attributes.internal flag. GitLab
+// ships it in every note delivery (it is in the hook builder's safe-attribute
+// list), but client-go's typed note events do not expose the field, so it is
+// side-parsed off the raw payload — which handleNote has already parsed once, so
+// a failure here means the flag is simply not there.
+//
+// An absent or unparseable flag reads false and leaves handleNote's noteable
+// discriminator in charge, so an instance whose payload predates the field keeps
+// exactly the behaviour it had before the flag was read.
+func internalNote(payload []byte) bool {
+	var note struct {
+		ObjectAttributes struct {
+			Internal bool `json:"internal"`
+		} `json:"object_attributes"`
+	}
+	if err := json.Unmarshal(payload, &note); err != nil {
+		return false
+	}
+	return note.ObjectAttributes.Internal
 }
 
 // dropComment reports whether a note must be ignored: a system note (an

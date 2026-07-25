@@ -96,6 +96,29 @@ const (
     "author_id": 58, "system": false, "action": "create"},
   "issue": {"iid": 17, "confidential": true}
 }`
+	// An *internal* note on a confidential issue: same trigger, same
+	// issue.confidential, so only the note's own internal flag tells it apart from
+	// the regular comment above.
+	internalNoteOnConfidentialIssue = `{
+  "object_kind": "note",
+  "event_type": "confidential_note",
+  "user": {"id": 58, "username": "octocat"},
+  "project": {"path_with_namespace": "acme/widgets"},
+  "object_attributes": {"id": 31, "note": "/deploy staging", "noteable_type": "Issue",
+    "author_id": 58, "system": false, "action": "create", "internal": true},
+  "issue": {"iid": 17, "confidential": true}
+}`
+	// An internal note flagged on a merge request, where the noteable can never be
+	// confidential.
+	internalNoteOnMerge = `{
+  "object_kind": "note",
+  "event_type": "confidential_note",
+  "user": {"id": 58, "username": "octocat"},
+  "project": {"path_with_namespace": "acme/widgets"},
+  "object_attributes": {"id": 32, "note": "/deploy", "noteable_type": "MergeRequest",
+    "author_id": 58, "system": false, "action": "create", "internal": true},
+  "merge_request": {"iid": 9}
+}`
 	pingEvent = `{"event_name": "push"}`
 	// Pre-16.11 GitLab (and older self-hosted) omit object_attributes.action on
 	// note deliveries entirely; an absent action must be treated as a create.
@@ -192,8 +215,9 @@ func TestHandleWebhook_DispatchesConfidentialNote(t *testing.T) {
 // The Confidential Note Hook also fires for an *internal* note on a visible
 // issue or merge request. Send can only create a plain note, so answering one
 // would publish the internal thread: those deliveries are acked and dropped.
-// The discriminator is the noteable, since the note payload carries no flag —
-// a non-confidential issue, or any merge request (which cannot be confidential).
+// These fixtures carry no object_attributes.internal flag (an older instance, or
+// one that omits it), so they exercise the noteable fallback — a
+// non-confidential issue, or any merge request, which cannot be confidential.
 func TestHandleWebhook_DropsInternalNoteOnVisibleNoteable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -215,6 +239,36 @@ func TestHandleWebhook_DropsInternalNoteOnVisibleNoteable(t *testing.T) {
 			// Dispatch is async; give a stray one a moment to appear.
 			time.Sleep(20 * time.Millisecond)
 			asserts.Equal(t, len(got), 0, "internal note on a visible noteable is dropped")
+		})
+	}
+}
+
+// An internal note on a *confidential* issue is the delivery the noteable cannot
+// discriminate: it carries the same trigger and the same issue.confidential as a
+// regular comment there. The note's own object_attributes.internal flag settles
+// it, so a plain reply never publishes an internal thread to everyone who can see
+// the issue.
+func TestHandleWebhook_DropsFlaggedInternalNote(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"ConfidentialIssue", internalNoteOnConfidentialIssue},
+		{"MergeRequest", internalNoteOnMerge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := newAdapter(testConfig())
+			asserts.NoError(t, err, "new adapter")
+			var got []*core.Message
+			w := httptest.NewRecorder()
+
+			a.handleWebhook(context.Background(), w, webhookRequest("hook-secret", "Confidential Note Hook", tc.payload), captureDeps(&got, nil))
+
+			asserts.Equal(t, w.Code, http.StatusOK, "an internal note is acked, not rejected")
+			// Dispatch is async; give a stray one a moment to appear.
+			time.Sleep(20 * time.Millisecond)
+			asserts.Equal(t, len(got), 0, "a flagged internal note is dropped")
 		})
 	}
 }

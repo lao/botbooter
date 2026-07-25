@@ -660,16 +660,16 @@ acked and dropped; commit and snippet comments have no reply target in v1 and
 are dropped too.
 
 **Internal notes are dropped.** GitLab routes a note to the *Confidential
-comments* trigger when the note is internal **or** its noteable is confidential,
-and the payload carries no flag of its own to tell the two apart. Since replies
-are always plain notes, answering an internal note on a visible issue or merge
-request would publish the internal thread — so those deliveries are acked and
-dropped, using the noteable as the discriminator: a comment on a **confidential
-issue** dispatches (the reply inherits the issue's restricted audience), while a
+comments* trigger when the note is internal **or** its noteable is confidential.
+Since replies are always plain notes, answering an internal note would publish
+the internal thread, so those deliveries are acked and dropped on the note's own
+`object_attributes.internal` flag — the adapter reads it straight off the payload
+because client-go's typed note events do not expose the field. The noteable is
+the fallback for a delivery that arrives without the flag: on that trigger, a
 note on a non-confidential issue, or on any merge request (merge requests cannot
-be confidential), does not. The residue: an internal note *on a confidential
-issue* is indistinguishable from a regular one, so it is answered with a plain
-note visible to everyone who can see that issue.
+be confidential), is internal by elimination. A comment on a **confidential
+issue** still dispatches, and the reply inherits the issue's restricted
+audience.
 
 Every authentic delivery is acked `200` — *before* dispatch, and also when it is
 dropped, unreadable (over the body cap, or truncated) or shed under a
