@@ -171,6 +171,11 @@ type adapter struct {
 	// smallRequestBytes unless OnMergeRequest/OnPush is registered, then
 	// largeRequestBytes.
 	maxRequestBytes int64
+	// drainBudget is how long Disconnect waits for in-flight dispatch goroutines.
+	// Fixed at New to drainTimeout and never reassigned afterwards; it is a field
+	// rather than the constant so a test can shorten it and exercise the
+	// deadline-reached path in milliseconds instead of seconds.
+	drainBudget time.Duration
 }
 
 // requestByteLimit picks the inbound body cap: largeRequestBytes only when a
@@ -262,5 +267,6 @@ func newAdapter(cfg Config) (*adapter, error) {
 		sem:             make(chan struct{}, maxConcurrentDispatch),
 		readSem:         make(chan struct{}, maxConcurrentReads),
 		maxRequestBytes: requestByteLimit(cfg),
+		drainBudget:     drainTimeout,
 	}, nil
 }

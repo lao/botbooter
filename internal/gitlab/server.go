@@ -379,7 +379,7 @@ func (a *adapter) Disconnect() error {
 	defer shutCancel()
 	err := srv.Shutdown(shutCtx)
 
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), a.drainBudget)
 	defer drainCancel()
 	a.drainDispatch(drainCtx)
 

@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -997,14 +996,13 @@ func TestAttachments_AlwaysNil(t *testing.T) {
 }
 
 // TestDisconnect_DrainTimeoutReturnsError guards that a drain which cannot finish
-// within its deadline surfaces an error. The drain budget is a hardcoded 5s, so
-// this takes ~5s of real time and is env-gated to keep the default suite fast.
+// within its deadline surfaces an error. The production budget is drainTimeout
+// (5s); the test shortens the adapter's injected drainBudget so the same path
+// runs in milliseconds and stays in the default CI suite.
 func TestDisconnect_DrainTimeoutReturnsError(t *testing.T) {
-	if os.Getenv("BOTBOOTER_GITLAB_DRAIN_TIMING_TEST") == "" {
-		t.Skip("set BOTBOOTER_GITLAB_DRAIN_TIMING_TEST to run the ~5s drain-timeout test")
-	}
 	a, err := newAdapter(testConfig())
 	asserts.NoError(t, err, "new adapter")
+	a.drainBudget = 50 * time.Millisecond // set before Disconnect reads it; no concurrent access
 	// Unstarted server: Shutdown returns immediately, so only the drain can time out.
 	a.mu.Lock()
 	a.srv = &http.Server{}
@@ -1016,7 +1014,7 @@ func TestDisconnect_DrainTimeoutReturnsError(t *testing.T) {
 	dispatched := make(chan struct{}, 1)
 	deps := core.AdapterDeps{Dispatch: func(context.Context, *core.Message) {
 		dispatched <- struct{}{}
-		<-release // block past the 5s drain deadline
+		<-release // block past the drain deadline
 	}}
 
 	a.handleWebhook(context.Background(), httptest.NewRecorder(), webhookRequest("hook-secret", "Note Hook", issueNoteCreated), deps)
