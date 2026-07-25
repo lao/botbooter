@@ -26,11 +26,13 @@ const tokenHeader = "X-Gitlab-Token" //nolint:gosec // G101: HTTP header name, n
 // unauthenticated request is rejected without buffering anything. The ack (200)
 // is written before dispatch runs, and every authentic delivery is acked even
 // when it is dropped, unreadable or shed under load, because GitLab never
-// re-delivers a failed webhook and counts 4xx and 5xx alike toward
-// auto-disabling the hook (temporarily after four consecutive failures,
-// permanently after forty). A non-200 would therefore lose the delivery *and*
-// suppress later ones, so 401 on a bad token is the only failure worth
-// reporting — a wrong secret should stop the deliveries.
+// re-delivers a failed webhook and counts consecutive failures — a 4xx, a 5xx, a
+// timeout and any other HTTP error alike — toward auto-disabling the hook, first
+// temporarily and then, if they keep coming, permanently (the current thresholds
+// are in _docs/platforms.md, not repeated here — they are GitLab's, and they
+// move). A non-200 would therefore lose the delivery *and* suppress later ones,
+// so 401 on a bad token is the only failure worth reporting — a wrong secret
+// should stop the deliveries.
 func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	if !a.validToken(r) {
 		// Log the rejection so an operator can diagnose a secret-token mismatch

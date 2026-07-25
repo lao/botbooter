@@ -676,11 +676,15 @@ dropped, unreadable (over the body cap, or truncated) or shed under a
 concurrency bound. An unreadable or unparseable body and a shed delivery are
 logged as warnings; the filtered drops above (system, internal, edited and
 self-authored notes, commit and snippet comments, events with no callback set)
-are silent. GitLab **never re-delivers a
-failed webhook** and counts `4xx` and `5xx` alike toward auto-disabling it
-(temporarily after four consecutive failures, with backoff up to 24 h;
-permanently after forty), so a non-200 would lose that delivery *and* suppress
-the ones after it. Slow handlers likewise cannot make GitLab disable the hook.
+are silent. GitLab **never re-delivers a failed webhook**, and *consecutive*
+failures [auto-disable it](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks):
+a `4xx`, a `5xx`, a connection timeout and any other HTTP error all count alike,
+four in a row disable the hook temporarily (one minute of backoff, doubling on
+each further failure up to 24 h, after which it re-enables itself) and forty
+disable it permanently until someone re-enables it by hand. One successful
+delivery resets the count. So a non-200 would lose that delivery *and* suppress
+the ones after it. Slow handlers cannot trip any of this — the ack goes out
+before dispatch runs.
 The one exception is the `401` on a bad secret token — there, a disabled hook is
 the right outcome.
 
