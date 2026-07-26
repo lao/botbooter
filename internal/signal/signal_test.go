@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -475,6 +477,35 @@ func TestSend_ErrorResponseNonJSON(t *testing.T) {
 	err := a.Send(context.Background(), "+15550002", "hi", core.SendOptions{})
 	asserts.Error(t, err, "Send should surface a REST error")
 	asserts.True(t, strings.Contains(err.Error(), "boom"), "error should fall back to the raw body: "+err.Error())
+}
+
+// TestSend_ReusesConnectionOnLargeSuccessBody pins that the success-body drain
+// reaches EOF for a body well past maxErrorBodyBytes. net/http pools a
+// connection only once its body is read to EOF, so a drain capped at the
+// error-message size would silently make every send pay a fresh handshake.
+func TestSend_ReusesConnectionOnLargeSuccessBody(t *testing.T) {
+	var conns atomic.Int64
+	body := strings.Repeat("x", maxErrorBodyBytes*2)
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(body))
+	}))
+	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	ts.Start()
+	t.Cleanup(ts.Close)
+
+	a, err := newAdapter(Config{BaseURL: ts.URL, Number: "+15550001"})
+	asserts.NoError(t, err, "newAdapter")
+
+	for range 2 {
+		asserts.NoError(t, a.Send(context.Background(), "+15550002", "hi", core.SendOptions{}), "Send")
+	}
+	asserts.Equal(t, conns.Load(), int64(1), "the second send should reuse the first send's connection")
 }
 
 // TestSend_DoesNotFollowRedirect pins the default client's redirect policy. Go

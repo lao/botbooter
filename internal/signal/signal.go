@@ -56,10 +56,18 @@ const (
 	// cap only bounds a misbehaving peer.
 	maxMessageBytes = 1 << 20 // 1 MiB
 
-	// maxErrorBodyBytes caps how much of a REST response body is read — enough
-	// for the container's {"error": "..."} payload, and enough to let a success
-	// body be drained so the connection can be reused.
+	// maxErrorBodyBytes caps how much of a failed REST response body is read —
+	// enough for the container's {"error": "..."} payload.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
+
+	// maxDrainBytes caps the success-body drain that buys connection reuse. It
+	// is deliberately far above the container's few-dozen-byte send response
+	// and separate from maxErrorBodyBytes, whose job is to bound an error
+	// *message*: sharing that 4 KiB cap would silently cost reuse on any larger
+	// success body. Still bounded, though — past this, dropping the connection
+	// beats letting a misbehaving container stream into io.Discard on every
+	// send.
+	maxDrainBytes = 64 << 10 // 64 KiB
 )
 
 // ErrMissingConfig is returned by New when a required Config field is empty.
@@ -489,8 +497,10 @@ func (a *adapter) Send(ctx context.Context, channelID, text string, _ core.SendO
 	}
 	// net/http only returns a connection to the idle pool once its body is read
 	// to EOF, so draining the success body is what keeps a chatty bot from
-	// paying a fresh TCP (and TLS) handshake on every single send.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
+	// paying a fresh TCP (and TLS) handshake on every single send. The drain
+	// stops at maxDrainBytes: a response that big is not the container's, and
+	// abandoning reuse is the right answer for it.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 	return nil
 }
 
