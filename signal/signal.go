@@ -35,8 +35,8 @@ type Attachment = sigint.Attachment
 var ErrMissingConfig = sigint.ErrMissingConfig
 
 // ErrInvalidConfig is returned by [New] when a [Config] field is present but
-// unusable: a BaseURL that does not parse, is not http/https, or carries a
-// query, fragment or userinfo.
+// unusable: a BaseURL that does not parse, is not http/https, has no host, or
+// carries a query, fragment or userinfo.
 var ErrInvalidConfig = sigint.ErrInvalidConfig
 
 // New creates a Signal bot that talks to the signal-cli-rest-api container at

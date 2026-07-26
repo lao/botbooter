@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -190,22 +191,26 @@ func TestNew(t *testing.T) {
 func TestNew_MissingBaseURL(t *testing.T) {
 	_, err := New(Config{Number: "+15550001"})
 	asserts.ErrorIs(t, err, ErrMissingConfig, "New without BaseURL should fail")
+	asserts.False(t, errors.Is(err, ErrInvalidConfig), "an empty field is not an unusable one")
 }
 
 func TestNew_MissingNumber(t *testing.T) {
 	_, err := New(Config{BaseURL: "http://127.0.0.1:8080"})
 	asserts.ErrorIs(t, err, ErrMissingConfig, "New without Number should fail")
+	asserts.False(t, errors.Is(err, ErrInvalidConfig), "an empty field is not an unusable one")
 }
 
-// TestNew_RejectsUnusableBaseURL covers the BaseURL shapes that would otherwise
-// break one channel silently: a query or fragment mis-builds every REST path
-// while the receive socket still dials, and userinfo makes gorilla refuse the
-// dial while REST sends keep working. A present-but-unusable BaseURL is
-// ErrInvalidConfig, not ErrMissingConfig — the field is set, just wrong.
+// TestNew_RejectsUnusableBaseURL covers every BaseURL shape parseBaseURL
+// rejects. The last three would otherwise break one channel silently: a query
+// or fragment mis-builds every REST path while the receive socket still dials,
+// and userinfo makes gorilla refuse the dial while REST sends keep working. A
+// present-but-unusable BaseURL is ErrInvalidConfig, not ErrMissingConfig — the
+// field is set, just wrong.
 func TestNew_RejectsUnusableBaseURL(t *testing.T) {
 	for _, tc := range []struct{ name, baseURL string }{
-		{"Unparseable", "http://127.0.0.1:8080/\x7f"},
+		{"Unparseable", "http://127.0.0.1:8080/\x7f"}, // DEL: url.Parse rejects control bytes
 		{"BadScheme", "ftp://127.0.0.1:8080"},
+		{"NoHost", "http:///v2"},
 		{"Query", "http://127.0.0.1:8080/?token=abc"},
 		{"ForcedEmptyQuery", "http://127.0.0.1:8080/?"},
 		{"Fragment", "http://127.0.0.1:8080#frag"},
@@ -215,6 +220,34 @@ func TestNew_RejectsUnusableBaseURL(t *testing.T) {
 			_, err := New(Config{BaseURL: tc.baseURL, Number: "+15550001"})
 			asserts.ErrorIs(t, err, ErrInvalidConfig, "New with an unusable BaseURL should fail")
 			asserts.False(t, errors.Is(err, ErrMissingConfig), "a set-but-unusable field is not a missing one")
+		})
+	}
+}
+
+// TestNew_RejectsUnusableBaseURL_NoCredentialLeak pins that a BaseURL failing
+// to parse does not echo itself back: url.Parse's *url.Error carries the raw
+// URL unredacted, so wrapping it whole would print an embedded password.
+func TestNew_RejectsUnusableBaseURL_NoCredentialLeak(t *testing.T) {
+	_, err := New(Config{BaseURL: "http://bot:hunter2@127.0.0.1:1x", Number: "+15550001"})
+	asserts.ErrorIs(t, err, ErrInvalidConfig, "an unparseable BaseURL should fail")
+	asserts.False(t, strings.Contains(err.Error(), "hunter2"), "the error must not echo the credentials")
+}
+
+// TestNew_AcceptsUsableBaseURL guards against parseBaseURL tightening onto
+// shapes an operator may legitimately configure. The bracketed IPv6 host is the
+// one that matters most: receiveSocketURL appends to the base string, so losing
+// the brackets would produce a ws URL that cannot dial.
+func TestNew_AcceptsUsableBaseURL(t *testing.T) {
+	for _, tc := range []struct{ name, baseURL string }{
+		{"IPv6", "http://[::1]:8080"},
+		{"IPv6WithPath", "http://[::1]:8080/api"},
+		{"HTTPSPortPath", "https://signal.example:8443/api"},
+		{"Localhost", "http://localhost:8080"},
+		{"UppercaseScheme", "HTTP://127.0.0.1:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(Config{BaseURL: tc.baseURL, Number: "+15550001"})
+			asserts.NoError(t, err, "New with a usable BaseURL should succeed")
 		})
 	}
 }
@@ -233,6 +266,8 @@ func TestNew_DerivesReceiveSocketURL(t *testing.T) {
 	asserts.Equal(t, a.wsURL, "wss://signal.example/api/v1/receive/+15550001",
 		"https becomes wss, trailing slash trimmed ('+' is valid in a path)")
 	asserts.Equal(t, a.cfg.BaseURL, "https://signal.example/api", "BaseURL trailing slash trimmed")
+	asserts.Equal(t, a.baseURL, "https://signal.example/api",
+		"the REST base is the normalized parse, not cfg.BaseURL — it is what /v2/send is appended to")
 }
 
 func TestConnect_DialError(t *testing.T) {
@@ -440,6 +475,30 @@ func TestSend_ErrorResponseNonJSON(t *testing.T) {
 	err := a.Send(context.Background(), "+15550002", "hi", core.SendOptions{})
 	asserts.Error(t, err, "Send should surface a REST error")
 	asserts.True(t, strings.Contains(err.Error(), "boom"), "error should fall back to the raw body: "+err.Error())
+}
+
+// TestSend_DoesNotFollowRedirect pins the default client's redirect policy. Go
+// replays a POST body on 307/308 (a bytes.Reader body populates GetBody), so
+// following one would deliver the message, its recipient and the bot's own
+// number to whatever host the container named, and the final 200 would make
+// Send report success.
+func TestSend_DoesNotFollowRedirect(t *testing.T) {
+	var relayed atomic.Int64
+	relay := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		relayed.Add(1)
+	}))
+	t.Cleanup(relay.Close)
+	container := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, relay.URL+"/v2/send", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(container.Close)
+
+	a, err := newAdapter(Config{BaseURL: container.URL, Number: "+15550001"})
+	asserts.NoError(t, err, "newAdapter")
+
+	err = a.Send(context.Background(), "+15550002", "secret", core.SendOptions{})
+	asserts.Error(t, err, "a redirected send should fail instead of following")
+	asserts.Equal(t, relayed.Load(), int64(0), "the send body must not be replayed at the redirect target")
 }
 
 func TestSend_ContextCanceled(t *testing.T) {

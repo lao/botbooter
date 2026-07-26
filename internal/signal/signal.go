@@ -66,8 +66,8 @@ const (
 var ErrMissingConfig = errors.New("signal: missing required config field")
 
 // ErrInvalidConfig is returned by New when a Config field is present but
-// unusable: a BaseURL that does not parse, is not http/https, or carries a
-// query, fragment or userinfo.
+// unusable: a BaseURL that does not parse, is not http/https, has no host, or
+// carries a query, fragment or userinfo.
 var ErrInvalidConfig = errors.New("signal: invalid config field")
 
 // Config configures a Signal bot backed by a signal-cli-rest-api container.
@@ -194,26 +194,53 @@ func newAdapter(cfg Config) (*adapter, error) {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{}
+		// The container's API never legitimately redirects. Following one would
+		// replay the whole send body — text, recipient and the bot's own number
+		// — at an arbitrary host (a bytes.Reader body sets GetBody, so 307/308
+		// are replayed) while Send still reported success on the final 200.
+		// Surfacing the 3xx instead turns a silent exfiltration into an error.
+		// A consumer-supplied HTTPClient keeps its own redirect policy.
+		client = &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	return &adapter{cfg: cfg, baseURL: base.String(), wsURL: wsURL, client: client}, nil
 }
 
-// parseBaseURL validates the container's base URL. A query, fragment or
-// userinfo is rejected rather than carried: each one breaks a channel silently
-// and asymmetrically — a query or fragment mis-builds every REST path (the
-// suffix lands inside the query string) while the receive socket still dials,
-// and gorilla refuses a dial URL with userinfo outright while net/http turns it
-// into a working Basic-auth header. Failing here names the real cause instead.
+// parseBaseURL validates the container's base URL. An empty host, query,
+// fragment or userinfo is rejected rather than carried: each one breaks a
+// channel silently and asymmetrically — a query or fragment mis-builds every
+// REST path (the suffix lands inside the query string) while the receive socket
+// still dials, an empty host fails every REST call while the socket dials
+// localhost:80, and gorilla refuses a dial URL with userinfo outright while
+// net/http turns it into a working Basic-auth header. Failing here names the
+// real cause instead.
 func parseBaseURL(baseURL string) (*url.URL, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
+		// url.Parse's *url.Error echoes the raw URL verbatim, unredacted, so a
+		// BaseURL that both embeds credentials and fails to parse would print
+		// the password into the caller's log — the one case the userinfo check
+		// below cannot catch, since it never runs. Unwrap to the inner cause:
+		// it names the defect ("invalid port ...") without the URL.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
 		return nil, fmt.Errorf("%w: BaseURL does not parse: %w", ErrInvalidConfig, err)
 	}
 	switch u.Scheme {
 	case "http", "https":
 	default:
 		return nil, fmt.Errorf("%w: BaseURL scheme must be http or https, got %q", ErrInvalidConfig, u.Scheme)
+	}
+	if u.Host == "" {
+		// "http:///v2" parses with an empty host and would diverge the two
+		// channels the same way: REST fails loudly with "no Host in request
+		// URL" while the receive socket quietly dials localhost:80.
+		return nil, fmt.Errorf("%w: BaseURL must include a host", ErrInvalidConfig)
 	}
 	if u.RawQuery != "" || u.ForceQuery {
 		return nil, fmt.Errorf("%w: BaseURL must not carry a query string", ErrInvalidConfig)
