@@ -34,9 +34,15 @@ type Attachment = sigint.Attachment
 // ErrMissingConfig is returned by [New] when a required [Config] field is empty.
 var ErrMissingConfig = sigint.ErrMissingConfig
 
+// ErrInvalidConfig is returned by [New] when a [Config] field is present but
+// unusable: a BaseURL that does not parse, is not http/https, or carries a
+// query, fragment or userinfo.
+var ErrInvalidConfig = sigint.ErrInvalidConfig
+
 // New creates a Signal bot that talks to the signal-cli-rest-api container at
 // cfg.BaseURL. The container is dialed when the bot connects, not here. It
-// returns [ErrMissingConfig] if a required config field is missing.
+// returns [ErrMissingConfig] if a required config field is missing and
+// [ErrInvalidConfig] if cfg.BaseURL is unusable.
 func New(cfg Config) (*botbooter.Bot, error) {
 	return sigint.New(cfg)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -196,17 +197,15 @@ func TestNew_MissingNumber(t *testing.T) {
 	asserts.ErrorIs(t, err, ErrMissingConfig, "New without Number should fail")
 }
 
-func TestNew_BadScheme(t *testing.T) {
-	_, err := New(Config{BaseURL: "ftp://127.0.0.1:8080", Number: "+15550001"})
-	asserts.Error(t, err, "New with a non-http BaseURL should fail")
-}
-
 // TestNew_RejectsUnusableBaseURL covers the BaseURL shapes that would otherwise
 // break one channel silently: a query or fragment mis-builds every REST path
 // while the receive socket still dials, and userinfo makes gorilla refuse the
-// dial while REST sends keep working.
+// dial while REST sends keep working. A present-but-unusable BaseURL is
+// ErrInvalidConfig, not ErrMissingConfig — the field is set, just wrong.
 func TestNew_RejectsUnusableBaseURL(t *testing.T) {
 	for _, tc := range []struct{ name, baseURL string }{
+		{"Unparseable", "http://127.0.0.1:8080/\x7f"},
+		{"BadScheme", "ftp://127.0.0.1:8080"},
 		{"Query", "http://127.0.0.1:8080/?token=abc"},
 		{"ForcedEmptyQuery", "http://127.0.0.1:8080/?"},
 		{"Fragment", "http://127.0.0.1:8080#frag"},
@@ -214,7 +213,8 @@ func TestNew_RejectsUnusableBaseURL(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := New(Config{BaseURL: tc.baseURL, Number: "+15550001"})
-			asserts.ErrorIs(t, err, ErrMissingConfig, "New with an unusable BaseURL should fail")
+			asserts.ErrorIs(t, err, ErrInvalidConfig, "New with an unusable BaseURL should fail")
+			asserts.False(t, errors.Is(err, ErrMissingConfig), "a set-but-unusable field is not a missing one")
 		})
 	}
 }

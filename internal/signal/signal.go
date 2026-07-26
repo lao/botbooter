@@ -65,6 +65,11 @@ const (
 // ErrMissingConfig is returned by New when a required Config field is empty.
 var ErrMissingConfig = errors.New("signal: missing required config field")
 
+// ErrInvalidConfig is returned by New when a Config field is present but
+// unusable: a BaseURL that does not parse, is not http/https, or carries a
+// query, fragment or userinfo.
+var ErrInvalidConfig = errors.New("signal: invalid config field")
+
 // Config configures a Signal bot backed by a signal-cli-rest-api container.
 type Config struct {
 	// BaseURL is the container's API base URL, e.g. "http://127.0.0.1:8080".
@@ -157,9 +162,9 @@ type wsConn struct {
 }
 
 // New creates a Signal bot that talks to the signal-cli-rest-api container at
-// cfg.BaseURL. It returns ErrMissingConfig if BaseURL or Number is empty, or
-// an error for an unparseable BaseURL; the container is not dialed until the
-// bot connects.
+// cfg.BaseURL. It returns ErrMissingConfig if BaseURL or Number is empty and
+// ErrInvalidConfig if BaseURL is unusable; the container is not dialed until
+// the bot connects.
 func New(cfg Config) (*core.Bot, error) {
 	a, err := newAdapter(cfg)
 	if err != nil {
@@ -203,21 +208,21 @@ func newAdapter(cfg Config) (*adapter, error) {
 func parseBaseURL(baseURL string) (*url.URL, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("signal: invalid BaseURL: %w", err)
+		return nil, fmt.Errorf("%w: BaseURL does not parse: %w", ErrInvalidConfig, err)
 	}
 	switch u.Scheme {
 	case "http", "https":
 	default:
-		return nil, fmt.Errorf("signal: BaseURL scheme must be http or https, got %q", u.Scheme)
+		return nil, fmt.Errorf("%w: BaseURL scheme must be http or https, got %q", ErrInvalidConfig, u.Scheme)
 	}
 	if u.RawQuery != "" || u.ForceQuery {
-		return nil, fmt.Errorf("%w: BaseURL must not carry a query string", ErrMissingConfig)
+		return nil, fmt.Errorf("%w: BaseURL must not carry a query string", ErrInvalidConfig)
 	}
 	if u.Fragment != "" {
-		return nil, fmt.Errorf("%w: BaseURL must not carry a fragment", ErrMissingConfig)
+		return nil, fmt.Errorf("%w: BaseURL must not carry a fragment", ErrInvalidConfig)
 	}
 	if u.User != nil {
-		return nil, fmt.Errorf("%w: BaseURL must not embed credentials; front the container with a proxy that adds them", ErrMissingConfig)
+		return nil, fmt.Errorf("%w: BaseURL must not embed credentials; front the container with a proxy that adds them", ErrInvalidConfig)
 	}
 	return u, nil
 }

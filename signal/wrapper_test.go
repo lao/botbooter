@@ -20,6 +20,11 @@ func TestNew_MissingBaseURL(t *testing.T) {
 	asserts.ErrorIs(t, err, ErrMissingConfig, "New without BaseURL should fail")
 }
 
+func TestNew_InvalidBaseURL(t *testing.T) {
+	_, err := New(Config{BaseURL: "ftp://127.0.0.1:8080", Number: "+15550001"})
+	asserts.ErrorIs(t, err, ErrInvalidConfig, "New with a non-http BaseURL should fail")
+}
+
 func TestRawMessage_NotSignal(t *testing.T) {
 	_, ok := RawMessage(&botbooter.Message{Raw: 42})
 	asserts.False(t, ok, "RawMessage should report non-signal Raw")
