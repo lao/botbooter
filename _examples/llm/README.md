@@ -1,7 +1,7 @@
 # LLM example
 
 A botbooter bot that answers questions with an LLM. Any adapter (Slack, Discord,
-Telegram, WhatsApp cloud/whatsmeow, Teams, GitHub or the local CLI) is wired to
+Telegram, WhatsApp cloud/whatsmeow, Teams, GitHub, GitLab or the local CLI) is wired to
 [gollm](https://github.com/teilomillet/gollm), so `ask <question>` gets a
 model-generated reply threaded onto the message.
 

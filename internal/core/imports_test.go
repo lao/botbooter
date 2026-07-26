@@ -10,5 +10,5 @@ import (
 // import any platform SDK. Adapters and the facade own those imports.
 func TestCoreImportsNoPlatformSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack", "go-telegram/bot"}, "core")
+		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "gitlab-org/api/client-go"}, "core")
 }

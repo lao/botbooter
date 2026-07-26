@@ -12,5 +12,5 @@ import (
 // module-level isolation deps test.
 func TestGitHubImportsNoForeignSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack", "go-telegram/bot"}, "github")
+		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "gitlab-org/api/client-go"}, "github")
 }
