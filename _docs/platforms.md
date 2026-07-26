@@ -1,10 +1,11 @@
 # Platform setup
 
 How to provision credentials for each platform botbooter supports. Slack,
-Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp,
-Microsoft Teams, GitHub and GitLab need cloud credentials plus a public HTTPS
-webhook; Signal needs no credentials at all, only a running signal-cli-rest-api
-container with a registered phone number; the CLI needs nothing.
+Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
+Cloud API, Microsoft Teams, GitHub and GitLab need cloud credentials
+plus a public HTTPS webhook; WhatsApp Web (whatsmeow) needs only a QR scan;
+Signal needs no credentials at all, only a running signal-cli-rest-api container
+with a registered phone number; the CLI needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/_docs/platforms.md), pkg.go.dev renders the README but not this file.
 
@@ -938,7 +939,8 @@ pre-computed id.
 ### Fallback & errors
 
 A send degrades to a plain channel message when the adapter ignores the options
-(Teams, GitHub, GitLab, CLI) **or** the anchor resolves to nothing — it never fails just because
+(WhatsApp Web/whatsmeow, Teams, GitHub, GitLab, Signal, CLI) **or** the anchor
+resolves to nothing — it never fails just because
 a message can't be threaded. The one loud exception is an explicit
 `WithThreadID` that a platform can't use (an id that isn't a positive message id
 on Telegram), which returns an error rather than silently dropping. `Reply` returns an error only
