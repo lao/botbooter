@@ -24,6 +24,7 @@
 //	go run ./_examples/reactions teams      # reads TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (and optional TEAMS_APP_TENANT_ID, TEAMS_PATH)
 //	go run ./_examples/reactions github     # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR / GITHUB_REPO (comma-separated "owner/name" or "owner/*" list; and optional GITHUB_PATH, GITHUB_POLL_SECONDS, GITHUB_POLL_AUTO_INTERVAL)
 //	go run ./_examples/reactions gitlab     # reads GITLAB_TOKEN / GITLAB_SECRET / GITLAB_ADDR (and optional GITLAB_PATH, GITLAB_BASE_URL)
+//	go run ./_examples/reactions signal     # reads SIGNAL_API_URL / SIGNAL_NUMBER
 //
 // Per-platform setup gotchas for reactions to actually arrive:
 //   - Slack: subscribe the app to the reaction_added Events API event and grant
@@ -56,6 +57,10 @@
 //   - GitLab: the adapter has no reaction ingress in v1, so the echo command
 //     works but OnReaction never fires. (GitLab does send an Emoji webhook, so
 //     unlike GitHub a future version would ride that rather than poll.)
+//   - Signal: signal-cli surfaces reactions on the receive socket, but the
+//     adapter does not map them yet, so the echo command works but OnReaction
+//     never fires. Replies are unthreaded (no quoted-reply egress, so
+//     ReplyToMessage falls back to a plain send).
 //
 // Emoji renders as-is on its origin platform: a unicode character on most
 // platforms, a colon-wrapped shortname (":thumbsup:") on Slack, "<:name:id>"
@@ -80,6 +85,9 @@ import (
 	"github.com/lao/botbooter/discord"
 	"github.com/lao/botbooter/github"
 	"github.com/lao/botbooter/gitlab"
+
+	// Aliased because this file also imports the standard library's os/signal.
+	signalbot "github.com/lao/botbooter/signal"
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
@@ -261,10 +269,16 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Path:    os.Getenv("GITLAB_PATH"),     // optional; defaults to /webhook
 			BaseURL: os.Getenv("GITLAB_BASE_URL"), // optional; empty targets gitlab.com
 		})
+	case "signal":
+		fmt.Fprintln(os.Stderr, "note: the Signal adapter has no reaction ingress, so OnReaction will not fire.")
+		return signalbot.New(signalbot.Config{
+			BaseURL: os.Getenv("SIGNAL_API_URL"), // signal-cli-rest-api container, e.g. "http://127.0.0.1:8080"
+			Number:  os.Getenv("SIGNAL_NUMBER"),  // the bot's own E.164 number
+		})
 	case "cli":
 		fmt.Fprintln(os.Stderr, "CLI has no reactions; run with slack, discord, telegram, whatsapp or whatsmeow to see OnReaction fire.")
 		return cli.New(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github, gitlab or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github, gitlab, signal or cli)", botType)
 	}
 }

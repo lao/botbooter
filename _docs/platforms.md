@@ -1,9 +1,11 @@
 # Platform setup
 
 How to provision credentials for each platform botbooter supports. Slack,
-Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp,
-Microsoft Teams, GitHub and GitLab need cloud credentials plus a public HTTPS
-webhook; the CLI needs nothing.
+Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
+Cloud API, Microsoft Teams, GitHub and GitLab need cloud credentials
+plus a public HTTPS webhook; WhatsApp Web (whatsmeow) needs only a QR scan;
+Signal needs no credentials at all, only a running signal-cli-rest-api container
+with a registered phone number; the CLI needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/_docs/platforms.md), pkg.go.dev renders the README but not this file.
 
@@ -16,6 +18,7 @@ webhook; the CLI needs nothing.
 - Microsoft Teams, [Azure Bot resource](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication)
 - GitHub, [Webhooks](https://docs.github.com/webhooks) · [Creating a GitHub App](https://docs.github.com/apps/creating-github-apps) · [Personal access tokens](https://docs.github.com/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 - GitLab, [Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/) · [Webhook events](https://docs.gitlab.com/user/project/integrations/webhook_events/) · [Personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/)
+- Signal, [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) · [API reference](https://bbernhard.github.io/signal-cli-rest-api/)
 - CLI, [`_examples/basic`](../_examples/basic) and the [README Quickstart](../README.md#quickstart)
 
 ---
@@ -734,6 +737,139 @@ the right outcome.
 
 ---
 
+## Signal
+
+Signal has no official bot API, so botbooter talks to a
+**[signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)
+container** instead: the container owns the Signal protocol (registration,
+encryption, receiving, sending) and the adapter speaks two channels to it —
+inbound messages arrive over the container's **receive WebSocket**
+(`/v1/receive/{number}`), replies go out as plain **REST** calls
+(`POST /v2/send`). There are **no tokens or API keys** — the only credential is
+the phone number registered with the container, and the only things botbooter
+needs are the container's URL and that number.
+
+The only host requirement is **Docker** (the container bundles signal-cli and
+its Java runtime). Like Telegram, this is a dial-out model: outbound
+HTTP/WebSocket only, no public endpoint, port, or webhook to host.
+
+#### Step 1, Run the container
+
+Run it in **`json-rpc` mode** — the adapter's receive WebSocket only exists
+there (the default `normal` mode spawns a signal-cli process per request and
+serves receive as a plain GET, which the adapter does not use):
+
+```bash
+docker run -d --name signal-api --restart=always \
+	-p 127.0.0.1:8080:8080 \
+	-v $HOME/.local/share/signal-api:/home/.local/share/signal-cli \
+	-e MODE=json-rpc \
+	bbernhard/signal-cli-rest-api
+```
+
+> ⚠️ **The API is unauthenticated**: anyone who can reach it can read and send
+> as the bot's account (and fetch its attachments). Publish the port on
+> `127.0.0.1` (or a private network) only, and never expose it to the internet.
+
+The volume holds the account state — keep it, or you'll re-register on every
+container recreate.
+
+#### Step 2, Register a phone number
+
+The bot needs its **own** phone number (a landline or VoIP number works —
+registration can verify by voice call). Either link the container to an
+existing Signal account as a secondary device — open
+
+```text
+http://127.0.0.1:8080/v1/qrcodelink?device_name=botbooter
+```
+
+in a browser and scan the QR code with the Signal app (*Settings → Linked
+devices*) — or register the number as a primary device over the API:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/register/+15550001
+curl -X POST http://127.0.0.1:8080/v1/register/+15550001/verify/123-456   # the SMS/voice code
+```
+
+If `register` fails with a captcha error, solve one at
+[signalcaptchas.org/registration/generate.html](https://signalcaptchas.org/registration/generate.html)
+and POST it in the body: `{"captcha": "signalcaptcha://…"}`.
+
+Prefer a dedicated number for a bot: with a linked device the bot shares your
+account, and messages you send yourself won't reach it (the adapter drops the
+bot's own messages to avoid reply loops).
+
+#### Step 3, Run the bot
+
+```go
+import "github.com/lao/botbooter/signal"
+
+bot, err := signal.New(signal.Config{
+	BaseURL: os.Getenv("SIGNAL_API_URL"), // e.g. "http://127.0.0.1:8080"; required
+	Number:  os.Getenv("SIGNAL_NUMBER"),  // the bot's own E.164 number, e.g. "+15550001"; required
+})
+```
+
+Optional `signal.Config` fields: `DialTimeout` (bounds the receive-socket
+handshake, default 10s), `SendTimeout` (bounds each send round-trip, default
+30s), and `HTTPClient` (the outbound REST client).
+
+> ⚠️ **The adapter does not reconnect.** Losing the receive socket — the
+> `--restart=always` container being updated, a proxy dropping an idle
+> connection — ends `Run` with a `receive socket closed` error. That is unlike
+> Slack, Discord, Telegram and whatsmeow, whose SDKs re-dial internally, so the
+> usual `log.Fatal(bot.Run(ctx))` exits the process on the first blip. **Run the
+> bot under a supervisor** (systemd, Docker restart policy, Kubernetes) or
+> re-`Run` it yourself with backoff. A re-dial loop in the adapter is a possible
+> follow-up.
+
+Message the bot from **another** account; it drops its own messages.
+
+A sender who does not share their phone number arrives with a UUID instead (the
+`sourceNumber` field is absent — Signal's phone-number privacy), so
+`Message.UserID`/`ChannelID` is that UUID; whether the container accepts it as a
+`/v2/send` recipient depends on its signal-cli version, so a reply may fail with
+the container's own error. An envelope carrying no sender identity at all is
+dropped with a warning.
+
+**Groups.** A group message arrives with `ChannelID` set to `"group:"+groupID`,
+and replying to that `ChannelID` posts back to the group — the adapter converts
+the id to the REST API's group-recipient form internally, so handlers need no
+special casing. The raw group id is on `signal.RawMessage(m).GroupID`.
+
+**Attachments.** The container delivers attachments by id and serves the bytes
+itself, so `Attachment.URL` points at its `/v1/attachments/{id}` endpoint —
+fetch it with any HTTP client (the URL is only as reachable, and as private, as
+the container). `Attachment.ExtraData` carries a `*signal.Attachment` with the
+id, content type, filename and size.
+
+**Environment variables** (read by the bundled example):
+
+| Variable | Value |
+|---|---|
+| `SIGNAL_API_URL` | container base URL from step 1, e.g. `http://127.0.0.1:8080` |
+| `SIGNAL_NUMBER` | the bot's own number registered in step 2 (`+15550001`) |
+
+#### No messages?
+
+- **`Connect` fails**: the container isn't running, `SIGNAL_API_URL` is wrong,
+  or the container isn't in `json-rpc` mode — the receive WebSocket only exists
+  there (check `docker logs signal-api`).
+- **`Send` fails**: the REST call surfaces the container's error message —
+  typically an unregistered number, or a number that doesn't match the
+  registered account.
+- **Nothing arrives**: you're messaging from the bot's own account (drop-own
+  filtering), or the number never finished registration/linking — hit
+  `http://127.0.0.1:8080/v1/accounts` to list registered accounts.
+
+**Reactions.** The Signal adapter does not surface reaction events, so
+`bot.OnReaction` never fires — the echo/command path works, reactions do not.
+
+**Official docs:** [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) · [API reference](https://bbernhard.github.io/signal-cli-rest-api/) · [Execution modes](https://github.com/bbernhard/signal-cli-rest-api#execution-modes) · [signal-cli](https://github.com/AsamK/signal-cli)
+
+---
+
 ## CLI
 
 No credentials, no portal, no setup. The CLI adapter reads from stdin and
@@ -787,6 +923,7 @@ Two options carry the anchor:
 | **Teams** | — (options ignored) | — | — | always a plain channel send |
 | **GitHub** | — (options ignored) | — | — | always a plain issue comment (issue comment threads are flat — a reply already lands in the conversation) |
 | **GitLab** | — (options ignored) | — | — | always a plain note (threading via GitLab discussions — the payload's `discussion_id` — is a deliberate v1 omission) |
+| **Signal** | — (options ignored) | — | — | always a plain channel send (quoted replies are a possible follow-up) |
 | **CLI** | — (options ignored) | — | — | always a plain channel send |
 
 The reply anchor assumes you send to the message's **own channel**; e.g. a
@@ -818,7 +955,8 @@ pre-computed id.
 ### Fallback & errors
 
 A send degrades to a plain channel message when the adapter ignores the options
-(Teams, GitHub, GitLab, CLI) **or** the anchor resolves to nothing — it never fails just because
+(WhatsApp Web/whatsmeow, Teams, GitHub, GitLab, Signal, CLI) **or** the anchor
+resolves to nothing — it never fails just because
 a message can't be threaded. The one loud exception is an explicit
 `WithThreadID` that a platform can't use (an id that isn't a positive message id
 on Telegram), which returns an error rather than silently dropping. `Reply` returns an error only

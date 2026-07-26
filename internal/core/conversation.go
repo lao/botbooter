@@ -272,8 +272,9 @@ func (f *Flow) timeoutOrDefault() time.Duration {
 // channel. The NUL separator is unambiguous because no supported platform's UserID
 // or ChannelID contains a NUL byte (Slack/Discord/Telegram ids are numeric or
 // alphanumeric, WhatsApp ids are numeric, Teams ids are prefixed alphanumerics
-// like "29:"/"19:", GitHub ids are "owner/repo"/issue-number strings, and the CLI
-// is single-user trusted input).
+// like "29:"/"19:", GitHub ids are "owner/repo"/issue-number strings, GitLab ids
+// are "group/project#iid"/"group/project!iid", Signal ids are E.164 numbers or
+// "group:"-prefixed group ids, and the CLI is single-user trusted input).
 func conversationKey(m *Message) string {
 	return m.UserID + "\x00" + m.ChannelID
 }

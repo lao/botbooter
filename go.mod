@@ -12,6 +12,7 @@ require (
 	github.com/go-telegram/bot v1.21.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/go-github/v88 v88.0.0
+	github.com/gorilla/websocket v1.5.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/slack-go/slack v0.12.1
 	gitlab.com/gitlab-org/api/client-go v1.46.0
@@ -29,7 +30,6 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

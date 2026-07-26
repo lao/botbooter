@@ -39,6 +39,7 @@ const (
 	WhatsMeowBotType
 	GitHubBotType
 	GitLabBotType
+	SignalBotType
 )
 
 // String returns the lowercase platform name for t, or "BotType(n)" for an
@@ -63,6 +64,8 @@ func (t BotType) String() string {
 		return "github"
 	case GitLabBotType:
 		return "gitlab"
+	case SignalBotType:
+		return "signal"
 	default:
 		return fmt.Sprintf("BotType(%d)", int(t))
 	}
@@ -654,6 +657,9 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 //     (it rides in on the inbound Activity), so treat it as an SSRF hazard:
 //     validate the host/scheme before fetching, never let it target an internal
 //     address.
+//   - Signal: the signal-cli-rest-api container's /v1/attachments/{id} endpoint —
+//     a plain GET, but only as reachable (and as private) as the container, which
+//     is unauthenticated: keep it off the public internet.
 //   - CLI: a local filesystem path (open with os.Open), not an HTTP URL.
 func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error) {
 	if b.adapter == nil {

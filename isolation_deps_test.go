@@ -43,6 +43,11 @@ func TestIsolationDeps(t *testing.T) {
 		// full versioned module path matches the other constants and how
 		// `go list -deps` emits it.
 		jwtv5 = "github.com/golang-jwt/jwt/v5"
+		// gorillaws is the Signal adapter's only third-party dependency (the
+		// receive-socket transport). It is deliberately NOT in any absent list:
+		// slack-go and discordgo pull it in as their own websocket transport, so
+		// its presence proves nothing about cross-platform leakage.
+		gorillaws = "github.com/gorilla/websocket"
 		// gogithubSDK and ghinstall are version-agnostic substrings: go-github
 		// cuts majors often (currently v88) and ghinstallation pins its own
 		// go-github major, so a fully versioned path would miss a future bump.
@@ -71,7 +76,7 @@ func TestIsolationDeps(t *testing.T) {
 	// also assert directly on the first-party internal/<platform> build paths:
 	// each public package must contain only its own platform's internal package.
 	const internalBase = "github.com/lao/botbooter/internal/"
-	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp/cloud", "whatsapp/whatsmeow", "teams", "github", "gitlab"}
+	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp/cloud", "whatsapp/whatsmeow", "teams", "github", "gitlab", "signal"}
 	cases := []struct {
 		pkg         string
 		absent      []string
@@ -92,6 +97,7 @@ func TestIsolationDeps(t *testing.T) {
 		// The gitlab row's closure contains only its own SDK among the banned
 		// set: client-go pulls no jwt, no go-github, and no other platform SDK.
 		{"github.com/lao/botbooter/gitlab", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{gitlabSDK}, "gitlab"},
+		{"github.com/lao/botbooter/signal", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, []string{gorillaws}, "signal"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.pkg, func(t *testing.T) {
