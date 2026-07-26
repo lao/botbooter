@@ -23,6 +23,7 @@
 //	go run ./_examples/reactions whatsmeow  # WhatsApp Web flavor: no credentials; scan the QR on first run (optional WA_MEOW_DB)
 //	go run ./_examples/reactions teams      # reads TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (and optional TEAMS_APP_TENANT_ID, TEAMS_PATH)
 //	go run ./_examples/reactions github     # reads GITHUB_TOKEN (or GITHUB_APP_ID / GITHUB_INSTALLATION_ID / GITHUB_PRIVATE_KEY_FILE) / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR / GITHUB_REPO (comma-separated "owner/name" or "owner/*" list; and optional GITHUB_PATH, GITHUB_POLL_SECONDS, GITHUB_POLL_AUTO_INTERVAL)
+//	go run ./_examples/reactions gitlab     # reads GITLAB_TOKEN / GITLAB_SECRET / GITLAB_ADDR (and optional GITLAB_PATH, GITLAB_BASE_URL)
 //
 // Per-platform setup gotchas for reactions to actually arrive:
 //   - Slack: subscribe the app to the reaction_added Events API event and grant
@@ -52,6 +53,9 @@
 //     raises the interval automatically; GITHUB_POLL_AUTO_INTERVAL=off keeps
 //     the configured interval instead (the warning still logs). Without
 //     GITHUB_REPO the echo command works but OnReaction never fires.
+//   - GitLab: the adapter has no reaction ingress in v1, so the echo command
+//     works but OnReaction never fires. (GitLab does send an Emoji webhook, so
+//     unlike GitHub a future version would ride that rather than poll.)
 //
 // Emoji renders as-is on its origin platform: a unicode character on most
 // platforms, a colon-wrapped shortname (":thumbsup:") on Slack, "<:name:id>"
@@ -75,6 +79,7 @@ import (
 	"github.com/lao/botbooter/cli"
 	"github.com/lao/botbooter/discord"
 	"github.com/lao/botbooter/github"
+	"github.com/lao/botbooter/gitlab"
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
 	"github.com/lao/botbooter/telegram"
@@ -247,10 +252,19 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		})
 	case "github":
 		return newGitHubBot()
+	case "gitlab":
+		fmt.Fprintln(os.Stderr, "note: the GitLab adapter has no reaction ingress in v1, so OnReaction will not fire.")
+		return gitlab.New(gitlab.Config{
+			Token:   os.Getenv("GITLAB_TOKEN"),  // personal, project or group access token
+			Secret:  os.Getenv("GITLAB_SECRET"), // the webhook's "Secret token"
+			Addr:    os.Getenv("GITLAB_ADDR"),
+			Path:    os.Getenv("GITLAB_PATH"),     // optional; defaults to /webhook
+			BaseURL: os.Getenv("GITLAB_BASE_URL"), // optional; empty targets gitlab.com
+		})
 	case "cli":
 		fmt.Fprintln(os.Stderr, "CLI has no reactions; run with slack, discord, telegram, whatsapp or whatsmeow to see OnReaction fire.")
 		return cli.New(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github, gitlab or cli)", botType)
 	}
 }

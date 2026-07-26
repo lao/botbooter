@@ -10,6 +10,7 @@ import (
 	"github.com/lao/botbooter/cli"
 	"github.com/lao/botbooter/discord"
 	"github.com/lao/botbooter/github"
+	"github.com/lao/botbooter/gitlab"
 	"github.com/lao/botbooter/signal"
 	"github.com/lao/botbooter/slack"
 	"github.com/lao/botbooter/teams"
@@ -79,6 +80,14 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			cfg.AppID, cfg.InstallationID, cfg.PrivateKey = appID, installationID, key
 		}
 		return github.New(cfg)
+	case "gitlab":
+		return gitlab.New(gitlab.Config{
+			Token:   os.Getenv("GITLAB_TOKEN"),  // personal, project or group access token
+			Secret:  os.Getenv("GITLAB_SECRET"), // the webhook's "Secret token"
+			Addr:    os.Getenv("GITLAB_ADDR"),
+			Path:    os.Getenv("GITLAB_PATH"),     // optional; defaults to /webhook
+			BaseURL: os.Getenv("GITLAB_BASE_URL"), // optional; empty targets gitlab.com
+		})
 	case "signal":
 		return signal.New(signal.Config{
 			BaseURL: os.Getenv("SIGNAL_API_URL"), // signal-cli-rest-api container, e.g. "http://127.0.0.1:8080"
@@ -88,6 +97,6 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)
 		return cli.New(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github, signal or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github, gitlab, signal or cli)", botType)
 	}
 }

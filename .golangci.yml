@@ -19,6 +19,11 @@ linters:
       rules:
         # Require doc comments on exported identifiers (godoc coverage gate).
         - name: exported
+    misspell:
+      # "noteable" is GitLab's own API spelling (noteable_type in Note Hook
+      # payloads), not a typo — keep misspell from "correcting" it to "notable".
+      ignore-rules:
+        - noteable
   exclusions:
     rules:
       # Hardening lints target production servers; test fixtures and the

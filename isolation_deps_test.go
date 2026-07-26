@@ -65,31 +65,39 @@ func TestIsolationDeps(t *testing.T) {
 		// point is a dependency-free build.
 		whatsmeowSDK  = "go.mau.fi/whatsmeow"
 		moderncSQLite = "modernc.org/sqlite"
+		// gitlabSDK is the GitLab adapter's own SDK. It is hosted on gitlab.com
+		// (not github.com), so its path never collides with go-github's
+		// github.com/google/go-github; it must stay confined to the gitlab
+		// closure and never leak into another package.
+		gitlabSDK = "gitlab.com/gitlab-org/api/client-go"
 	)
 	// The SDK checks above miss a cross-import of a marker-less internal package
 	// (internal/cli and internal/whatsapp/cloud pull in no third-party SDK), so
 	// also assert directly on the first-party internal/<platform> build paths:
 	// each public package must contain only its own platform's internal package.
 	const internalBase = "github.com/lao/botbooter/internal/"
-	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp/cloud", "whatsapp/whatsmeow", "teams", "github", "signal"}
+	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp/cloud", "whatsapp/whatsmeow", "teams", "github", "gitlab", "signal"}
 	cases := []struct {
 		pkg         string
 		absent      []string
 		present     []string
 		internalOwn string // the one internal/<platform> its closure may contain ("" = none)
 	}{
-		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, nil, ""},
-		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, nil, "cli"},
-		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{slackgo}, "slack"},
-		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{discordgo}, "discord"},
-		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{gotelegram}, "telegram"},
-		{"github.com/lao/botbooter/whatsapp/cloud", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, nil, "whatsapp/cloud"},
-		{"github.com/lao/botbooter/whatsapp/whatsmeow", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4}, []string{whatsmeowSDK, moderncSQLite}, "whatsapp/whatsmeow"},
-		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{jwtv5}, "teams"},
+		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, nil, ""},
+		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, nil, "cli"},
+		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, []string{slackgo}, "slack"},
+		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, []string{discordgo}, "discord"},
+		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, []string{gotelegram}, "telegram"},
+		{"github.com/lao/botbooter/whatsapp/cloud", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, nil, "whatsapp/cloud"},
+		{"github.com/lao/botbooter/whatsapp/whatsmeow", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, []string{whatsmeowSDK, moderncSQLite}, "whatsapp/whatsmeow"},
+		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, []string{jwtv5}, "teams"},
 		// The github row's closure legitimately contains jwtv4 (pulled in by
 		// ghinstallation) but must not contain jwtv5, which is Teams' own major.
-		{"github.com/lao/botbooter/github", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite}, []string{gogithubSDK, ghinstall, jwtv4}, "github"},
-		{"github.com/lao/botbooter/signal", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{gorillaws}, "signal"},
+		{"github.com/lao/botbooter/github", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gitlabSDK}, []string{gogithubSDK, ghinstall, jwtv4}, "github"},
+		// The gitlab row's closure contains only its own SDK among the banned
+		// set: client-go pulls no jwt, no go-github, and no other platform SDK.
+		{"github.com/lao/botbooter/gitlab", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4}, []string{gitlabSDK}, "gitlab"},
+		{"github.com/lao/botbooter/signal", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, []string{gorillaws}, "signal"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.pkg, func(t *testing.T) {
