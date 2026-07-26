@@ -13,11 +13,13 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/lao/botbooter/internal/core"
 )
 
 const (
 	// tokenScope requests an app-only token for the Bot Connector service.
-	tokenScope = "https://api.botframework.com/.default"
+	tokenScope = "https://api.botframework.com/.default" //nolint:gosec // OAuth scope URL, not a credential
 	// tokenRefreshSkew refreshes the outbound token a little before it expires.
 	tokenRefreshSkew = time.Minute
 )
@@ -44,8 +46,9 @@ type outboundActivity struct {
 
 // Send posts a text reply to the conversation channelID. The serviceUrl and bot
 // account come from the map populated on inbound Activities, so Send fails if no
-// Activity has been seen for channelID yet.
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
+// Activity has been seen for channelID yet. Teams has no thread anchor here, so
+// SendOptions is ignored — a reply already lands in the originating conversation.
+func (a *adapter) Send(ctx context.Context, channelID, text string, _ core.SendOptions) error {
 	a.mu.Lock()
 	conv, ok := a.convs[channelID]
 	a.mu.Unlock()
@@ -111,17 +114,33 @@ func (a *adapter) invalidateToken() {
 	a.mu.Unlock()
 }
 
+// cachedToken returns the cached outbound token when it is present and not within
+// tokenRefreshSkew of expiry, reporting whether it is usable.
+func (a *adapter) cachedToken() (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.token.value != "" && time.Until(a.token.expiry) > tokenRefreshSkew {
+		return a.token.value, true
+	}
+	return "", false
+}
+
 // accessToken returns a cached Bot Connector token, minting a fresh one via the
 // client-credentials grant when the cache is empty or near expiry. The network
-// call is made outside the lock.
+// call is made outside a.mu.
 func (a *adapter) accessToken(ctx context.Context) (string, error) {
-	a.mu.Lock()
-	if a.token.value != "" && time.Until(a.token.expiry) > tokenRefreshSkew {
-		v := a.token.value
-		a.mu.Unlock()
+	if v, ok := a.cachedToken(); ok {
 		return v, nil
 	}
-	a.mu.Unlock()
+
+	// Serialize cold mints so a burst of concurrent Sends makes a single token
+	// request; re-check the cache after winning tokenMu since a concurrent mint
+	// may have already populated it (mirrors the JWKS fetchMu coalescing).
+	a.tokenMu.Lock()
+	defer a.tokenMu.Unlock()
+	if v, ok := a.cachedToken(); ok {
+		return v, nil
+	}
 
 	form := url.Values{
 		"grant_type":    {"client_credentials"},

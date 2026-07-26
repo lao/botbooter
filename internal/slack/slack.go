@@ -30,13 +30,40 @@ type adapter struct {
 	client *slackapi.Client
 	socket *socketmode.Client
 
-	// Per-connection dispatch state, guarded by mu. A dedicated dispatcher
-	// goroutine drains queue in order so a slow handler cannot freeze the event
-	// pump, and Disconnect waits on drained so in-flight work is not abandoned.
+	// ackFn, when non-nil, replaces the socket client's Ack. It is a test seam
+	// for observing acknowledgements without a live WebSocket connection; in
+	// production it is nil and ack delegates to a.socket.Ack.
+	ackFn func(socketmode.Request)
+
+	// Per-connection dispatch state, guarded by mu.
+	//
+	// Ordering/throughput contract (intentional — do not "optimize" this into a
+	// worker pool without preserving it): a single dedicated dispatcher goroutine
+	// drains queue strictly in enqueue order, so handlers observe events in the
+	// order Slack delivered them and never run concurrently. The event pump acks
+	// each event up front (prepareDispatch, on the pump goroutine) and only then
+	// enqueues its dispatch, so a slow handler does not delay the ack of the event
+	// it is handling. That decoupling is not unbounded, though: if handlers are
+	// slower than arrival the buffered queue (dispatchBuffer) fills, the pump
+	// blocks on the enqueue, and acking of *subsequent* events stalls behind it —
+	// past Slack's ~3s ack window that surfaces as redelivery, i.e. duplicate
+	// dispatches. A consumer needing high concurrent throughput must fan out
+	// inside its own handler; the adapter keeps strict in-order delivery by
+	// design. Disconnect waits on drained so in-flight work is not abandoned.
 	mu             sync.Mutex
 	queue          chan func()
 	drained        chan struct{}
 	detachedCancel context.CancelFunc
+}
+
+// ack acknowledges a Socket Mode request, routing through the ackFn test seam
+// when one is installed and otherwise the socket client's Ack.
+func (a *adapter) ack(req socketmode.Request) {
+	if a.ackFn != nil {
+		a.ackFn(req)
+		return
+	}
+	a.socket.Ack(req)
 }
 
 // startDispatcher launches the in-order dispatch goroutine for one connection
@@ -149,7 +176,7 @@ func (a *adapter) Disconnect() error {
 	select {
 	case <-drained:
 	case <-time.After(dispatchDrainTimeout):
-		err = fmt.Errorf("slack: dispatch drain timed out")
+		err = errors.New("slack: dispatch drain timed out")
 	}
 	if cancel != nil {
 		cancel()
@@ -167,10 +194,31 @@ func (a *adapter) Disconnect() error {
 	return err
 }
 
-// Send posts text to channelID via the Web API.
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
-	_, _, err := a.client.PostMessageContext(ctx, channelID, slackapi.MsgOptionText(text, false))
+// Send posts text to channelID via the Web API. With a threading option it posts
+// into a thread: the resolved thread_ts is opts.ThreadID when set, else the
+// inbound message's ReplyToID (its ThreadTimeStamp). A top-level channel message
+// has no ReplyToID, so InReplyTo yields no thread_ts and a plain top-level reply
+// — m.ID is deliberately not used as a thread_ts, which would start a stray
+// sub-thread. A caller can still force one via WithThreadID.
+func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
+	threadTS := opts.ThreadID
+	if threadTS == "" && opts.ReplyTo != nil {
+		threadTS = opts.ReplyTo.ReplyToID
+	}
+	msgOpts := []slackapi.MsgOption{slackapi.MsgOptionText(text, false)}
+	if threadTS != "" {
+		msgOpts = append(msgOpts, slackapi.MsgOptionTS(threadTS))
+	}
+	_, _, err := a.client.PostMessageContext(ctx, channelID, msgOpts...)
 	return err
+}
+
+// SendThreaded implements [core.ThreadedSender]: it posts text in the thread of
+// the message identified by replyToID (a Slack ts) by delegating to Send with a
+// WithThreadID option. An empty replyToID inherits Send's guard and degrades to
+// a plain top-level channel message (no thread_ts).
+func (a *adapter) SendThreaded(ctx context.Context, channelID, replyToID, text string) error {
+	return a.Send(ctx, channelID, text, core.SendOptions{ThreadID: replyToID})
 }
 
 // Attachments returns the files attached to the message's Slack event.
@@ -194,6 +242,13 @@ func (a *adapter) ResolveAttachmentURL(_ context.Context, att core.Attachment) (
 // m originated from Slack.
 func RawEvent(m *core.Message) (*slackevents.MessageEvent, bool) {
 	e, ok := m.Raw.(*slackevents.MessageEvent)
+	return e, ok
+}
+
+// RawReaction returns the raw Slack reaction event carried on r, reporting
+// whether r originated from Slack.
+func RawReaction(r *core.Reaction) (*slackevents.ReactionAddedEvent, bool) {
+	e, ok := r.Raw.(*slackevents.ReactionAddedEvent)
 	return e, ok
 }
 
@@ -231,14 +286,34 @@ func toMessage(msg *slackevents.MessageEvent) *core.Message {
 	}
 }
 
+// toReaction maps a Slack reaction_added event onto a platform-agnostic Reaction.
+// The reacted message's channel and ts live under Item; Emoji is the Slack
+// shortname wrapped in colons (e.g. ":thumbsup:") so it renders as-is when sent
+// back in a Slack message — covering custom workspace emojis too, which have no
+// unicode form. AuthorName is left empty (the event carries only a user id).
+func toReaction(ev *slackevents.ReactionAddedEvent) *core.Reaction {
+	return &core.Reaction{
+		Emoji:     ":" + ev.Reaction + ":",
+		UserID:    ev.User,
+		ChannelID: ev.Item.Channel,
+		MessageID: ev.Item.Timestamp,
+		Raw:       ev,
+	}
+}
+
 // slackMentionRE matches "<@U123>" and "<@U123|label>" mention tokens.
 var slackMentionRE = regexp.MustCompile(`<@([A-Z0-9]+)(?:\|[^>]*)?>`)
 
 // slackMentions extracts mentioned user ids from message text, returning nil
-// when there are none.
+// when there are none. Each id appears once, in first-mention order.
 func slackMentions(text string) []string {
 	var ids []string
+	seen := make(map[string]bool)
 	for _, m := range slackMentionRE.FindAllStringSubmatch(text, -1) {
+		if seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
 		ids = append(ids, m[1])
 	}
 	return ids
@@ -261,7 +336,7 @@ func parseSlackTimestamp(ts string) time.Time {
 	if frac != "" {
 		// Slack's fraction is microseconds; pad/truncate to 6 digits. ParseUint
 		// rejects a sign, so a malformed fraction leaves nsec at 0.
-		if micros, err := strconv.ParseUint((frac + "000000")[:6], 10, 64); err == nil {
+		if micros, err := strconv.ParseUint((frac + "000000")[:6], 10, 32); err == nil {
 			nsec = int64(micros) * 1000
 		}
 	}
@@ -271,16 +346,22 @@ func parseSlackTimestamp(ts string) time.Time {
 // prepareDispatch acknowledges evt on the event-pump goroutine and returns a
 // closure that dispatches it, or nil when evt carries nothing to dispatch. Ack
 // stays on the pump so it is never delayed behind queued handler work.
+//
+// Every payload carrying a Request is acked, not just Events API messages:
+// slash-command and interactive payloads ride the same Socket Mode connection,
+// and an un-acked Request makes Slack show the user an error and redeliver. Only
+// Events API payloads are dispatched, so those other Request-bearing types are
+// acked-and-dropped here rather than falling through un-acked.
 func (a *adapter) prepareDispatch(ctx context.Context, evt socketmode.Event, deps core.AdapterDeps) func() {
+	if evt.Request != nil {
+		a.ack(*evt.Request)
+	}
 	if evt.Type != socketmode.EventTypeEventsAPI {
 		return nil
 	}
 	payload, ok := evt.Data.(slackevents.EventsAPIEvent)
 	if !ok {
 		return nil
-	}
-	if evt.Request != nil {
-		a.socket.Ack(*evt.Request)
 	}
 	return func() { a.handleEventsAPI(ctx, payload, deps) }
 }
@@ -292,27 +373,32 @@ func (a *adapter) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEv
 
 	if msg, ok := e.InnerEvent.Data.(*slackevents.MessageEvent); ok {
 		deps.Dispatch(ctx, toMessage(msg))
+		return
+	}
+
+	// reaction_added carries no BotID, so isBotMessage never blocks it. There is
+	// no self-reaction filter: the bot never adds reactions (no reaction egress),
+	// so a self-reply loop is impossible. Only message reactions carry a channel +
+	// ts to reply to; reactions on files/file-comments leave Item.Channel and
+	// Item.Timestamp empty, so skip them to keep Reaction.ChannelID/MessageID set.
+	if react, ok := e.InnerEvent.Data.(*slackevents.ReactionAddedEvent); ok {
+		if react.Item.Type != "message" {
+			return
+		}
+		deps.DispatchReaction(ctx, toReaction(react))
 	}
 }
 
 // shouldSkipEvent reports whether an inbound event must not be dispatched: it
 // drops messages from bots (loop prevention) and messages with no text and no
-// files (nothing actionable — e.g. edits, joins).
+// files (nothing actionable — e.g. edits, joins). Only *MessageEvent needs skip
+// logic because handleEventsAPI dispatches nothing else.
 func shouldSkipEvent(event slackevents.EventsAPIEvent) bool {
-	switch ev := event.InnerEvent.Data.(type) {
-	case *slackevents.MessageEvent:
-		return ev.BotID != "" || ev.SubType == "bot_message" || (ev.Text == "" && len(ev.Files) == 0)
-	case *slackevents.AppMentionEvent:
-		return ev.BotID != ""
-	case *slackevents.MessageMetadataPostedEvent:
-		return ev.BotId != ""
-	case *slackevents.MessageMetadataUpdatedEvent:
-		return ev.BotId != ""
-	case *slackevents.MessageMetadataDeletedEvent:
-		return ev.BotId != ""
-	default:
+	ev, ok := event.InnerEvent.Data.(*slackevents.MessageEvent)
+	if !ok {
 		return false
 	}
+	return ev.BotID != "" || ev.SubType == "bot_message" || (ev.Text == "" && len(ev.Files) == 0)
 }
 
 func attachmentsFromMessage(m *slackevents.MessageEvent) []core.Attachment {

@@ -1,10 +1,10 @@
 # Platform setup
 
 How to provision credentials for each platform botbooter supports. Slack,
-Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
-and Microsoft Teams need cloud credentials plus a public HTTPS webhook; Signal
-needs no credentials at all, only a running signal-cli-rest-api container with
-a registered phone number; the CLI needs nothing.
+Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp,
+Microsoft Teams and GitHub need cloud credentials plus a public HTTPS webhook;
+Signal needs no credentials at all, only a running signal-cli-rest-api container
+with a registered phone number; the CLI needs nothing.
 
 > 📖 This page is best viewed [on GitHub](https://github.com/lao/botbooter/blob/main/_docs/platforms.md), pkg.go.dev renders the README but not this file.
 
@@ -15,8 +15,9 @@ a registered phone number; the CLI needs nothing.
 - Telegram, [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api)
 - WhatsApp, [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks getting started](https://developers.facebook.com/docs/graph-api/webhooks/getting-started)
 - Microsoft Teams, [Azure Bot resource](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication)
+- GitHub, [Webhooks](https://docs.github.com/webhooks) · [Creating a GitHub App](https://docs.github.com/apps/creating-github-apps) · [Personal access tokens](https://docs.github.com/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 - Signal, [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) · [API reference](https://bbernhard.github.io/signal-cli-rest-api/)
-- CLI, [`_examples/v1`](../_examples/v1) and the [README Quickstart](../README.md#quickstart)
+- CLI, [`_examples/basic`](../_examples/basic) and the [README Quickstart](../README.md#quickstart)
 
 ---
 
@@ -50,7 +51,10 @@ token* (`xapp-…`) and a *bot token* (`xoxb-…`).
 ```go
 import "github.com/lao/botbooter/slack"
 
-bot := slack.New(os.Getenv("SLACK_APP_TOKEN"), os.Getenv("SLACK_BOT_TOKEN"))
+bot, err := slack.New(slack.Config{
+	AppToken: os.Getenv("SLACK_APP_TOKEN"), // xapp-…
+	BotToken: os.Getenv("SLACK_BOT_TOKEN"), // xoxb-…
+})
 ```
 
 **Environment variables** (read by the bundled example):
@@ -69,6 +73,13 @@ It's almost always one of:
 - **The bot isn't in the channel**: run `/invite @your-bot`.
 - **Re-install skipped after a scope change**: scopes only take effect once
   you re-install the app.
+
+**Reactions.** To make `bot.OnReaction` fire, also subscribe the app to the
+`reaction_added` Events API event (step 4) and grant the
+[`reactions:read`](https://docs.slack.dev/reference/scopes/reactions.read/)
+bot-token scope (step 3). Without both, reactions are never delivered. Slack's
+`reaction_added` event carries no bot flag, so the adapter cannot filter other
+bots' reactions — guard reply-emitting reaction handlers against loops.
 
 **Official docs:** [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/) · [`connections:write` scope](https://docs.slack.dev/reference/scopes/connections.write/) · [Your apps dashboard](https://api.slack.com/apps)
 
@@ -102,6 +113,14 @@ bot, err := discord.New(os.Getenv("DISCORD_BOT_TOKEN"))
 | Variable | Value |
 |---|---|
 | `DISCORD_BOT_TOKEN` | bot token from step 1 |
+
+**Reactions.** The constructor requests the
+[`GUILD_MESSAGE_REACTIONS` and `DIRECT_MESSAGE_REACTIONS`](https://discord.com/developers/docs/events/gateway#list-of-intents)
+gateway intents so `bot.OnReaction` fires. Unlike the Message Content Intent
+above, these are **standard** (non-privileged) intents — requested in code, with
+no toggle to flip in the developer portal. The adapter drops reactions from bot
+users in guilds; DM reactions carry no member record, so a bot reactor in a DM is
+not filtered.
 
 **Official docs:** [Developer Portal](https://discord.com/developers/applications) · [Gateway intents](https://discord.com/developers/docs/events/gateway) · [What are Privileged Intents?](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents)
 
@@ -147,11 +166,32 @@ logs a one-line warning to that effect; set the
 `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING` environment variable to any non-empty
 value to silence it.
 
+**Reactions.** Reaction updates are delivered in **private chats**, and in
+**groups only when the bot is an administrator**. The adapter requests the
+`message_reaction` update in addition to the default set, so `bot.OnReaction`
+works out of the box once the admin/private-chat requirement is met; reactions
+from bot users are dropped.
+
 **Official docs:** [BotFather](https://t.me/BotFather) · [Bot API](https://core.telegram.org/bots/api) · [getUpdates / long polling](https://core.telegram.org/bots/api#getupdates)
 
 ---
 
 ## WhatsApp
+
+WhatsApp comes in **two flavors, selected by import path**:
+
+- **`botbooter/whatsapp/cloud`** — the official **Meta WhatsApp Business Cloud
+  API** (this section). Needs a Meta Business app, a token and a public HTTPS
+  webhook; pulls in no third-party dependency.
+- **`botbooter/whatsapp/whatsmeow`** — the **WhatsApp Web multidevice protocol**
+  via [whatsmeow](https://github.com/tulir/whatsmeow) (see
+  [below](#whatsapp-web-whatsmeow)). Pairs with a phone by QR code like WhatsApp
+  Web; no Meta account, credentials or webhook, but it drives a linked personal
+  account over an unofficial protocol.
+
+Only the flavor you import is compiled into your binary.
+
+### Cloud API flavor
 
 botbooter speaks the **Meta WhatsApp Business Cloud API**. Unlike the dial-out
 platforms, the Cloud API delivers inbound messages as **HTTP webhook callbacks**,
@@ -180,9 +220,9 @@ Meta. Outbound replies go back over the Cloud API.
    `WA_VERIFY_TOKEN`, and subscribe to the **messages** field.
 
 ```go
-import "github.com/lao/botbooter/whatsapp"
+import "github.com/lao/botbooter/whatsapp/cloud"
 
-bot, err := whatsapp.New(whatsapp.Config{
+bot, err := cloud.New(cloud.Config{
 	Token:         os.Getenv("WA_TOKEN"),
 	PhoneNumberID: os.Getenv("WA_PHONE_ID"),
 	AppSecret:     os.Getenv("WA_APP_SECRET"),
@@ -191,12 +231,12 @@ bot, err := whatsapp.New(whatsapp.Config{
 })
 ```
 
-Optional `whatsapp.Config` fields: `Path` (webhook route, default `/webhook`),
+Optional `cloud.Config` fields: `Path` (webhook route, default `/webhook`),
 `GraphVersion` (Graph API version, default `v23.0`), and `HTTPClient` (the
 outbound HTTP client; defaults to a 30-second timeout).
 
 Inbound media arrives **by id, not URL**: `Attachment.ExtraData` holds a
-`*whatsapp.Media`; resolve the bytes with `GET /{media-id}` using your access
+`*cloud.Media`; resolve the bytes with `GET /{media-id}` using your access
 token. `Send` delivers free-form text only inside the 24-hour customer-service
 window; outside it, Meta requires a pre-approved template (not yet supported).
 
@@ -221,7 +261,56 @@ window; outside it, Meta requires a pre-approved template (not yet supported).
 - **`Send` fails**: an expired token, or you're outside the 24-hour window
   (a template message is required there).
 
+**Reactions.** Reactions arrive on the **same inbound webhook** as messages, so
+no extra configuration is needed — `bot.OnReaction` fires once the webhook is
+verified. An empty-emoji reaction is treated as a reaction removal (dropped).
+
 **Official docs:** [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) · [Webhooks](https://developers.facebook.com/docs/graph-api/webhooks/getting-started) · [Webhook components](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components)
+
+### WhatsApp Web (whatsmeow)
+
+The `botbooter/whatsapp/whatsmeow` flavor speaks the **WhatsApp Web multidevice
+protocol** via [whatsmeow](https://github.com/tulir/whatsmeow). It links to a
+phone exactly like WhatsApp Web — no Meta app, token or webhook:
+
+```go
+import wameow "github.com/lao/botbooter/whatsapp/whatsmeow"
+
+bot, err := wameow.New(wameow.Config{}) // zero value works
+```
+
+- **First run**: the device store is empty, so `Run` prints a **QR code to
+  stderr** (override with `Config.QRCallback`); scan it from *WhatsApp → Linked
+  devices* on the phone. Later runs reuse the stored session silently.
+- **Session store**: a local SQLite file (`Config.DBPath`, default
+  `botbooter-whatsapp-meow.db`, chmod `0600` — it holds the session's crypto keys, so
+  treat it like a credential and never commit it). `Config.Container` swaps in a
+  caller-managed store (e.g. Postgres); `Config.Client` brings a fully
+  configured whatsmeow client.
+- **Replies**: the chat JID is `Message.ChannelID`, so
+  `b.SendMessageContext(ctx, m.ChannelID, "pong")` just works.
+- **Media**: end-to-end encrypted, delivered without a URL. Fetch and decrypt
+  with `wameow.Download(ctx, bot, att)`; the raw client is available as
+  `wameow.Client(bot)`.
+- **One bot per run**: when `New` opened the session store itself, shutdown
+  (`Disconnect`, which `Run` performs on exit) closes it, so the same bot
+  cannot be run a second time — build a fresh bot with `wameow.New` for each
+  run. A caller-supplied `Config.Container` or `Config.Client` is left open
+  and stays reusable.
+- **Logout**: unlinking the device from the phone ends `Run` with the
+  `wameow.ErrLoggedOut` sentinel; reconnecting cannot recover it. Re-link by
+  building a fresh bot and running it again to scan a new QR (delete the
+  session DB first if the stale session lingers).
+
+**Reactions.** Reactions arrive over the **same websocket** as messages, so
+nothing extra needs configuring — `bot.OnReaction` fires automatically. Replies
+are **unthreaded**: this adapter has no quoted-reply egress yet, so
+`bot.ReplyToMessage` falls back to a plain send. An empty-emoji reaction is
+treated as a removal (dropped).
+
+Caveats: this drives a **linked (usually personal) account over the unofficial
+Web protocol**; WhatsApp's terms restrict automation on personal accounts, so
+prefer the Cloud API flavor for production/business use.
 
 ---
 
@@ -269,7 +358,7 @@ export TEAMS_APP_ID=MICROSOFT_APP_ID
 export TEAMS_APP_PASSWORD=MICROSOFT_APP_PASSWORD
 export TEAMS_ADDR=:3978
 
-go run ./_examples/v1 teams
+go run ./_examples/basic teams
 ```
 
 This starts the webhook server listening on port `3978` (path `/api/messages`).
@@ -314,6 +403,13 @@ bot, err := teams.New(teams.Config{
 Optional `teams.Config` fields: `Path` (webhook route, default `/api/messages`)
 and `HTTPClient` (the outbound HTTP client; defaults to a 30-second timeout).
 
+Group and channel messages arrive prefixed with the bot's own `<at>Bot</at>`
+mention; botbooter strips it from `Message.Content` and excludes the bot's ID
+from `Message.MentionedUserIDs`, so anchored patterns (e.g. `^echo`) still
+match. Mentions of **other** users are kept in both. Note the divergence: on
+Slack and Discord the bot's own mention stays in `Content` and
+`MentionedUserIDs`.
+
 Every inbound request is authenticated by validating the **Bot Connector JWT**
 (JWKS signature, audience == App ID, issuer, and a `serviceurl` claim that must
 match the Activity), and outbound replies only go to allowlisted Bot Framework
@@ -345,7 +441,142 @@ not supported.
 - **Endpoint never hit**, the Azure Bot messaging endpoint must be your public
   `https://…/api/messages` and reach `Addr` through the proxy.
 
+**Reactions.** The Teams adapter does not surface reaction events, so
+`bot.OnReaction` never fires — the echo/command path works, reactions do not.
+
 **Official docs:** [Create a bot for Teams](https://learn.microsoft.com/microsoftteams/platform/bots/how-to/create-a-bot-for-teams) · [Azure Bot quickstart](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework dashboard](https://dev.botframework.com/bots) · [Connector authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication) · [Send & receive messages](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-create-messages) · [ngrok](https://ngrok.com/download)
+
+---
+
+## GitHub
+
+botbooter listens for **`issue_comment` webhook events** — comments on issues
+*and* on pull-request conversations — and replies by creating issue comments
+through the REST API ([go-github](https://github.com/google/go-github)). Like
+WhatsApp and Teams, the adapter runs its own webhook server: it binds a local
+`Addr`, and you put a **TLS-terminating reverse proxy** (or ngrok while
+developing) in front and register the public HTTPS URL as the repository or App
+webhook URL.
+
+Two auth modes, configured through the same `github.Config` — set exactly one:
+
+- **PAT mode** — a [personal access token](https://docs.github.com/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+  (classic or fine-grained) with *Issues: read & write* on the target
+  repositories. The bot comments as the token's user. Quickest to set up; good
+  for personal repos and experiments.
+- **App mode** — a [GitHub App](https://docs.github.com/apps/creating-github-apps)
+  (`AppID` + `InstallationID` + PEM `PrivateKey`). The bot comments as
+  `your-app[bot]`, gets its own identity and rate limits, and is the right
+  choice for orgs. Tokens are minted and refreshed automatically
+  ([ghinstallation](https://github.com/bradleyfalzon/ghinstallation)).
+
+#### Step 1, Create the webhook
+
+On the repository (*Settings → Webhooks → Add webhook*) or on the GitHub App
+(*Permissions & events*):
+
+- **Payload URL**: your public `https://…/webhook` endpoint (from ngrok or your
+  proxy; you can create the webhook after step 3 if you don't have it yet).
+- **Content type**: `application/json`.
+- **Secret**: a random string; the adapter **requires** it and rejects requests
+  whose `X-Hub-Signature-256` HMAC does not match.
+- **Events**: *Issue comments* only (other subscribed events are acked and
+  ignored).
+
+For App mode also grant the **Issues: read & write** permission, install the
+App on the target repositories, and note the **installation id** (visible in
+the installation page URL and in webhook payloads).
+
+#### Step 2, Run the bot
+
+```go
+import "github.com/lao/botbooter/github"
+
+// PAT mode:
+bot, err := github.New(github.Config{
+	Token:         os.Getenv("GITHUB_TOKEN"),          // ghp_… or github_pat_…
+	WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+	Addr:          ":8080",                            // a bare "8080" is accepted
+})
+
+// App mode:
+bot, err := github.New(github.Config{
+	AppID:          appID,                              // int64, from the App settings page
+	InstallationID: installationID,                     // int64, from the installation
+	PrivateKey:     pemBytes,                           // the App's PEM private key
+	WebhookSecret:  os.Getenv("GITHUB_WEBHOOK_SECRET"),
+	Addr:           ":8080",
+})
+```
+
+Optional `github.Config` fields: `Path` (webhook route, default `/webhook`),
+`HTTPClient` (the outbound API client; defaults to a 30-second timeout), and the
+reaction-polling trio — `ReactionPollRepos` (opt-in; empty disables polling,
+and the poller only starts when an `OnReaction` handler is registered before
+the bot connects; entries are `"owner/name"` or the wildcard `"owner/*"`,
+which polls every repo of that owner the credentials can see, minus archived,
+re-resolved every ~10 cycles), `ReactionPollInterval` (default 30s; when the
+polled repo count at that interval would exceed the poller's request budget of
+3000/h the adapter logs a warning and automatically raises the effective
+interval to fit) and `ReactionPollNoAutoInterval` (disables that raise — the
+warning still logs and the configured interval is honored). Reaction dedup is
+in-process only, and only reactions added while the bot is connected are
+dispatched — reactions added while it was down are missed. See the reactions
+example and CLAUDE.md for the polling contract.
+
+#### Step 3, Expose the local server
+
+```bash
+ngrok http 8080
+```
+
+Point the webhook's payload URL at `https://…/webhook`, then comment on any
+issue or PR in a watched repository. Comment from a **human** account: the bot
+ignores its own comments and all other bots' (any `Bot`-typed author), so two
+App-mode bots can never reply-loop each other. A PAT-mode bot's comments arrive
+as a plain `User`, though — another bot ignores it only when it is that bot's
+own account, so two *PAT-mode* bots watching the same repository can still
+ping-pong. Prefer App mode when several bots share a repo.
+
+`Message.ChannelID` is `owner/repo#number`, so replies land on the same issue
+or PR; `github.RawEvent(m)` returns a `*github.Message` whose `Event` field
+carries the full `*gogithub.IssueCommentEvent` (check
+`.Event.GetIssue().IsPullRequest()` to tell PRs from issues), and
+`github.Client(bot)` exposes the authenticated go-github client for anything
+beyond commenting — labels, reactions, checks. `github.Addr(bot)` reports the
+bound address when you bind `:0`.
+
+Only the `created` action is dispatched (edits and deletions are acked and
+dropped), and every delivery is acked `200` *before* dispatch so slow handlers
+cannot make GitHub mark the hook as failing. Attachments are not supported —
+comment bodies are markdown.
+
+**Environment variables** (suggested names; the config is plain Go):
+
+| Variable | Value |
+|---|---|
+| `GITHUB_TOKEN` | PAT for PAT mode (mutually exclusive with the App triple) |
+| `GITHUB_APP_ID` / `GITHUB_INSTALLATION_ID` / `GITHUB_PRIVATE_KEY` | App-mode credentials |
+| `GITHUB_WEBHOOK_SECRET` | webhook secret; required |
+| `GITHUB_ADDR` | local bind address, e.g. `:8080` (a bare port is accepted) |
+| `GITHUB_PATH` | optional webhook route; defaults to `/webhook` |
+
+#### No response?
+
+- **`403` on every delivery** (webhook *Recent Deliveries* tab): the webhook
+  secret does not match `WebhookSecret`.
+- **`200` but no reply**: the comment author is a bot (ignored by design), the
+  action was an edit, or no registered pattern matched. In PAT mode also check
+  the startup log — if the token cannot resolve `GET /user` the bot shuts down
+  (a bot that cannot recognize itself would reply-loop).
+- **Replies fail / `Send` errors**: the PAT lacks *Issues: write* on that repo,
+  or the App is not installed on it. go-github's typed errors (e.g.
+  `*github.RateLimitError`) unwrap with `errors.As`.
+- **Endpoint never hit**: the payload URL must be your public
+  `https://…/webhook` and reach `Addr` through the proxy; only `POST` is
+  accepted on the route.
+
+**Official docs:** [Webhooks](https://docs.github.com/webhooks) · [`issue_comment` event](https://docs.github.com/webhooks/webhook-events-and-payloads#issue_comment) · [Securing webhooks](https://docs.github.com/webhooks/using-webhooks/validating-webhook-deliveries) · [Creating a GitHub App](https://docs.github.com/apps/creating-github-apps) · [Issue comments API](https://docs.github.com/rest/issues/comments) · [ngrok](https://ngrok.com/download)
 
 ---
 
@@ -459,6 +690,9 @@ id, content type, filename and size.
   filtering), or the number never finished registration/linking — hit
   `http://127.0.0.1:8080/v1/accounts` to list registered accounts.
 
+**Reactions.** The Signal adapter does not surface reaction events, so
+`bot.OnReaction` never fires — the echo/command path works, reactions do not.
+
 **Official docs:** [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) · [API reference](https://bbernhard.github.io/signal-cli-rest-api/) · [Execution modes](https://github.com/bbernhard/signal-cli-rest-api#execution-modes) · [signal-cli](https://github.com/AsamK/signal-cli)
 
 ---
@@ -469,7 +703,7 @@ No credentials, no portal, no setup. The CLI adapter reads from stdin and
 writes to stdout, so it's the fastest way to develop and test handlers:
 
 ```bash
-go run ./_examples/v1            # CLI mode (default)
+go run ./_examples/basic            # CLI mode (default)
 ```
 
 **Environment variables:** none.
@@ -478,8 +712,84 @@ A terminal has no real upload channel, so the CLI treats any local file path
 in a message as an attachment, see [Attachments](../README.md#attachments)
 in the README. **Use it with trusted local input only.**
 
-**Official docs:** the bundled [`_examples/v1`](../_examples/v1) and the
+**Official docs:** the bundled [`_examples/basic`](../_examples/basic) and the
 [README Quickstart](../README.md#quickstart).
+
+---
+
+## Threaded replies
+
+Threading is a **send option**, not a separate method. Pass one to
+`b.SendMessageContext` (or `b.SendMessage`); with no option a send is a plain
+channel message. `b.Reply(ctx, m, text)` is sugar for the common case —
+`SendMessageContext(ctx, m.ChannelID, text, InReplyTo(m))`.
+
+Two options carry the anchor:
+
+- **`botbooter.InReplyTo(m)`** — pass the whole inbound `Message`; each adapter
+  derives its own correct anchor from it. You never compute a thread id.
+- **`botbooter.WithThreadID(id)`** — a raw native anchor the adapter uses
+  verbatim. It **takes precedence** over `InReplyTo`. Its meaning is
+  platform-specific (see the table), so you own platform-correctness.
+
+`InReplyTo` derives from one of two fields off the `Message`:
+
+- **`m.ReplyToID`** — the thread root / replied-to id the platform delivered
+  (`""` when the message is top-level in a channel).
+- **`m.ID`** — the message's own id.
+
+### Per-platform anchor
+
+| Platform | `InReplyTo(m)` derives from | Raw `WithThreadID(id)` is | On the wire | When the anchor is empty |
+|---|---|---|---|---|
+| **Slack** | `m.ReplyToID` (the thread root, `ThreadTimeStamp`) | a `thread_ts` | `thread_ts` on `chat.postMessage` | top-level message ⇒ plain top-level reply (does **not** open a new thread off `m.ID`; a raw `WithThreadID` of a top-level ts *will* start one) |
+| **Discord** | `m.ID` | a **reply message id** (not a Discord thread-channel id) | inline reply via `message_reference.message_id` | plain channel send |
+| **Telegram** | `m.ID` | a **reply message id** | `reply_parameters.message_id` | plain send. A *derived* id that isn't a positive integer degrades to a plain send; an *explicit* `WithThreadID` that isn't returns an error |
+| **WhatsApp (Cloud API)** | `m.ID` | a **quote message id** | `context.message_id` (a quoted reply) | plain send (no `context`) |
+| **WhatsApp (Web / whatsmeow)** | — (options ignored) | — | — | always a plain channel send (quoted replies are a possible follow-up) |
+| **Teams** | — (options ignored) | — | — | always a plain channel send |
+| **GitHub** | — (options ignored) | — | — | always a plain issue comment (issue comment threads are flat — a reply already lands in the conversation) |
+| **Signal** | — (options ignored) | — | — | always a plain channel send (quoted replies are a possible follow-up) |
+| **CLI** | — (options ignored) | — | — | always a plain channel send |
+
+The reply anchor assumes you send to the message's **own channel**; e.g. a
+cross-channel Discord `InReplyTo` builds a `message_reference` for another
+channel, which Discord rejects.
+
+### Why the anchor differs
+
+`ReplyToID` means different things per platform: on Slack it's the **thread
+root**, so replying with it keeps the answer in the same thread; on
+Discord/Telegram it's the specific **replied-to message**, and the natural reply
+target is the *received* message itself (`m.ID`), not the chain root. A single
+core-computed anchor would mis-anchor half the platforms, so each adapter owns
+the choice — which is why `InReplyTo` carries the whole `Message` rather than a
+pre-computed id.
+
+### The two scenarios
+
+- **The triggering message is already inside a thread.** `InReplyTo(m)` continues
+  that same thread — Slack anchors on the thread root (`m.ReplyToID`);
+  Discord/Telegram/WhatsApp reference/quote `m.ID`.
+- **The triggering message is a top-level channel comment.** `InReplyTo(m)`
+  answers that comment directly, anchored on it (Discord inline reply, Telegram
+  `reply_to_message_id`, WhatsApp quote). On Slack a top-level message has no
+  thread root, so the reply is a plain top-level message in the channel — the
+  `InReplyTo` path intentionally does **not** start a fresh thread off it (use a
+  raw `WithThreadID(m.ID)` if you deliberately want to open one).
+
+### Fallback & errors
+
+A send degrades to a plain channel message when the adapter ignores the options
+(Teams, GitHub, CLI) **or** the anchor resolves to nothing — it never fails just because
+a message can't be threaded. The one loud exception is an explicit
+`WithThreadID` that a platform can't use (an id that isn't a positive message id
+on Telegram), which returns an error rather than silently dropping. `Reply` returns an error only
+when the bot has no adapter or `m` is `nil`.
+
+To reach beyond these normalized semantics (Slack broadcast replies, message
+edits, etc.), drop to the raw SDK client via the per-platform accessors — see
+[Raw platform access](../README.md#raw-platform-access).
 
 ---
 

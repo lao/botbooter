@@ -322,7 +322,7 @@ func TestSend_Direct(t *testing.T) {
 	a, _ := newAdapter(validConfig())
 	reconfigure(t, a, f)
 
-	asserts.NoError(t, a.Send(context.Background(), "+15550002", "hi there"), "Send should succeed on 201")
+	asserts.NoError(t, a.Send(context.Background(), "+15550002", "hi there", core.SendOptions{}), "Send should succeed on 201")
 
 	req := awaitSend(t, f)
 	asserts.Equal(t, req["number"], "+15550001", "number field")
@@ -337,7 +337,7 @@ func TestSend_Group(t *testing.T) {
 	a, _ := newAdapter(validConfig())
 	reconfigure(t, a, f)
 
-	asserts.NoError(t, a.Send(context.Background(), "group:grp==", "hi group"), "group Send should succeed")
+	asserts.NoError(t, a.Send(context.Background(), "group:grp==", "hi group", core.SendOptions{}), "group Send should succeed")
 
 	req := awaitSend(t, f)
 	recipients := req["recipients"].([]any)
@@ -352,7 +352,7 @@ func TestSend_NeedsNoReceiveSocket(t *testing.T) {
 	a, _ := newAdapter(validConfig())
 	reconfigure(t, a, f)
 
-	asserts.NoError(t, a.Send(context.Background(), "+15550002", "hi"), "Send before Connect should work")
+	asserts.NoError(t, a.Send(context.Background(), "+15550002", "hi", core.SendOptions{}), "Send before Connect should work")
 	awaitSend(t, f)
 }
 
@@ -363,7 +363,7 @@ func TestSend_ErrorResponse(t *testing.T) {
 	a, _ := newAdapter(validConfig())
 	reconfigure(t, a, f)
 
-	err := a.Send(context.Background(), "+15550002", "hi")
+	err := a.Send(context.Background(), "+15550002", "hi", core.SendOptions{})
 	asserts.Error(t, err, "Send should surface a REST error")
 	asserts.True(t, strings.Contains(err.Error(), "Unregistered user"), "error should carry the container's message: "+err.Error())
 }
@@ -375,7 +375,7 @@ func TestSend_ErrorResponseNonJSON(t *testing.T) {
 	a, _ := newAdapter(validConfig())
 	reconfigure(t, a, f)
 
-	err := a.Send(context.Background(), "+15550002", "hi")
+	err := a.Send(context.Background(), "+15550002", "hi", core.SendOptions{})
 	asserts.Error(t, err, "Send should surface a REST error")
 	asserts.True(t, strings.Contains(err.Error(), "boom"), "error should fall back to the raw body: "+err.Error())
 }
@@ -389,7 +389,7 @@ func TestSend_ContextCanceled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sendErr := make(chan error, 1)
-	go func() { sendErr <- a.Send(ctx, "+15550002", "hi") }()
+	go func() { sendErr <- a.Send(ctx, "+15550002", "hi", core.SendOptions{}) }()
 
 	awaitSend(t, f) // request arrived; never answer it
 	cancel()
@@ -416,7 +416,7 @@ func TestSend_TimesOutWithoutResponse(t *testing.T) {
 	reconfigure(t, a, f)
 
 	sendErr := make(chan error, 1)
-	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi") }()
+	go func() { sendErr <- a.Send(context.Background(), "+15550002", "hi", core.SendOptions{}) }()
 
 	awaitSend(t, f) // request arrived; never answer it
 	select {
@@ -429,7 +429,7 @@ func TestSend_TimesOutWithoutResponse(t *testing.T) {
 
 func TestSend_RequestError(t *testing.T) {
 	a, _ := newAdapter(validConfig()) // BaseURL points at a dead address
-	err := a.Send(context.Background(), "+15550002", "hi")
+	err := a.Send(context.Background(), "+15550002", "hi", core.SendOptions{})
 	asserts.Error(t, err, "Send against a dead container should fail")
 	asserts.True(t, strings.Contains(err.Error(), "send request failed"), "error should name the request failure: "+err.Error())
 }
@@ -599,10 +599,12 @@ func TestBot_EndToEnd(t *testing.T) {
 	asserts.NoError(t, err, "New")
 
 	replied := make(chan struct{})
-	asserts.NoError(t, bot.HandleFunc("^ping$", func(ctx context.Context, b *core.Bot, m *core.Message) {
+	// HandleFunc records a bad pattern rather than returning it; this one is
+	// valid, and Run below would surface a registration error if it were not.
+	bot.HandleFunc("^ping$", func(ctx context.Context, b *core.Bot, m *core.Message) {
 		asserts.NoError(t, b.SendMessageContext(ctx, m.ChannelID, "pong"), "reply send")
 		close(replied)
-	}), "HandleFunc")
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)

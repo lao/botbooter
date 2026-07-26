@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -37,13 +38,108 @@ func TestNew(t *testing.T) {
 		"message-content intent should be enabled")
 }
 
+func TestNew_HasReactionIntents(t *testing.T) {
+	bot, err := New("token")
+	asserts.NoError(t, err, "New")
+	intents := Session(bot).Identify.Intents
+	asserts.True(t, intents&discordgo.IntentsGuildMessageReactions != 0, "guild reaction intent set")
+	asserts.True(t, intents&discordgo.IntentsDirectMessageReactions != 0, "DM reaction intent set")
+}
+
+func TestOnReaction(t *testing.T) {
+	a := newTestAdapter(t)
+	var got *core.Reaction
+	deps := core.AdapterDeps{DispatchReaction: func(_ context.Context, r *core.Reaction) { got = r }}
+
+	a.onReaction(context.Background(), &discordgo.MessageReactionAdd{MessageReaction: &discordgo.MessageReaction{
+		UserID:    "user-1",
+		ChannelID: "chan-1",
+		MessageID: "msg-1",
+		Emoji:     discordgo.Emoji{Name: "👍"},
+	}}, deps)
+
+	asserts.NotNil(t, got, "reaction should be dispatched")
+	asserts.Equal(t, got.Emoji, "👍", "standard emoji passes through as unicode")
+	asserts.Equal(t, got.UserID, "user-1", "reactor user id")
+	asserts.Equal(t, got.ChannelID, "chan-1", "channel")
+	asserts.Equal(t, got.MessageID, "msg-1", "reacted message id")
+	raw, ok := RawReaction(got)
+	asserts.True(t, ok, "RawReaction recovers the event")
+	asserts.Equal(t, raw.MessageID, "msg-1", "raw carries the reaction event")
+}
+
+func TestOnReaction_BotReactor(t *testing.T) {
+	reaction := func(member *discordgo.Member) *discordgo.MessageReactionAdd {
+		return &discordgo.MessageReactionAdd{
+			MessageReaction: &discordgo.MessageReaction{
+				UserID:    "user-1",
+				ChannelID: "chan-1",
+				MessageID: "msg-1",
+				Emoji:     discordgo.Emoji{Name: "👍"},
+			},
+			Member: member,
+		}
+	}
+
+	t.Run("GuildBotDropped", func(t *testing.T) {
+		a := newTestAdapter(t)
+		var got *core.Reaction
+		deps := core.AdapterDeps{DispatchReaction: func(_ context.Context, r *core.Reaction) { got = r }}
+
+		a.onReaction(context.Background(), reaction(&discordgo.Member{User: &discordgo.User{ID: "user-1", Bot: true}}), deps)
+
+		asserts.True(t, got == nil, "a guild reaction from a bot user must not be dispatched")
+	})
+
+	t.Run("GuildHumanDispatched", func(t *testing.T) {
+		a := newTestAdapter(t)
+		var got *core.Reaction
+		deps := core.AdapterDeps{DispatchReaction: func(_ context.Context, r *core.Reaction) { got = r }}
+
+		a.onReaction(context.Background(), reaction(&discordgo.Member{User: &discordgo.User{ID: "user-1"}}), deps)
+
+		asserts.NotNil(t, got, "a guild reaction from a human is dispatched")
+	})
+
+	t.Run("NilMemberDispatched", func(t *testing.T) {
+		a := newTestAdapter(t)
+		var got *core.Reaction
+		deps := core.AdapterDeps{DispatchReaction: func(_ context.Context, r *core.Reaction) { got = r }}
+
+		// DM reactions carry no Member, so there is nothing to filter on.
+		a.onReaction(context.Background(), reaction(nil), deps)
+
+		asserts.NotNil(t, got, "a DM reaction (nil Member) is still dispatched")
+	})
+}
+
+func TestToReaction_CustomEmoji(t *testing.T) {
+	reaction := func(e discordgo.Emoji) *discordgo.MessageReactionAdd {
+		return &discordgo.MessageReactionAdd{MessageReaction: &discordgo.MessageReaction{Emoji: e}}
+	}
+
+	t.Run("Static", func(t *testing.T) {
+		got := toReaction(reaction(discordgo.Emoji{Name: "party_parrot", ID: "42"}))
+		asserts.Equal(t, got.Emoji, "<:party_parrot:42>", "custom emoji renders as Discord message markup")
+	})
+
+	t.Run("Animated", func(t *testing.T) {
+		got := toReaction(reaction(discordgo.Emoji{Name: "party_parrot", ID: "42", Animated: true}))
+		asserts.Equal(t, got.Emoji, "<a:party_parrot:42>", "animated custom emoji uses the <a:...> form")
+	})
+}
+
 func TestConnect(t *testing.T) {
 	a := newTestAdapter(t)
+	// Stub the REST transport so Open's gateway lookup fails with 401 without
+	// touching the network, keeping the test hermetic.
+	a.session.Client = &http.Client{
+		Transport: stubRoundTripper{status: 401, body: `{"code":0,"message":"401: Unauthorized"}`},
+	}
 
 	err := a.Connect(context.Background(), core.AdapterDeps{})
 
-	// A fake token cannot open a real gateway connection.
-	asserts.Error(t, err, "Connect with fake token should fail")
+	asserts.Error(t, err, "Connect with rejected token should fail")
 }
 
 func TestDisconnect(t *testing.T) {

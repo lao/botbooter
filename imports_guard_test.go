@@ -11,5 +11,5 @@ import (
 // SDK directly. The transitive closure is proven by TestIsolationDeps.
 func TestRootImportsNoPlatformSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack", "go-telegram/bot"}, "botbooter")
+		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "google/go-github", "bradleyfalzon/ghinstallation"}, "botbooter")
 }

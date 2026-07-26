@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -26,6 +26,10 @@ const (
 	// maxConversations bounds the conversation->serviceUrl map so a public endpoint
 	// cannot grow it without limit.
 	maxConversations = 10000
+	// maxConcurrentDispatch bounds in-flight dispatch goroutines so a burst of
+	// inbound Activities cannot spawn unbounded work. The handler acquires a slot
+	// before acking and sheds load with 503 (the platform retries) when full.
+	maxConcurrentDispatch = 256
 )
 
 // conversation holds what a reply needs: the serviceUrl to POST to and the bot's
@@ -70,6 +74,10 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.srv = srv
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
+	a.logger = deps.Logger
+	// Fresh per-connection dispatch semaphore: a slot a hung handler never
+	// releases dies with this connection instead of leaking across reconnects.
+	a.dispatchSem = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	go serve(srv, ln, deps.Done)
@@ -112,7 +120,7 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 	// refresh during drain must ride r.Context() or it would 401 an
 	// already-in-flight request.
 	if err := a.validateInbound(r.Context(), r.Header.Get("Authorization"), act.ServiceURL, act.ChannelID); err != nil {
-		log.Printf("teams: inbound request rejected with 401: %v", err)
+		a.log().Warn("teams: inbound request rejected with 401", "error", err)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -122,25 +130,43 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-
 	// Only user "message" Activities are dispatched; skip other types and drop
-	// bot-authored messages (from.role == "bot") to avoid reply loops.
-	if act.Type != "message" {
+	// bot-authored messages (from.role == "bot") to avoid reply loops. These are
+	// acked (200) with nothing to do, so they consume no dispatch slot.
+	if act.Type != "message" || strings.EqualFold(act.From.Role, "bot") {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if strings.EqualFold(act.From.Role, "bot") {
+
+	// Bound concurrent dispatch with a counting semaphore: acquire a slot before
+	// acking so saturation returns 503 (the platform retries) rather than acking a
+	// message the adapter would then drop. Non-blocking so a burst sheds load
+	// instead of stalling the handler. Snapshot the per-connection semaphore once so
+	// the acquire here and the release below target the SAME channel across a
+	// reconnect that swaps a.dispatchSem.
+	a.mu.Lock()
+	sem := a.dispatchSem
+	a.mu.Unlock()
+	select {
+	case sem <- struct{}{}:
+	default:
+		a.log().Warn("teams: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
+		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
 
 	a.recordConversation(act.Conversation.ID, act.ServiceURL, act.Recipient)
 
+	w.WriteHeader(http.StatusOK)
+
 	msg := toMessage(&act, body)
 	// Dispatch on the detached context: core cancels runCtx before Disconnect's
 	// drain waits for this handler, so a reply on runCtx would fail mid-drain.
 	// The increment lands before Shutdown returns, so drainDispatch observes it.
+	// The semaphore slot is released when dispatch returns.
 	a.inflight.Add(1)
 	go func() {
+		defer func() { <-sem }()
 		defer a.inflight.Add(-1)
 		deps.Dispatch(dispatchCtx, msg)
 	}()
@@ -169,7 +195,7 @@ func (a *adapter) Disconnect() error {
 	// already-acked messages, which is operationally significant.
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
-		log.Printf("teams: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		a.log().Warn("teams: drain deadline reached; canceling in-flight dispatches", "inflight", n)
 		drainErr = fmt.Errorf("teams: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 
@@ -192,6 +218,17 @@ func (a *adapter) Disconnect() error {
 		return err
 	}
 	return drainErr
+}
+
+// log returns the Bot's logger handed over at Connect, or slog.Default()
+// before the first Connect.
+func (a *adapter) log() *slog.Logger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 // drainDispatch waits, bounded by ctx, for in-flight dispatch so an acked

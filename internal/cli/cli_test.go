@@ -51,6 +51,16 @@ func TestParseMessage_Attachments(t *testing.T) {
 	asserts.False(t, byURL[txt].IsImage, "txt should not be an image")
 }
 
+func TestParseMessage_DedupesRepeatedTokens(t *testing.T) {
+	dir := t.TempDir()
+	png := filepath.Join(dir, "pic.png")
+	writeFile(t, png, append(pngMagic, []byte("rest of image")...))
+
+	msg := parseMessage("echo " + png + " " + png + " " + png)
+
+	asserts.Equal(t, len(msg.Attachments), 1, "a repeated file token yields a single attachment")
+}
+
 func TestParseMessage_NoFiles(t *testing.T) {
 	msg := parseMessage("echo hello world")
 
@@ -65,7 +75,7 @@ func TestParseMessage_DirectoryIgnored(t *testing.T) {
 }
 
 func TestRawData(t *testing.T) {
-	data := &core.CLIMessage{Text: "hello"}
+	data := &Message{Text: "hello"}
 	m := &core.Message{Raw: data}
 
 	got, ok := RawData(m)

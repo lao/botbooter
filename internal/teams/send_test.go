@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lao/botbooter/internal/asserts"
+	"github.com/lao/botbooter/internal/core"
 )
 
 func TestSend_RetriesOnceOn401(t *testing.T) {
@@ -42,7 +44,7 @@ func TestSend_RetriesOnceOn401(t *testing.T) {
 	a.tokenURL = tokenSrv.URL
 	a.recordConversation("conv-1", srv.URL, channelAccount{ID: "bot-1", Name: "Bot"})
 
-	err = a.Send(context.Background(), "conv-1", "hi")
+	err = a.Send(context.Background(), "conv-1", "hi", core.SendOptions{})
 	asserts.NoError(t, err, "Send succeeds after a 401-triggered token refresh")
 	asserts.Equal(t, attempts, 2, "exactly one retry after 401")
 	asserts.Equal(t, mints, 2, "token minted fresh for the retry")
@@ -53,7 +55,7 @@ func TestSend_RetriesOnceOn401(t *testing.T) {
 func TestSend_UnknownConversationSentinel(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
-	err = a.Send(context.Background(), "never-seen", "hi")
+	err = a.Send(context.Background(), "never-seen", "hi", core.SendOptions{})
 	asserts.ErrorIs(t, err, ErrUnknownConversation, "unknown conversation must be ErrUnknownConversation")
 }
 
@@ -78,7 +80,7 @@ func TestSend(t *testing.T) {
 	a.tokenURL = tokenSrv.URL
 	a.recordConversation("conv-1", srv.URL, channelAccount{ID: "bot-1", Name: "Bot"})
 
-	err = a.Send(context.Background(), "conv-1", "hello world")
+	err = a.Send(context.Background(), "conv-1", "hello world", core.SendOptions{})
 	asserts.NoError(t, err, "Send should succeed")
 	asserts.Equal(t, gotPath, "/v3/conversations/conv-1/activities", "send URL path")
 	asserts.Equal(t, gotAuth, "Bearer tok-123", "bearer token applied")
@@ -109,16 +111,9 @@ func TestSend_EscapesConversationID(t *testing.T) {
 	const convID = "19:abc@thread.tacv2"
 	a.recordConversation(convID, srv.URL, channelAccount{})
 
-	err = a.Send(context.Background(), convID, "hi")
+	err = a.Send(context.Background(), convID, "hi", core.SendOptions{})
 	asserts.NoError(t, err, "Send should succeed")
 	asserts.Equal(t, gotPath, "/v3/conversations/19:abc@thread.tacv2/activities", "conversation id preserved in path")
-}
-
-func TestSend_UnknownConversation(t *testing.T) {
-	a, err := newAdapter(validConfig())
-	asserts.NoError(t, err, "newAdapter")
-	err = a.Send(context.Background(), "never-seen", "hi")
-	asserts.Error(t, err, "Send to unknown conversation should error")
 }
 
 func TestSend_Error(t *testing.T) {
@@ -137,7 +132,7 @@ func TestSend_Error(t *testing.T) {
 	a.tokenURL = tokenSrv.URL
 	a.recordConversation("conv-1", srv.URL, channelAccount{})
 
-	err = a.Send(context.Background(), "conv-1", "hi")
+	err = a.Send(context.Background(), "conv-1", "hi", core.SendOptions{})
 	asserts.Error(t, err, "non-2xx send should error")
 }
 
@@ -147,7 +142,7 @@ func TestSend_RequestError(t *testing.T) {
 	a.token = cachedToken{value: "token", expiry: time.Now().Add(time.Hour)}
 	a.recordConversation("conv-1", ":", channelAccount{})
 
-	err = a.Send(context.Background(), "conv-1", "hi")
+	err = a.Send(context.Background(), "conv-1", "hi", core.SendOptions{})
 
 	asserts.Error(t, err, "malformed service URL should fail request creation")
 }
@@ -161,7 +156,7 @@ func TestSend_TransportError(t *testing.T) {
 	})}
 	a.recordConversation("conv-1", allowedServiceURL, channelAccount{})
 
-	err = a.Send(context.Background(), "conv-1", "hi")
+	err = a.Send(context.Background(), "conv-1", "hi", core.SendOptions{})
 
 	asserts.Error(t, err, "transport failure should fail Send")
 }
@@ -175,7 +170,7 @@ func TestSend_TokenError(t *testing.T) {
 	asserts.NoError(t, err, "newAdapter")
 	a.tokenURL = tokenSrv.URL
 	a.recordConversation("conv-1", allowedServiceURL, channelAccount{})
-	err = a.Send(context.Background(), "conv-1", "hi")
+	err = a.Send(context.Background(), "conv-1", "hi", core.SendOptions{})
 	asserts.Error(t, err, "token failure should fail Send")
 }
 
@@ -197,6 +192,46 @@ func TestAccessToken_Caches(t *testing.T) {
 		asserts.Equal(t, tok, "tok", "token value")
 	}
 	asserts.Equal(t, hits, 1, "token minted once and cached")
+}
+
+// TestAccessToken_ConcurrentMintCoalesces proves the single-flight: a burst of
+// concurrent cold Sends must mint one token, not one per caller. tokenMu is held
+// so every goroutine passes its first (empty) cache check and blocks on the mint
+// lock; releasing it lets one caller mint while the rest re-check the freshly
+// cached token (mirroring the JWKS fetchMu coalescing test).
+func TestAccessToken_ConcurrentMintCoalesces(t *testing.T) {
+	var mints atomic.Int64
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "tok", "expires_in": 3600})
+	}))
+	defer tokenSrv.Close()
+
+	a, err := newAdapter(validConfig())
+	asserts.NoError(t, err, "newAdapter")
+	a.tokenURL = tokenSrv.URL
+
+	const n = 8
+	started := make(chan struct{}, n)
+	results := make(chan error, n)
+	a.tokenMu.Lock()
+	for i := 0; i < n; i++ {
+		go func() {
+			started <- struct{}{}
+			_, err := a.accessToken(context.Background())
+			results <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		<-started
+	}
+	time.Sleep(20 * time.Millisecond) // let all callers reach the mint lock
+	a.tokenMu.Unlock()
+
+	for i := 0; i < n; i++ {
+		asserts.NoError(t, <-results, "accessToken")
+	}
+	asserts.Equal(t, mints.Load(), int64(1), "concurrent cold mints coalesced into a single token request")
 }
 
 // TestAccessToken_Network exercises the real Azure AD client-credentials flow.

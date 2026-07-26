@@ -17,7 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -108,8 +108,20 @@ type adapter struct {
 	wsURL  string // receive socket, derived from BaseURL + Number
 	client *http.Client
 
-	mu   sync.Mutex
-	conn *wsConn
+	mu     sync.Mutex
+	conn   *wsConn
+	logger *slog.Logger // set from AdapterDeps at Connect; guarded by mu
+}
+
+// log returns the Bot's logger handed over at Connect, or slog.Default() before
+// the first Connect.
+func (a *adapter) log() *slog.Logger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 // wsConn holds one live receive-socket's state. Connect creates a fresh one
@@ -214,6 +226,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 
 	a.mu.Lock()
 	a.conn = c
+	a.logger = deps.Logger
 	a.mu.Unlock()
 
 	go a.readLoop(c, dispatchCtx, deps)
@@ -279,7 +292,7 @@ type receiveEnvelope struct {
 func (a *adapter) handleReceive(c *wsConn, dispatchCtx context.Context, data []byte, deps core.AdapterDeps) {
 	var p receiveEnvelope
 	if err := json.Unmarshal(data, &p); err != nil {
-		log.Printf("signal: skipping unparseable receive payload: %v", err)
+		a.log().Warn("signal: skipping unparseable receive payload", "error", err)
 		return
 	}
 	if p.Envelope.DataMessage == nil {
@@ -344,8 +357,11 @@ func toCoreMessage(m *Message) *core.Message {
 // Send delivers text as a POST /v2/send REST call, bounded by cfg.SendTimeout.
 // channelID is a recipient number, or a group id carrying the "group:" prefix
 // as produced on inbound group messages. Send needs no live receive socket —
-// the REST endpoint stands on its own.
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
+// the REST endpoint stands on its own. Threading options are ignored: a reply
+// already lands in the originating chat, and while /v2/send does accept a
+// quote_timestamp/quote_author pair, the adapter does not map one yet (quoted
+// replies are a possible follow-up).
+func (a *adapter) Send(ctx context.Context, channelID, text string, _ core.SendOptions) error {
 	// Bound the round-trip independently of the caller: Bot.SendMessage passes
 	// a background context, and a request the container accepts but never
 	// answers would otherwise block that caller forever.
@@ -422,7 +438,7 @@ func (a *adapter) Disconnect() error {
 	select {
 	case <-c.loopDone:
 	case <-time.After(loopExitTimeout):
-		log.Print("signal: read loop did not exit within the shutdown budget")
+		a.log().Warn("signal: read loop did not exit within the shutdown budget")
 	}
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
@@ -431,7 +447,7 @@ func (a *adapter) Disconnect() error {
 
 	var drainErr error
 	if n := c.inflight.Load(); n > 0 {
-		log.Printf("signal: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		a.log().Warn("signal: drain deadline reached; canceling in-flight dispatches", "inflight", n)
 		drainErr = fmt.Errorf("signal: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 

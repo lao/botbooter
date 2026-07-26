@@ -1,9 +1,6 @@
 // Package telegram exposes the Telegram (Bot API) constructor and the raw-update
 // and client accessors for botbooter. Import it for a Telegram bot; a
 // Telegram-only binary pulls in go-telegram but never discordgo or slack-go.
-//
-// Attachment resolution is platform-agnostic: call
-// botbooter.Bot.ResolveAttachmentURL on the bot returned by [New].
 package telegram
 
 import (
@@ -14,7 +11,11 @@ import (
 	tgint "github.com/lao/botbooter/internal/telegram"
 )
 
-// New creates a Telegram bot from a BotFather token.
+// New creates a Telegram bot from a BotFather token. It returns an error only if
+// go-telegram rejects the token's format at construction (e.g. an empty token).
+// Token validity and API reachability are checked by a getMe probe when Connect
+// starts, so a wrong-but-well-formed token surfaces as an error from Run/Connect
+// rather than a poll loop that retries forever and delivers nothing.
 func New(token string) (*botbooter.Bot, error) {
 	return tgint.New(token)
 }
@@ -23,6 +24,12 @@ func New(token string) (*botbooter.Bot, error) {
 // originated from Telegram.
 func RawUpdate(m *botbooter.Message) (*models.Update, bool) {
 	return tgint.RawUpdate(m)
+}
+
+// RawReactionUpdate returns the raw Telegram message_reaction update carried on r,
+// reporting whether r originated from a Telegram reaction.
+func RawReactionUpdate(r *botbooter.Reaction) (*models.MessageReactionUpdated, bool) {
+	return tgint.RawReactionUpdate(r)
 }
 
 // Client returns the go-telegram bot client backing b, or nil if b is not a

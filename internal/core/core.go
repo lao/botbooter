@@ -6,11 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -20,6 +21,9 @@ var ErrUnknownBotType = errors.New("botbooter: unknown bot type")
 
 // ErrAlreadyConnected is returned by Connect when the Bot is already connected.
 var ErrAlreadyConnected = errors.New("botbooter: already connected")
+
+// ErrNilMessage is returned by Bot methods handed a nil *Message argument.
+var ErrNilMessage = errors.New("botbooter: nil message")
 
 // BotType identifies the messaging platform a Bot is connected to.
 type BotType int
@@ -32,9 +36,13 @@ const (
 	TelegramBotType
 	WhatsAppBotType
 	TeamsBotType
+	WhatsMeowBotType
+	GitHubBotType
 	SignalBotType
 )
 
+// String returns the lowercase platform name for t, or "BotType(n)" for an
+// unknown value.
 func (t BotType) String() string {
 	switch t {
 	case SlackBotType:
@@ -49,6 +57,10 @@ func (t BotType) String() string {
 		return "whatsapp"
 	case TeamsBotType:
 		return "teams"
+	case WhatsMeowBotType:
+		return "whatsmeow"
+	case GitHubBotType:
+		return "github"
 	case SignalBotType:
 		return "signal"
 	default:
@@ -61,23 +73,47 @@ func (t BotType) String() string {
 // are best-effort per platform. Raw carries the originating platform's untouched
 // event; read it with the matching typed accessor (e.g. discord.RawEvent).
 type Message struct {
-	ID               string
-	UserID           string
-	AuthorName       string
-	ChannelID        string
-	Content          string
-	Timestamp        time.Time
-	ReplyToID        string
+	ID         string
+	UserID     string
+	AuthorName string
+	ChannelID  string
+	Content    string
+	Timestamp  time.Time
+	ReplyToID  string
+	// MentionedUserIDs lists each mentioned user once, in first-mention order.
+	// Whether the bot's own mention appears follows Content: Teams strips the
+	// bot's mention from Content and so excludes its ID here; Slack and Discord
+	// keep it in both.
 	MentionedUserIDs []string
 
 	Raw any
 }
 
-// CLIMessage is the raw payload of a message read from the CLI adapter.
-type CLIMessage struct {
-	Text        string
-	Attachments []Attachment
+// Reaction is a platform-agnostic emoji reaction added to a message, handed to
+// handlers registered with [Bot.OnReaction]. UserID, ChannelID and MessageID are
+// always set; MessageID identifies the reacted message and is the reply target for
+// [Bot.ReplyToMessage]. Emoji renders as-is when sent back in a message on its
+// origin platform: a unicode character on most platforms, Slack's colon-wrapped
+// shortname (":thumbsup:", covering custom workspace emojis), Discord's
+// "<:name:id>" markup for its custom emojis. It is NOT normalized across
+// platforms — compare per platform. AuthorName is best-effort and inline-only —
+// empty on platforms whose reaction payload carries only a user id. Raw carries
+// the originating platform event untouched; read it with the matching typed
+// accessor (e.g. slack.RawReaction) to recover the platform's original values,
+// such as the unwrapped emoji name (slack.RawReaction(r).Reaction gives
+// "thumbsup", discord.RawReaction(r).Emoji.Name the bare custom-emoji name).
+type Reaction struct {
+	Emoji      string
+	UserID     string
+	AuthorName string
+	ChannelID  string
+	MessageID  string
+
+	Raw any
 }
+
+// ReactionHandler handles an emoji reaction dispatched to [Bot.OnReaction].
+type ReactionHandler func(ctx context.Context, b *Bot, r *Reaction)
 
 // CommandHandler handles a dispatched message for a matched command.
 type CommandHandler func(ctx context.Context, b *Bot, m *Message)
@@ -110,7 +146,7 @@ type Attachment struct {
 type Adapter interface {
 	Connect(ctx context.Context, deps AdapterDeps) error
 	Disconnect() error
-	Send(ctx context.Context, channelID, text string) error
+	Send(ctx context.Context, channelID, text string, opts SendOptions) error
 	Attachments(m *Message) ([]Attachment, error)
 }
 
@@ -121,16 +157,82 @@ type AttachmentResolver interface {
 	ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error)
 }
 
-// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot.
-type AdapterDeps struct {
-	Dispatch   func(ctx context.Context, m *Message)
-	Done       func(err error)
-	Disconnect func() error
+// ThreadedSender is an OPTIONAL capability an Adapter may implement to post a
+// reply nested on a specific message. Like [AttachmentResolver] it is deliberately
+// NOT part of the mandatory Adapter interface: adapters that implement it get
+// threaded replies via [Bot.ReplyToMessage]; those that do not fall back to a
+// plain channel message.
+type ThreadedSender interface {
+	SendThreaded(ctx context.Context, channelID, replyToID, text string) error
 }
 
-// Bot is the platform-agnostic chat bot. Register handlers and middleware
-// before Connect; after that, Connect/Run/Disconnect/Send are safe to call
-// concurrently. Registering after Connect races the dispatch goroutine.
+// SendOptions is the resolved set of per-send modifiers an Adapter reads off a
+// Send call. Its zero value means "a plain channel message". A threading anchor
+// is platform-specific, so each adapter derives its own from these fields:
+//   - ReplyTo: reply anchored on this whole message; the adapter picks the
+//     correct native anchor (Slack thread_ts from ReplyToID; Discord/Telegram/
+//     WhatsApp the replied-to/quoted message id).
+//   - ThreadID: a raw native anchor supplied by the caller, used verbatim. It
+//     wins over ReplyTo when both are set. On Slack it is a thread_ts; on
+//     Discord/Telegram/WhatsApp a reply/quote message id (NOT a Discord
+//     thread-channel id).
+type SendOptions struct {
+	ReplyTo  *Message
+	ThreadID string
+}
+
+// SendOption modifies a SendOptions. Construct them with [InReplyTo] /
+// [WithThreadID] and pass them to [Bot.SendMessageContext] / [Bot.SendMessage].
+type SendOption func(*SendOptions)
+
+// InReplyTo anchors the send on m so the adapter posts into m's thread or
+// reply-chain, deriving the correct per-platform anchor itself.
+func InReplyTo(m *Message) SendOption { return func(o *SendOptions) { o.ReplyTo = m } }
+
+// WithThreadID anchors the send on a raw native id the adapter uses verbatim.
+// It takes precedence over [InReplyTo]. The caller owns platform-correctness.
+func WithThreadID(id string) SendOption { return func(o *SendOptions) { o.ThreadID = id } }
+
+// resolveSendOptions folds opts into a single SendOptions, skipping nil options
+// so a conditionally-built option slice can carry a nil entry without panicking.
+func resolveSendOptions(opts ...SendOption) SendOptions {
+	var o SendOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	return o
+}
+
+// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot,
+// plus the Bot's logger so adapter diagnostics route through the same sink.
+// DispatchReaction is optional: adapters on platforms without reaction events
+// simply never call it. HasReactionHandlers reports whether any OnReaction
+// handler was registered before Connect, so an adapter whose reaction ingress
+// costs something (the GitHub poller pays API requests per cycle) can skip the
+// work nobody consumes; push-based adapters may ignore it — dispatching to
+// zero handlers is free. Handlers registered after Connect do not flip it: the
+// snapshot follows the register-before-Connect contract.
+type AdapterDeps struct {
+	Dispatch            func(ctx context.Context, m *Message)
+	DispatchReaction    func(ctx context.Context, r *Reaction)
+	HasReactionHandlers bool
+	// Done reports that this connection's event loop terminated. Call it AT MOST
+	// ONCE per connection: it writes to a size-1 buffered channel, so a redundant
+	// Done is at best silently dropped and at worst blocks the caller forever
+	// (when Run was woken by ctx/Disconnect and never drains the channel). An
+	// adapter that can emit several terminal events (whatsmeow) must collapse them
+	// into a single Done — e.g. behind a per-connection sync.Once.
+	Done       func(err error)
+	Disconnect func() error
+	Logger     *slog.Logger // always non-nil
+}
+
+// Bot is the platform-agnostic chat bot. Register handlers, middleware, and flows
+// (HandleFlow — and the Flow builder calls behind it) before Connect; after that,
+// Connect/Run/Disconnect/Send are safe to call concurrently. Registering, or
+// mutating a registered Flow, after Connect races the dispatch goroutine.
 type Bot struct {
 	BotType BotType
 
@@ -139,6 +241,22 @@ type Bot struct {
 	commands              []Command
 	unknownCommandHandler CommandHandler
 	middlewares           []Middleware
+	reactionHandlers      []ReactionHandler
+	setupErrs             []error // registration errors, surfaced by Connect
+	logger                *slog.Logger
+
+	conversations *conversationManager
+	flows         map[string]*Flow
+
+	// dispatchChain is the middleware chain wrapped around the terminal
+	// flow/command handler. Connect composes it once per connection from the
+	// current middleware snapshot and reuses it for every message; a reconnect
+	// re-snapshots, so a Bot reused across runs picks up middleware registered
+	// between runs. Middleware is register-before-Connect, so the snapshot is
+	// stable during a run; the inner handler still reads live Bot state (commands,
+	// flows) on each call. Stored atomically so a straggler dispatch from a prior
+	// connection can read it while a reconnect stores a fresh chain, race-free.
+	dispatchChain atomic.Pointer[CommandHandler]
 
 	mu   sync.Mutex
 	conn *connection
@@ -148,36 +266,54 @@ type Bot struct {
 // fresh one and Disconnect drops it, so nothing from a prior connection can
 // leak into a successor across disconnect→reconnect races.
 type connection struct {
-	cancel  context.CancelFunc
-	done    chan error    // adapter reports event-loop termination here
-	runDone chan struct{} // closed exactly once when this connection tears down
-	once    sync.Once
-	adapter Adapter
+	cancel   context.CancelFunc
+	done     chan error    // adapter reports event-loop termination here
+	runDone  chan struct{} // closed exactly once when this connection tears down
+	once     sync.Once
+	discOnce sync.Once // scopes adapter.Disconnect to exactly one true teardown
+	discErr  error     // adapter.Disconnect result, recorded once and shared by all true callers
+	adapter  Adapter
+	// sweeperDone is closed by the conversation sweeper goroutine when it exits
+	// (nil when no sweeper started for this connection). It is a test-observable
+	// hook for asserting the background goroutine is gone after teardown; the
+	// production teardown path does not wait on it.
+	sweeperDone <-chan struct{}
 }
 
 // teardown cancels the run context and closes runDone exactly once. It runs the
 // adapter's Disconnect only when disconnectAdapter is true; a superseded
 // connection passes false so it can never disconnect the shared adapter a newer
 // connection now owns.
+//
+// The adapter call sits under its own discOnce, NOT the runDone once: c.cancel
+// wakes adapter ctx-watchers whose deps.Disconnect arrives as a superseded
+// (false) teardown, and if that consumed a shared once first it would swallow
+// the true caller's adapter Disconnect entirely. A false teardown never touches
+// discOnce, while concurrent true callers (b.conn is uninstalled only after
+// teardown returns, so more than one caller can observe itself current)
+// collapse into one adapter Disconnect — the losers block until the winner
+// finishes and share its error via discErr.
 func (c *connection) teardown(disconnectAdapter bool) error {
 	c.cancel()
-	var err error
-	c.once.Do(func() {
-		close(c.runDone)
-		if disconnectAdapter {
-			if c.adapter == nil {
-				err = ErrUnknownBotType
-				return
-			}
-			err = c.adapter.Disconnect()
-		}
-	})
-	return err
+	c.once.Do(func() { close(c.runDone) })
+	if !disconnectAdapter {
+		return nil
+	}
+	if c.adapter == nil {
+		return ErrUnknownBotType
+	}
+	c.discOnce.Do(func() { c.discErr = c.adapter.Disconnect() })
+	return c.discErr
 }
 
 // New creates a Bot of the given type backed by adapter.
 func New(botType BotType, adapter Adapter) *Bot {
-	return &Bot{BotType: botType, adapter: adapter}
+	return &Bot{
+		BotType:       botType,
+		adapter:       adapter,
+		conversations: newConversationManager(),
+		flows:         make(map[string]*Flow),
+	}
 }
 
 // AdapterAs returns the Bot's adapter as T, reporting whether it is that type.
@@ -187,21 +323,25 @@ func AdapterAs[T any](b *Bot) (T, bool) {
 	return a, ok
 }
 
-// AddHandler registers cmd, compiling its Pattern and returning an error if it
-// is not valid. Commands are matched in registration order, first match wins.
-func (b *Bot) AddHandler(cmd Command) error {
+// AddHandler registers cmd, compiling its Pattern. An invalid pattern is
+// recorded rather than returned — it surfaces from Connect (and Run) and is
+// also logged at record time (so a registration after Connect is not silently
+// dropped), and the command is not registered. Commands are matched in
+// registration order, first match wins.
+func (b *Bot) AddHandler(cmd Command) {
 	re, err := regexp.Compile(cmd.Pattern)
 	if err != nil {
-		return fmt.Errorf("botbooter: invalid command pattern %q: %w", cmd.Pattern, err)
+		b.log().Error("botbooter: invalid command pattern", "pattern", cmd.Pattern, "error", err)
+		b.setupErrs = append(b.setupErrs, fmt.Errorf("botbooter: invalid command pattern %q: %w", cmd.Pattern, err))
+		return
 	}
 	cmd.re = re
 	b.commands = append(b.commands, cmd)
-	return nil
 }
 
 // HandleFunc is a convenience wrapper around AddHandler.
-func (b *Bot) HandleFunc(pattern string, handler CommandHandler) error {
-	return b.AddHandler(Command{Pattern: pattern, Handler: handler})
+func (b *Bot) HandleFunc(pattern string, handler CommandHandler) {
+	b.AddHandler(Command{Pattern: pattern, Handler: handler})
 }
 
 // SetUnknownCommandHandler sets the handler invoked when a message matches no
@@ -215,9 +355,59 @@ func (b *Bot) AddMiddleware(middleware Middleware) {
 	b.middlewares = append(b.middlewares, middleware)
 }
 
+// OnReaction registers h to run whenever a user adds an emoji reaction, on the
+// platforms that surface reaction events (Slack, Discord, Telegram, WhatsApp,
+// GitHub). Handlers are not regex-matched — branch on Reaction.Emoji inside the
+// handler — and, unlike message dispatch, reactions bypass the Middleware chain.
+// Register before Connect: adapters whose reaction ingress costs something
+// decide at Connect whether to run it ([AdapterDeps].HasReactionHandlers) — on
+// GitHub, a handler registered only after Connect means no reaction poller
+// starts and OnReaction never fires for that connection.
+//
+// Cross-bot reaction loops are handler-owned on Slack: its reaction_added event
+// carries no bot flag, so the adapter cannot drop another bot's reaction the way
+// Telegram/Discord/GitHub do. A handler that emits a reply (e.g. ReplyToMessage)
+// in response to a reaction can therefore ping-pong with another auto-reacting
+// bot — guard such handlers (e.g. by author, emoji, or a rate limit).
+func (b *Bot) OnReaction(h ReactionHandler) {
+	b.reactionHandlers = append(b.reactionHandlers, h)
+}
+
+// dispatchReaction runs every registered reaction handler. Each handler call is
+// recovered individually, so a panic in one handler neither skips the others nor
+// takes down the adapter's event loop.
+func (b *Bot) dispatchReaction(ctx context.Context, r *Reaction) {
+	for _, h := range b.reactionHandlers {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					b.log().Error("botbooter: recovered from panic while handling reaction", "panic", rec)
+				}
+			}()
+			h(ctx, b, r)
+		}()
+	}
+}
+
+// SetLogger routes the Bot's and its adapter's diagnostics (panic recovery,
+// shutdown warnings, webhook rejections) through logger instead of
+// [slog.Default]. Like handler registration, call it before Connect.
+func (b *Bot) SetLogger(logger *slog.Logger) {
+	b.logger = logger
+}
+
+// log returns the configured logger, falling back to slog.Default().
+func (b *Bot) log() *slog.Logger {
+	if b.logger != nil {
+		return b.logger
+	}
+	return slog.Default()
+}
+
 // Connect starts the adapter's event loop and returns without blocking. It
 // returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
-// if the Bot has no adapter, or any error from the adapter's own Connect.
+// if the Bot has no adapter, every registration error recorded by AddHandler
+// (joined, one per invalid pattern), or any error from the adapter's own Connect.
 func (b *Bot) Connect(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -227,6 +417,14 @@ func (b *Bot) Connect(ctx context.Context) error {
 	if b.adapter == nil {
 		return ErrUnknownBotType
 	}
+	if err := errors.Join(b.setupErrs...); err != nil {
+		return err
+	}
+	// Compose the dispatch chain from the current middleware snapshot, redone on
+	// every Connect so a Bot reused across a reconnect reflects middleware
+	// registered between runs. Register-before-Connect keeps it stable during a run.
+	chain := b.composeDispatchChain()
+	b.dispatchChain.Store(&chain)
 	runCtx, cancel := context.WithCancel(ctx)
 	c := &connection{
 		cancel:  cancel,
@@ -239,9 +437,12 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// prior connection writes into its own dead channel and never touches the
 	// shared adapter.
 	deps := AdapterDeps{
-		Dispatch:   b.dispatch,
-		Done:       func(err error) { c.done <- err },
-		Disconnect: func() error { return b.disconnectConn(c) },
+		Dispatch:            b.dispatch,
+		DispatchReaction:    b.dispatchReaction,
+		HasReactionHandlers: len(b.reactionHandlers) > 0,
+		Done:                func(err error) { c.done <- err },
+		Disconnect:          func() error { return b.disconnectConn(c) },
+		Logger:              b.log(),
 	}
 
 	// adapter.Connect is non-blocking by contract. Holding b.mu across it — and
@@ -252,6 +453,27 @@ func (b *Bot) Connect(ctx context.Context) error {
 		return err
 	}
 	b.conn = c
+
+	// Start the conversation sweeper on the per-connection run context so it stops
+	// when this connection is torn down and a reconnect installs a fresh one. The
+	// in-memory flow state itself is per-Bot and survives a transient reconnect;
+	// only background sweeping pauses for that window (lazy expiry still applies).
+	// Gated on registered flows so a bot that never calls HandleFlow spins up no
+	// background goroutine. This gate is read once at Connect: a flow registered
+	// AFTER Connect still dispatches (composeDispatchChain's advance reads b.flows
+	// live) but gets no background sweeper until the next reconnect, so its expired
+	// state is only lazily reaped on the user's next message. Flows, like
+	// middleware, are meant to be registered before Connect.
+	//
+	// teardown cancels the old connection's runCtx but does not wait for its
+	// sweeper to observe cancellation and exit (production teardown never blocks
+	// on sweeperDone), so a fast reconnect can briefly run two sweepers against
+	// the shared per-Bot conversationManager. That overlap is benign: sweep
+	// re-checks expiry under each shard lock before deleting, so a concurrent
+	// double-sweep is idempotent.
+	if b.conversations != nil && len(b.flows) > 0 {
+		c.sweeperDone = b.conversations.startSweeper(runCtx, defaultSweepInterval, b.log())
+	}
 	return nil
 }
 
@@ -259,14 +481,27 @@ func (b *Bot) Connect(ctx context.Context) error {
 // connection the adapter is disconnected; if c has been superseded by a
 // reconnect, only c's own runCtx/runDone are settled and the adapter — now
 // owned by the newer connection — is left untouched.
+//
+// b.conn is cleared only AFTER teardown returns, so a Connect racing a
+// slow adapter Disconnect (drains can take seconds) gets ErrAlreadyConnected
+// instead of starting a second live session on the shared adapter. Concurrent
+// teardowns of the same connection serialize on its sync.Once: the losers
+// block inside teardown until the winner's adapter Disconnect finishes.
 func (b *Bot) disconnectConn(c *connection) error {
 	b.mu.Lock()
 	current := b.conn == c
-	if current {
-		b.conn = nil
-	}
 	b.mu.Unlock()
-	return c.teardown(current)
+
+	err := c.teardown(current)
+
+	if current {
+		b.mu.Lock()
+		if b.conn == c {
+			b.conn = nil
+		}
+		b.mu.Unlock()
+	}
+	return err
 }
 
 // Disconnect tears down the active connection: it cancels the run context and
@@ -275,17 +510,15 @@ func (b *Bot) disconnectConn(c *connection) error {
 func (b *Bot) Disconnect() error {
 	b.mu.Lock()
 	c := b.conn
-	b.conn = nil
 	b.mu.Unlock()
 
-	if c != nil {
-		return c.teardown(true)
+	if c == nil {
+		if b.adapter == nil {
+			return ErrUnknownBotType
+		}
+		return nil
 	}
-
-	if b.adapter == nil {
-		return ErrUnknownBotType
-	}
-	return nil
+	return b.disconnectConn(c)
 }
 
 // Run connects the Bot and blocks until ctx is canceled, the event loop ends,
@@ -312,7 +545,11 @@ func (b *Bot) Run(ctx context.Context) error {
 	case loopErr = <-c.done:
 	}
 
-	disconnectErr := b.Disconnect()
+	// Tear down the connection Run OWNS, not whatever b.conn currently points at.
+	// If a reconnect superseded c while Run was blocked, b.Disconnect() would tear
+	// down the live successor; disconnectConn(c) instead scopes teardown to c and
+	// degrades to a no-op adapter teardown when c is no longer installed.
+	disconnectErr := b.disconnectConn(c)
 
 	// Graceful shutdown (ctx canceled, or a local Disconnect canceling runCtx)
 	// surfaces as loopErr echoing the canceling context's error; swallow it so
@@ -324,7 +561,7 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	if disconnectErr != nil {
 		if ctx.Err() != nil {
-			log.Printf("botbooter: error disconnecting during shutdown: %v", disconnectErr)
+			b.log().Error("botbooter: error disconnecting during shutdown", "error", disconnectErr)
 		} else if loopErr == nil {
 			loopErr = disconnectErr
 		}
@@ -342,20 +579,55 @@ func (b *Bot) Start() error {
 // SendMessage sends text to channelID using a background context. Prefer
 // SendMessageContext from within a handler so the send honors shutdown and
 // cancellation; SendMessage's background context outlives Run's teardown.
-func (b *Bot) SendMessage(channelID, text string) error {
-	return b.SendMessageContext(context.Background(), channelID, text)
+func (b *Bot) SendMessage(channelID, text string, opts ...SendOption) error {
+	return b.SendMessageContext(context.Background(), channelID, text, opts...)
 }
 
 // SendMessageContext sends text to channelID, honoring ctx for cancellation.
-func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string) error {
+// Pass [InReplyTo] or [WithThreadID] to thread the message onto an inbound one;
+// with no options it is a plain channel message.
+func (b *Bot) SendMessageContext(ctx context.Context, channelID, text string, opts ...SendOption) error {
 	if b.adapter == nil {
 		return ErrUnknownBotType
 	}
-	return b.adapter.Send(ctx, channelID, text)
+	return b.adapter.Send(ctx, channelID, text, resolveSendOptions(opts...))
 }
 
-// GetAttachments returns the platform-agnostic attachments of message.
+// ReplyToMessage posts text as a reply nested on the message identified by
+// replyToID in channelID. If the Bot's adapter implements [ThreadedSender] the
+// call is delegated; otherwise it falls back to a plain [Bot.SendMessageContext],
+// so the reply still reaches the channel, just not threaded. It returns
+// [ErrUnknownBotType] if the Bot has no adapter.
+func (b *Bot) ReplyToMessage(ctx context.Context, channelID, replyToID, text string) error {
+	if b.adapter == nil {
+		return ErrUnknownBotType
+	}
+	if s, ok := b.adapter.(ThreadedSender); ok {
+		return s.SendThreaded(ctx, channelID, replyToID, text)
+	}
+	return b.adapter.Send(ctx, channelID, text, SendOptions{})
+}
+
+// Reply is convenience sugar for replying into the thread or reply-chain of the
+// inbound message m — it is exactly SendMessageContext(ctx, m.ChannelID, text,
+// InReplyTo(m)). Each adapter derives its own platform-specific anchor; see
+// [SendOptions]. It returns ErrNilMessage if m is nil, or ErrUnknownBotType if
+// the Bot has no adapter.
+func (b *Bot) Reply(ctx context.Context, m *Message, text string) error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	// A nil adapter is caught by the delegated SendMessageContext.
+	return b.SendMessageContext(ctx, m.ChannelID, text, InReplyTo(m))
+}
+
+// GetAttachments returns the platform-agnostic attachments of message. It
+// returns ErrNilMessage if message is nil, or ErrUnknownBotType if the Bot has
+// no adapter.
 func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
+	if message == nil {
+		return nil, ErrNilMessage
+	}
 	if b.adapter == nil {
 		return nil, ErrUnknownBotType
 	}
@@ -378,7 +650,10 @@ func (b *Bot) GetAttachments(message *Message) ([]Attachment, error) {
 //     API token used to send). Short-lived; consume promptly.
 //   - Teams: a pre-authorized link carrying a short-lived token — consume
 //     promptly, never log or cache. Inline images may need an Authorization
-//     header this adapter does not yet supply.
+//     header this adapter does not yet supply. The URL is sender-influenced
+//     (it rides in on the inbound Activity), so treat it as an SSRF hazard:
+//     validate the host/scheme before fetching, never let it target an internal
+//     address.
 //   - CLI: a local filesystem path (open with os.Open), not an HTTP URL.
 func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string, error) {
 	if b.adapter == nil {
@@ -392,15 +667,37 @@ func (b *Bot) ResolveAttachmentURL(ctx context.Context, att Attachment) (string,
 
 // dispatch routes message through the middleware chain to the first matching
 // command. A panic in any handler or middleware is recovered and logged so it
-// cannot take down the event loop.
+// cannot take down the event loop. The middleware chain is composed once per
+// connection (in Connect) and reused, since middleware is registered before Connect.
 func (b *Bot) dispatch(ctx context.Context, message *Message) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("botbooter: recovered from panic while handling message: %v", r)
+			b.log().Error("botbooter: recovered from panic while handling message", "panic", r)
 		}
 	}()
 
+	if p := b.dispatchChain.Load(); p != nil {
+		(*p)(ctx, b, message)
+		return
+	}
+	// No connection was ever established (e.g. a unit test calling dispatch
+	// directly); compose on the fly from the current middleware.
+	b.composeDispatchChain()(ctx, b, message)
+}
+
+// composeDispatchChain wraps the terminal flow/command handler in the registered
+// middleware, inner-to-outer, so registration order equals execution order. The
+// returned handler closes over the middleware snapshot but reads live Bot state
+// (flows, commands, unknownCommandHandler) on every call, so composing it once is
+// equivalent to rebuilding it per message.
+func (b *Bot) composeDispatchChain() CommandHandler {
 	handler := func(ctx context.Context, bot *Bot, message *Message) {
+		// An active flow for this conversation consumes the message before the
+		// command table; advance reports false (and we fall through) when no flow
+		// is active or its state outlived its registration.
+		if len(bot.flows) > 0 && bot.conversations != nil && bot.conversations.advance(ctx, bot, message) {
+			return
+		}
 		for i := range bot.commands {
 			if bot.commands[i].match(message.Content) {
 				bot.commands[i].Handler(ctx, bot, message)
@@ -420,6 +717,5 @@ func (b *Bot) dispatch(ctx context.Context, message *Message) {
 			middleware(ctx, bot, message, next)
 		}
 	}
-
-	final(ctx, b, message)
+	return final
 }

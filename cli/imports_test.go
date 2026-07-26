@@ -12,5 +12,5 @@ import (
 // module-level isolation deps test.
 func TestCLIImportsNoPlatformSDK(t *testing.T) {
 	asserts.CheckBannedImports(t, ".",
-		[]string{"discordgo", "slack-go/slack", "go-telegram/bot"}, "cli")
+		[]string{"discordgo", "slack-go/slack", "go-telegram/bot", "google/go-github", "bradleyfalzon/ghinstallation"}, "cli")
 }

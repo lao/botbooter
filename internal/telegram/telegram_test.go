@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,24 +35,200 @@ func newCaptureAdapter(selfID int64, got **core.Message) (*adapter, context.Cont
 	return a, withDeps(context.Background(), &deps)
 }
 
-// newStubAdapter wires an adapter to an httptest Bot API server, mirroring New without real network I/O.
-func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
+// newReactionCapture builds an adapter and a deps-carrying ctx that collects
+// every dispatched reaction, so onUpdate's reaction path can be tested directly.
+func newReactionCapture(selfID int64) (*adapter, context.Context, *[]*core.Reaction) {
+	got := &[]*core.Reaction{}
+	deps := core.AdapterDeps{DispatchReaction: func(_ context.Context, r *core.Reaction) { *got = append(*got, r) }}
+	return &adapter{selfID: selfID}, withDeps(context.Background(), &deps), got
+}
+
+func emojiReaction(e string) models.ReactionType {
+	return models.ReactionType{Type: models.ReactionTypeTypeEmoji, ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: e}}
+}
+
+// newStubAdapterRaw wires an adapter to an httptest Bot API server, mirroring New
+// without real network I/O. It builds the client from the production
+// clientOptions, so tests exercise the same option set New installs. The handler
+// has full control of every Bot API method, including getMe.
+func newStubAdapterRaw(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
 	a := &adapter{selfID: selfID}
 	a.newClient = func() (*bot.Bot, error) {
-		return bot.New("123:test-token",
-			bot.WithDefaultHandler(a.onUpdate),
-			bot.WithServerURL(srv.URL),
-			bot.WithSkipGetMe(),
-		)
+		return bot.New("123:test-token", append(a.clientOptions(), bot.WithServerURL(srv.URL))...)
 	}
 	tg, err := a.newClient()
 	asserts.NoError(t, err, "bot.New for stub server")
 	a.client = tg
 	return a
+}
+
+// newStubAdapter is newStubAdapterRaw with Connect's getMe probe pre-answered by
+// a stub bot user, so a test's handler only has to cover the methods it cares
+// about. (Connect probes getMe to fail fast on a bad token; the returned id is
+// irrelevant — the adapter's self id comes from the token prefix / selfID.)
+func newStubAdapter(t *testing.T, selfID int64, handler http.HandlerFunc) *adapter {
+	t.Helper()
+	return newStubAdapterRaw(t, selfID, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getMe") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"stub"}}`))
+			return
+		}
+		handler(w, r)
+	})
+}
+
+func TestOnReaction(t *testing.T) {
+	reactionUpdate := func(newR, oldR []models.ReactionType) *models.Update {
+		return &models.Update{MessageReaction: &models.MessageReactionUpdated{
+			Chat:        models.Chat{ID: 100},
+			MessageID:   55,
+			User:        &models.User{ID: 7, Username: "alice"},
+			NewReaction: newR,
+			OldReaction: oldR,
+		}}
+	}
+
+	t.Run("AddedEmojiDispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate([]models.ReactionType{emojiReaction("👍")}, nil))
+
+		asserts.Equal(t, len(*got), 1, "one reaction dispatched")
+		r := (*got)[0]
+		asserts.Equal(t, r.Emoji, "👍", "emoji")
+		asserts.Equal(t, r.UserID, "7", "reactor id")
+		asserts.Equal(t, r.AuthorName, "alice", "reactor name is inline on the update")
+		asserts.Equal(t, r.ChannelID, "100", "chat id")
+		asserts.Equal(t, r.MessageID, "55", "reacted message id")
+		ru, ok := RawReactionUpdate(r)
+		asserts.True(t, ok, "RawReactionUpdate recovers the update")
+		asserts.Equal(t, ru.MessageID, 55, "raw carries the reaction update")
+	})
+
+	t.Run("RemovalNotDispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate(nil, []models.ReactionType{emojiReaction("👍")}))
+		asserts.Equal(t, len(*got), 0, "a removal (present in Old, gone from New) dispatches nothing")
+	})
+
+	t.Run("AlreadyPresentNotRedispatched", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		a.onUpdate(ctx, nil, reactionUpdate(
+			[]models.ReactionType{emojiReaction("👍"), emojiReaction("❤")},
+			[]models.ReactionType{emojiReaction("👍")},
+		))
+		asserts.Equal(t, len(*got), 1, "only the newly-added emoji dispatches")
+		asserts.Equal(t, (*got)[0].Emoji, "❤", "the newly-added emoji")
+	})
+
+	t.Run("NonEmojiTypeSkipped", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		// A zero-value ReactionType has a non-emoji Type; a nil ReactionTypeEmoji
+		// is likewise skipped.
+		a.onUpdate(ctx, nil, reactionUpdate([]models.ReactionType{{}}, nil))
+		asserts.Equal(t, len(*got), 0, "non-emoji reaction types are skipped")
+	})
+
+	t.Run("BotReactorIgnored", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		u := &models.Update{MessageReaction: &models.MessageReactionUpdated{
+			Chat: models.Chat{ID: 100}, MessageID: 55,
+			User:        &models.User{ID: 8, IsBot: true},
+			NewReaction: []models.ReactionType{emojiReaction("👍")},
+		}}
+		a.onUpdate(ctx, nil, u)
+		asserts.Equal(t, len(*got), 0, "another bot's reaction dispatches nothing, mirroring the message path")
+	})
+
+	t.Run("AnonymousNoUser", func(t *testing.T) {
+		a, ctx, got := newReactionCapture(999)
+		u := &models.Update{MessageReaction: &models.MessageReactionUpdated{
+			Chat: models.Chat{ID: 100}, MessageID: 55,
+			NewReaction: []models.ReactionType{emojiReaction("👍")},
+		}}
+		a.onUpdate(ctx, nil, u)
+		asserts.Equal(t, len(*got), 0, "anonymous reaction (no user) dispatches nothing")
+	})
+}
+
+func TestRawReactionUpdate_NonTelegram(t *testing.T) {
+	t.Run("foreign raw", func(t *testing.T) {
+		u, ok := RawReactionUpdate(&core.Reaction{Raw: "not-a-telegram-update"})
+		asserts.False(t, ok, "a non-Telegram reaction is not recovered")
+		asserts.True(t, u == nil, "no update returned for a foreign reaction")
+	})
+
+	t.Run("telegram update without a reaction", func(t *testing.T) {
+		// A Telegram *models.Update whose MessageReaction is nil is not a reaction.
+		u, ok := RawReactionUpdate(&core.Reaction{Raw: &models.Update{}})
+		asserts.False(t, ok, "an update carrying no MessageReaction is not a reaction")
+		asserts.True(t, u == nil, "no update returned when MessageReaction is nil")
+	})
+}
+
+func TestSendThreaded(t *testing.T) {
+	var body string
+	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "sendMessage") {
+			b, _ := io.ReadAll(r.Body)
+			body = string(b)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":100,"type":"private"}}}`))
+	})
+
+	err := a.SendThreaded(context.Background(), "100", "55", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should succeed")
+	asserts.True(t, strings.Contains(body, "reply_parameters"), "reply_parameters sent: "+body)
+	asserts.True(t, strings.Contains(body, `"message_id":55`), "reply targets message 55: "+body)
+}
+
+// A non-numeric replyToID cannot be a Telegram message id, so SendThreaded falls
+// back to a plain send with no reply_parameters rather than failing.
+func TestSendThreaded_NonNumericFallsBack(t *testing.T) {
+	var gotText, gotReply string
+	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "sendMessage") {
+			_ = r.ParseMultipartForm(1 << 20)
+			gotText = r.FormValue("text")
+			gotReply = r.FormValue("reply_parameters")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":100,"type":"private"}}}`))
+	})
+
+	err := a.SendThreaded(context.Background(), "100", "not-a-number", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should fall back to a plain send")
+	asserts.Equal(t, gotText, "hi", "text is still sent on the fallback path")
+	asserts.Equal(t, gotReply, "", "no reply_parameters on the fallback path")
+}
+
+// A non-positive replyToID (Telegram message ids start at 1) would make the API
+// reject the send with Bad Request, so SendThreaded degrades to a plain send
+// with no reply_parameters instead — same as the non-numeric case.
+func TestSendThreaded_NonPositiveFallsBack(t *testing.T) {
+	var gotText, gotReply string
+	a := newStubAdapter(t, 999, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "sendMessage") {
+			_ = r.ParseMultipartForm(1 << 20)
+			gotText = r.FormValue("text")
+			gotReply = r.FormValue("reply_parameters")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":100,"type":"private"}}}`))
+	})
+
+	err := a.SendThreaded(context.Background(), "100", "0", "hi")
+
+	asserts.NoError(t, err, "SendThreaded should fall back to a plain send")
+	asserts.Equal(t, gotText, "hi", "text is still sent on the fallback path")
+	asserts.Equal(t, gotReply, "", "no reply_parameters for a non-positive reply id")
 }
 
 func TestNew(t *testing.T) {
@@ -173,6 +350,23 @@ func TestOnUpdate(t *testing.T) {
 		// dropped, not panic — exercises the depsFrom == nil guard.
 		(&adapter{selfID: selfID}).onUpdate(context.Background(), nil, userMessage("hi", ""))
 	})
+
+	t.Run("EmptyServiceMessageSkipped", func(t *testing.T) {
+		// A sticker-only message (and, likewise, member-join/location/pinned service
+		// messages) has no text, no caption, and no attachment the adapter surfaces,
+		// so it must not be dispatched as an empty-Content command. Mirrors Slack and
+		// whatsmeow.
+		var got *core.Message
+		a, ctx := newCaptureAdapter(selfID, &got)
+
+		a.onUpdate(ctx, nil, &models.Update{Message: &models.Message{
+			From:    &models.User{ID: 7},
+			Chat:    models.Chat{ID: 100},
+			Sticker: &models.Sticker{FileID: "s1"},
+		}})
+
+		asserts.True(t, got == nil, "an empty service message is not dispatched to the command table")
+	})
 }
 
 // TestOnUpdate_DropsAfterShutdown checks an update on a canceled run context is dropped.
@@ -270,11 +464,12 @@ func TestTelegramMentions(t *testing.T) {
 		Text: "hi Bob",
 		Entities: []models.MessageEntity{
 			{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 99}},
-			{Type: models.MessageEntityTypeMention}, // @username — no id, skipped
+			{Type: models.MessageEntityTypeMention},                                 // @username — no id, skipped
+			{Type: models.MessageEntityTypeTextMention, User: &models.User{ID: 99}}, // repeat, deduped
 		},
 	}}
 	got := toMessage(u)
-	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "99", "text_mention id only")
+	asserts.Equal(t, strings.Join(got.MentionedUserIDs, ","), "99", "text_mention id only, deduped")
 }
 
 func TestTelegramMentionsFromCaption(t *testing.T) {
@@ -365,17 +560,17 @@ func TestAttachmentsFromMessage(t *testing.T) {
 var _ core.AttachmentResolver = (*adapter)(nil)
 
 func TestFileIDOf(t *testing.T) {
-	asserts.Equal(t, fileIDOf(models.PhotoSize{FileID: "p"}), "p", "photo size value yields its FileID")
-	asserts.Equal(t, fileIDOf(&models.PhotoSize{FileID: "pp"}), "pp", "photo size pointer also yields its FileID")
-	asserts.Equal(t, fileIDOf(&models.Document{FileID: "d"}), "d", "document pointer yields its FileID")
-	asserts.Equal(t, fileIDOf((*models.Document)(nil)), "", "nil document pointer is guarded")
-	asserts.Equal(t, fileIDOf(nil), "", "nil ExtraData yields no FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), models.PhotoSize{FileID: "p"}), "p", "photo size value yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), &models.PhotoSize{FileID: "pp"}), "pp", "photo size pointer also yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), &models.Document{FileID: "d"}), "d", "document pointer yields its FileID")
+	asserts.Equal(t, fileIDOf(slog.Default(), (*models.Document)(nil)), "", "nil document pointer is guarded")
+	asserts.Equal(t, fileIDOf(slog.Default(), nil), "", "nil ExtraData yields no FileID")
 }
 
 func TestFileIDOf_UnhandledTypeWarns(t *testing.T) {
 	logs := captureLog(t)
 
-	got := fileIDOf(models.Video{FileID: "v"})
+	got := fileIDOf(slog.Default(), models.Video{FileID: "v"})
 
 	asserts.Equal(t, got, "", "an unhandled media type yields no file id")
 	asserts.True(t, strings.Contains(logs.String(), "unexpected type"),
@@ -440,11 +635,12 @@ func TestResolveAttachmentURL_NoFileID(t *testing.T) {
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	prev := log.Writer()
 	flags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
 	t.Cleanup(func() {
-		log.SetOutput(os.Stderr)
+		log.SetOutput(prev)
 		log.SetFlags(flags)
 	})
 	return &buf
@@ -469,6 +665,25 @@ func TestResolveAttachmentURL_WarnsTokenInURL(t *testing.T) {
 		"a successful resolve warns that the URL carries the token")
 }
 
+// TestResolveAttachmentURL_RoutesWarningToInjectedLogger proves the logger
+// stored at Connect (here set directly) carries the resolve warning, rather
+// than always falling back to slog.Default.
+func TestResolveAttachmentURL_RoutesWarningToInjectedLogger(t *testing.T) {
+	t.Setenv(EnvSuppressURLWarning, "")
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"file_id":"f","file_path":"photos/file_1.jpg"}}`))
+	})
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	_, err := a.ResolveAttachmentURL(context.Background(),
+		core.Attachment{ExtraData: models.PhotoSize{FileID: "f"}})
+
+	asserts.NoError(t, err, "getFile succeeds against the stub server")
+	asserts.True(t, strings.Contains(buf.String(), "embeds the bot token"),
+		"the injected logger receives the token-in-URL warning")
+}
+
 func TestResolveAttachmentURL_SuppressesWarning(t *testing.T) {
 	t.Setenv(EnvSuppressURLWarning, "1")
 	logs := captureLog(t)
@@ -491,11 +706,74 @@ func TestSend(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":555,"type":"private"}}}`))
 	})
 
-	err := a.Send(context.Background(), "555", "hi there")
+	err := a.Send(context.Background(), "555", "hi there", core.SendOptions{})
 
 	asserts.NoError(t, err, "Send should succeed against a 200 OK API reply")
 	asserts.Equal(t, gotChatID, "555", "numeric channel id sent as chat_id")
 	asserts.Equal(t, gotText, "hi there", "text forwarded to the API")
+}
+
+func TestSend_Threading(t *testing.T) {
+	// The Bot API encodes reply_parameters as a JSON form field.
+	replyCapture := func(got *string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseMultipartForm(1 << 20)
+			*got = r.FormValue("reply_parameters")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":555,"type":"private"}}}`))
+		}
+	}
+
+	t.Run("InReplyToRepliesToMessageID", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, replyCapture(&gotReply))
+
+		err := a.Send(context.Background(), "555", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "555", ID: "42"}})
+
+		asserts.NoError(t, err, "Send")
+		asserts.True(t, strings.Contains(gotReply, `"message_id":42`), "reply_parameters carries the message id")
+	})
+
+	t.Run("WithThreadIDRepliesToRawID", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, replyCapture(&gotReply))
+
+		err := a.Send(context.Background(), "555", "hi", core.SendOptions{ThreadID: "42"})
+
+		asserts.NoError(t, err, "Send")
+		asserts.True(t, strings.Contains(gotReply, `"message_id":42`), "reply_parameters carries the raw ThreadID")
+	})
+
+	t.Run("NonNumericReplyToDegradesToPlainSend", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, replyCapture(&gotReply))
+
+		err := a.Send(context.Background(), "555", "hi",
+			core.SendOptions{ReplyTo: &core.Message{ChannelID: "555", ID: "not-a-number"}})
+
+		asserts.NoError(t, err, "a non-numeric derived id degrades to a plain send")
+		asserts.Equal(t, gotReply, "", "no reply_parameters when the derived id is non-numeric")
+	})
+
+	t.Run("ThreadIDWinsOverReplyTo", func(t *testing.T) {
+		var gotReply string
+		a := newStubAdapter(t, 0, replyCapture(&gotReply))
+
+		err := a.Send(context.Background(), "555", "hi",
+			core.SendOptions{ThreadID: "43", ReplyTo: &core.Message{ChannelID: "555", ID: "42"}})
+
+		asserts.NoError(t, err, "Send")
+		asserts.True(t, strings.Contains(gotReply, `"message_id":43`), "explicit ThreadID wins over ReplyTo.ID")
+	})
+
+	t.Run("ExplicitNonPositiveThreadIDErrors", func(t *testing.T) {
+		a := newStubAdapter(t, 0, replyCapture(new(string)))
+
+		for _, id := range []string{"not-a-number", "0", "-1"} {
+			err := a.Send(context.Background(), "555", "hi", core.SendOptions{ThreadID: id})
+			asserts.Error(t, err, "an explicit ThreadID that is not a positive message id must fail loudly")
+		}
+	})
 }
 
 func TestSend_SurfacesError(t *testing.T) {
@@ -503,7 +781,7 @@ func TestSend_SurfacesError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`))
 	})
 
-	err := a.Send(context.Background(), "555", "hi")
+	err := a.Send(context.Background(), "555", "hi", core.SendOptions{})
 
 	asserts.ErrorIs(t, err, bot.ErrorForbidden, "Send should surface the Telegram Forbidden error")
 }
@@ -535,19 +813,61 @@ func TestConnect_StartsAndStops(t *testing.T) {
 	}
 }
 
-// TestConnect_FreshClientPerConnection proves each Connect builds its own *bot.Bot,
-// so a canceled run's buffered updates die with its client instead of being drained,
-// and dispatched, by the next connection.
-func TestConnect_FreshClientPerConnection(t *testing.T) {
-	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+// TestConnect_PollsWithFullAllowedUpdates pins the allowed_updates the poll
+// loop sends on getUpdates. Setting allowed_updates replaces Telegram's server
+// default (and persists server-side), so the list must stay the full default
+// set plus message_reaction: message_reaction must be present (it is excluded
+// from the default, and OnReaction dies without it), and callback_query is a
+// canary for the rest of the default set — if it disappears, the list was
+// narrowed and raw-client RegisterHandler consumers silently lose updates.
+func TestConnect_PollsWithFullAllowedUpdates(t *testing.T) {
+	allowed := make(chan string, 1)
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			_ = r.ParseMultipartForm(1 << 20)
+			select {
+			case allowed <- r.FormValue("allowed_updates"):
+			default:
+			}
+		}
 		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
 	})
 
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(error) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail")
+
+	select {
+	case got := <-allowed:
+		asserts.True(t, strings.Contains(got, `"message_reaction"`),
+			"getUpdates requests message_reaction (excluded from the server default): "+got)
+		asserts.True(t, strings.Contains(got, `"callback_query"`),
+			"getUpdates keeps the server-default set (callback_query canary): "+got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no getUpdates request reached the stub server")
+	}
+}
+
+// TestConnect_FirstReusesNewClientThenFreshPerReconnect proves the first Connect
+// runs the poll loop on the New-time client (so a pre-Connect RegisterHandler on
+// Client(bot) survives), while every reconnect builds a fresh *bot.Bot (so a
+// canceled run's buffered updates die with its client instead of being drained,
+// and dispatched, by the successor connection).
+func TestConnect_FirstReusesNewClientThenFreshPerReconnect(t *testing.T) {
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+	newTime := a.client
+
 	base := a.newClient
-	var clients []*bot.Bot
+	var built []*bot.Bot
 	a.newClient = func() (*bot.Bot, error) {
 		c, err := base()
-		clients = append(clients, c)
+		built = append(built, c)
 		return c, err
 	}
 
@@ -556,14 +876,136 @@ func TestConnect_FreshClientPerConnection(t *testing.T) {
 		Done:     func(error) {},
 	}
 
-	for i := 0; i < 2; i++ {
-		ctx, cancel := context.WithCancel(context.Background())
-		asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail")
-		cancel()
-	}
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	asserts.NoError(t, a.Connect(ctx1, deps), "first Connect should not fail")
+	asserts.True(t, a.currentClient() == newTime, "first Connect reuses the New-time client")
+	asserts.Equal(t, len(built), 0, "first Connect builds no fresh client")
+	cancel1()
 
-	asserts.Equal(t, len(clients), 2, "each Connect builds its own client")
-	asserts.True(t, clients[0] != clients[1], "connections use distinct *bot.Bot instances")
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	asserts.NoError(t, a.Connect(ctx2, deps), "reconnect should not fail")
+	asserts.Equal(t, len(built), 1, "reconnect builds exactly one fresh client")
+	asserts.True(t, a.currentClient() != newTime, "reconnect swaps in a distinct *bot.Bot")
+	cancel2()
+}
+
+// TestConnect_ReusesNewTimeClientForRegisteredHandlers is the I2 behavioral proof:
+// a raw handler registered on Client(bot) BEFORE Connect must fire, which only
+// happens if the first Connect runs the poll loop on that same New-time client
+// rather than discarding it for a fresh one.
+func TestConnect_ReusesNewTimeClientForRegisteredHandlers(t *testing.T) {
+	var served atomic.Bool
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") && !served.Swap(true) {
+			_, _ = w.Write([]byte(`{"ok":true,"result":[{"update_id":1,"message":{` +
+				`"message_id":1,"date":1,"chat":{"id":100,"type":"private"},` +
+				`"from":{"id":7,"is_bot":false,"first_name":"U"},"text":"ping"}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+
+	fired := make(chan struct{}, 1)
+	a.client.RegisterHandler(bot.HandlerTypeMessageText, "ping", bot.MatchTypeExact,
+		func(context.Context, *bot.Bot, *models.Update) {
+			select {
+			case fired <- struct{}{}:
+			default:
+			}
+		})
+
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(error) {},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail")
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a handler registered before Connect never fired: the poll loop ran on a different client")
+	}
+}
+
+// TestConnect_GetMeProbeFailsFast proves an invalid token surfaces as an error
+// from Run (via Done) instead of the poll loop silently retrying a 401 forever.
+// The probe runs off the Connect path — Connect stays non-blocking, since
+// core.Bot holds its mutex across adapter.Connect — so the error arrives on Done,
+// not from Connect's return.
+func TestConnect_GetMeProbeFailsFast(t *testing.T) {
+	a := newStubAdapterRaw(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/getMe") {
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":401,"description":"Unauthorized"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+
+	done := make(chan error, 1)
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(err error) { done <- err },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect returns without blocking on the probe")
+	select {
+	case err := <-done:
+		asserts.Error(t, err, "an invalid token surfaces via Run/Done, not an infinite silent 401 retry")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the getMe probe failure was never reported via Done")
+	}
+}
+
+// chanLogHandler is a race-free slog.Handler for observing log records emitted
+// from the poll-loop goroutine: it forwards each record's message on a channel
+// (dropping if full) so a test can await it without sharing a buffer.
+type chanLogHandler struct{ ch chan string }
+
+func (h chanLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h chanLogHandler) Handle(_ context.Context, r slog.Record) error {
+	select {
+	case h.ch <- r.Message:
+	default:
+	}
+	return nil
+}
+func (h chanLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h chanLogHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestConnect_PollErrorRoutedToLogger proves a getUpdates failure in the poll
+// loop reaches the logger injected at Connect, rather than go-telegram's default
+// handler writing to the stdlib log.
+func TestConnect_PollErrorRoutedToLogger(t *testing.T) {
+	a := newStubAdapter(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	})
+
+	logs := make(chan string, 8)
+	deps := core.AdapterDeps{
+		Dispatch: func(context.Context, *core.Message) {},
+		Done:     func(error) {},
+		Logger:   slog.New(chanLogHandler{ch: logs}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	asserts.NoError(t, a.Connect(ctx, deps), "Connect should not fail (getMe is answered)")
+
+	select {
+	case msg := <-logs:
+		asserts.True(t, strings.Contains(msg, "poll error"),
+			"a poll-loop failure is routed to the injected logger: "+msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("poll error was not routed to the injected logger")
+	}
 }
 
 func TestConnect_DispatchesUpdate(t *testing.T) {

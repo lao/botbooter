@@ -1,6 +1,8 @@
-// Package whatsapp is the WhatsApp adapter for botbooter. It receives messages
-// from the Meta WhatsApp Business Cloud API over an inbound webhook and sends
-// replies back through the Cloud API. It implements core.Adapter.
+// Package cloud is the Meta Cloud API flavor of botbooter's WhatsApp adapter.
+// It receives messages from the Meta WhatsApp Business Cloud API over an
+// inbound webhook and sends replies back through the Cloud API. It implements
+// core.Adapter. (The whatsmeow-backed WhatsApp Web flavor lives in the sibling
+// internal/whatsapp/whatsmeow package.)
 //
 // Unlike the dial-out adapters (Slack, Discord), the Cloud API delivers inbound
 // messages as HTTP webhook callbacks, so this adapter runs its own HTTP server:
@@ -8,7 +10,7 @@
 // Disconnect shuts the server down. Bind a local Addr, put a TLS-terminating
 // reverse proxy in front, and register the public HTTPS URL in Meta's webhook
 // settings.
-package whatsapp
+package cloud
 
 import (
 	"bytes"
@@ -21,7 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -43,6 +45,12 @@ const (
 	// The endpoint is public; cap bodies against memory exhaustion. Real Cloud
 	// API payloads are a few KB.
 	maxRequestBytes = 1 << 20 // 1 MiB
+
+	// maxConcurrentDispatch bounds in-flight dispatch goroutines: the handler
+	// acquires a slot before acking and returns 503 (which Meta retries) when the
+	// dispatcher is saturated, so a burst of deliveries cannot spawn unbounded
+	// goroutines.
+	maxConcurrentDispatch = 256
 
 	// maxErrorBodyBytes caps how much of a non-2xx response body is read into errors.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
@@ -96,7 +104,15 @@ type Message struct {
 	AuthorName string
 	Timestamp  time.Time
 	Media      *Media
+	Reaction   *ReactionInfo
 	Raw        json.RawMessage
+}
+
+// ReactionInfo is set on a Message of Type "reaction": the id of the message the
+// user reacted to and the emoji. Emoji is empty when the reaction was removed.
+type ReactionInfo struct {
+	MessageID string
+	Emoji     string
 }
 
 // Media is a media object attached to a WhatsApp message. The Cloud API delivers
@@ -124,6 +140,25 @@ type adapter struct {
 	// when a reconnect has not already installed a newer connection.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
+	logger         *slog.Logger // set from AdapterDeps at Connect; guarded by mu
+	// dispatchSem is a counting semaphore (capacity maxConcurrentDispatch) that
+	// bounds concurrent dispatch goroutines. A non-blocking acquire before acking
+	// returns 503 on saturation; the slot is released when the goroutine returns.
+	// Re-created per Connect and captured at acquire, so a slot a context-ignoring
+	// handler never releases is confined to that connection rather than leaking for
+	// the adapter's lifetime.
+	dispatchSem chan struct{}
+}
+
+// log returns the Bot's logger handed over at Connect, or slog.Default()
+// before the first Connect.
+func (a *adapter) log() *slog.Logger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 // Addr returns the address the bot's webhook listener is bound to (host:port),
@@ -171,7 +206,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient}, nil
+	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch)}, nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
@@ -210,13 +245,13 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.srv = srv
 	a.boundAddr = ln.Addr().String()
 	a.detachedCancel = detachedCancel
+	a.logger = deps.Logger
+	// Fresh per-connection dispatch semaphore: a slot a hung handler never
+	// releases dies with this connection instead of leaking across reconnects.
+	a.dispatchSem = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			deps.Done(err)
-		}
-	}()
+	go serve(srv, ln, deps.Done)
 
 	// Tear down when the run context is canceled
 	go func() {
@@ -232,13 +267,21 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	return nil
 }
 
+func serve(srv *http.Server, ln net.Listener, done func(error)) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		done(err)
+	}
+}
+
 func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	tokenOK := subtle.ConstantTimeCompare([]byte(q.Get("hub.verify_token")), []byte(a.cfg.VerifyToken)) == 1
 	if q.Get("hub.mode") == "subscribe" && tokenOK {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, q.Get("hub.challenge"))
+		// Echoing hub.challenge is Meta's verification protocol; the explicit
+		// text/plain Content-Type above prevents HTML interpretation.
+		_, _ = io.WriteString(w, q.Get("hub.challenge")) //nolint:gosec // plain-text echo, not HTML output
 		return
 	}
 	w.WriteHeader(http.StatusForbidden)
@@ -251,15 +294,36 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 		return
 	}
 	if !validateSignature(a.cfg.AppSecret, r.Header.Get(signatureHeader), body) {
+		// Warn (no secret/body) so an operator can spot a misconfigured AppSecret
+		// or a spoofing attempt; mirrors the Teams/github sibling's rejection log.
+		a.log().Warn("whatsapp: rejecting webhook with invalid signature")
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 
-	messages := parseWebhook(body)
-	w.WriteHeader(http.StatusOK)
+	messages := parseWebhook(a.log(), body)
 	if len(messages) == 0 {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	// Bound concurrent dispatch: acquire a slot BEFORE acking so a saturated
+	// dispatcher returns 503 (Meta retries) instead of spawning an unbounded
+	// goroutine. The slot is released when the dispatch goroutine returns. Snapshot
+	// the per-connection semaphore once so the acquire here and the release below
+	// target the SAME channel across a reconnect that swaps a.dispatchSem.
+	a.mu.Lock()
+	sem := a.dispatchSem
+	a.mu.Unlock()
+	select {
+	case sem <- struct{}{}:
+	default:
+		a.log().Warn("whatsapp: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 
 	// Dispatch on the detached context: core cancels runCtx *before* Disconnect's
 	// drain waits for this handler, so a reply threaded onto runCtx would fail
@@ -268,7 +332,18 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	a.inflight.Add(1)
 	go func() {
 		defer a.inflight.Add(-1)
+		defer func() { <-sem }()
 		for _, m := range messages {
+			if m.Reaction != nil {
+				// An empty emoji means the reaction was removed; scope is
+				// added-only, so skip it. No self-reaction filter: the bot never
+				// adds reactions, so a self-reply loop is impossible.
+				if m.Reaction.Emoji == "" {
+					continue
+				}
+				deps.DispatchReaction(dispatchCtx, toReaction(m))
+				continue
+			}
 			deps.Dispatch(dispatchCtx, toMessage(m))
 		}
 	}()
@@ -297,7 +372,7 @@ func (a *adapter) Disconnect() error {
 	// already-acked messages, which is operationally significant.
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
-		log.Printf("whatsapp: drain deadline reached; canceling %d in-flight dispatch(es)", n)
+		a.log().Warn("whatsapp: drain deadline reached; canceling in-flight dispatches", "inflight", n)
 		drainErr = fmt.Errorf("whatsapp: dispatch drain timed out with %d in-flight dispatch(es)", n)
 	}
 
@@ -336,7 +411,14 @@ func (a *adapter) drainDispatch(ctx context.Context) {
 	}
 }
 
-func (a *adapter) Send(ctx context.Context, channelID, text string) error {
+// Send POSTs text to channelID. With a threading option it quotes a message via
+// the Cloud API context.message_id: the resolved quote id is opts.ThreadID when
+// set, else the inbound message's ID; an empty id sends a plain message.
+func (a *adapter) Send(ctx context.Context, channelID, text string, opts core.SendOptions) error {
+	quoteID := opts.ThreadID
+	if quoteID == "" && opts.ReplyTo != nil {
+		quoteID = opts.ReplyTo.ID
+	}
 	payload := map[string]any{
 		"messaging_product": "whatsapp",
 		"recipient_type":    "individual",
@@ -344,6 +426,15 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 		"type":              "text",
 		"text":              map[string]any{"preview_url": false, "body": text},
 	}
+	if quoteID != "" {
+		payload["context"] = map[string]any{"message_id": quoteID}
+	}
+	return a.postMessage(ctx, payload)
+}
+
+// postMessage POSTs a Cloud API message payload to the /messages endpoint so
+// the request/auth/error handling stays in one place.
+func (a *adapter) postMessage(ctx context.Context, payload map[string]any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -370,6 +461,13 @@ func (a *adapter) Send(ctx context.Context, channelID, text string) error {
 	// Drain the success body so the connection can be reused (keep-alive).
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// SendThreaded implements [core.ThreadedSender]: it sends text as a reply that
+// quotes the message identified by replyToID via the Cloud API message context.
+// An empty replyToID degrades to a plain send (no context object), matching Send.
+func (a *adapter) SendThreaded(ctx context.Context, channelID, replyToID, text string) error {
+	return a.Send(ctx, channelID, text, core.SendOptions{ThreadID: replyToID})
 }
 
 // Attachments returns the media attached to m. The Cloud API delivers media by
@@ -439,6 +537,14 @@ func RawMessage(m *core.Message) (*Message, bool) {
 	return wm, ok
 }
 
+// RawReaction returns the parsed WhatsApp reaction message carried on r, reporting
+// whether r originated from a WhatsApp reaction. The reacted message's id and
+// emoji are on the returned Message's Reaction field.
+func RawReaction(r *core.Reaction) (*Message, bool) {
+	wm, ok := r.Raw.(*Message)
+	return wm, ok
+}
+
 func validateSignature(secret, header string, body []byte) bool {
 	if secret == "" || !strings.HasPrefix(header, signaturePrefix) {
 		return false
@@ -481,6 +587,10 @@ type inboundMessage struct {
 	Video    *mediaObject `json:"video"`
 	Audio    *mediaObject `json:"audio"`
 	Sticker  *mediaObject `json:"sticker"`
+	Reaction *struct {
+		MessageID string `json:"message_id"`
+		Emoji     string `json:"emoji"`
+	} `json:"reaction"`
 }
 
 type mediaObject struct {
@@ -502,10 +612,10 @@ func (in inboundMessage) media() *mediaObject {
 // parseWebhook extracts inbound user messages from a Cloud API webhook payload.
 // A message that fails to parse is logged and skipped so one bad entry never
 // drops its valid siblings.
-func parseWebhook(body []byte) []*Message {
+func parseWebhook(logger *slog.Logger, body []byte) []*Message {
 	var env webhookEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		log.Printf("whatsapp: discarding webhook with unparseable body: %v", err)
+		logger.Warn("whatsapp: discarding webhook with unparseable body", "error", err)
 		return nil
 	}
 
@@ -519,7 +629,7 @@ func parseWebhook(body []byte) []*Message {
 			for _, raw := range change.Value.Messages {
 				m, err := parseMessage(raw)
 				if err != nil {
-					log.Printf("whatsapp: skipping unparseable message: %v", err)
+					logger.Warn("whatsapp: skipping unparseable message", "error", err)
 					continue
 				}
 				m.AuthorName = names[m.From]
@@ -550,6 +660,9 @@ func parseMessage(raw json.RawMessage) (*Message, error) {
 			msg.Text = media.Caption
 		}
 	}
+	if in.Reaction != nil {
+		msg.Reaction = &ReactionInfo{MessageID: in.Reaction.MessageID, Emoji: in.Reaction.Emoji}
+	}
 	return msg, nil
 }
 
@@ -569,6 +682,21 @@ func toMessage(m *Message) *core.Message {
 		ChannelID:  m.From,
 		Content:    m.Text,
 		Timestamp:  m.Timestamp,
+		Raw:        m,
+	}
+}
+
+// toReaction maps a WhatsApp reaction message onto a platform-agnostic Reaction.
+// The reacted message's id comes from the reaction payload; ChannelID and UserID
+// are both the sender's WhatsApp id, and AuthorName is correlated from the
+// webhook's contacts list (as for messages).
+func toReaction(m *Message) *core.Reaction {
+	return &core.Reaction{
+		Emoji:      m.Reaction.Emoji,
+		UserID:     m.From,
+		AuthorName: m.AuthorName,
+		ChannelID:  m.From,
+		MessageID:  m.Reaction.MessageID,
 		Raw:        m,
 	}
 }

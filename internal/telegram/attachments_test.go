@@ -13,10 +13,10 @@ import (
 // nonTelegramAdapter is a minimal core.Adapter that is not telegram's *adapter.
 type nonTelegramAdapter struct{}
 
-func (nonTelegramAdapter) Connect(context.Context, core.AdapterDeps) error      { return nil }
-func (nonTelegramAdapter) Disconnect() error                                    { return nil }
-func (nonTelegramAdapter) Send(context.Context, string, string) error           { return nil }
-func (nonTelegramAdapter) Attachments(*core.Message) ([]core.Attachment, error) { return nil, nil }
+func (nonTelegramAdapter) Connect(context.Context, core.AdapterDeps) error              { return nil }
+func (nonTelegramAdapter) Disconnect() error                                            { return nil }
+func (nonTelegramAdapter) Send(context.Context, string, string, core.SendOptions) error { return nil }
+func (nonTelegramAdapter) Attachments(*core.Message) ([]core.Attachment, error)         { return nil, nil }
 
 func TestAttachments(t *testing.T) {
 	a := &adapter{}
