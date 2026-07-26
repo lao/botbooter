@@ -6,6 +6,14 @@
 // plain REST — so a Signal-only binary pulls in no platform SDK (only the
 // gorilla/websocket transport library). The container's API is
 // unauthenticated: bind it to localhost or a private network only.
+//
+// The adapter does not reconnect: losing the receive socket — a container
+// restart, say — ends [botbooter.Bot.Run] with an error, unlike the Slack,
+// Discord, Telegram and whatsmeow adapters, whose SDKs re-dial internally. Run
+// the bot under a supervisor that restarts the process, or re-Run it yourself.
+//
+// The package name collides with the standard library's os/signal, so a file
+// that needs both must alias one of them (see _examples/reactions/main.go).
 package signal
 
 import (

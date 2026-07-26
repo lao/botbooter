@@ -133,6 +133,7 @@ func reconfigure(t *testing.T, a *adapter, f *fakeAPI) {
 	fresh, err := newAdapter(cfg)
 	asserts.NoError(t, err, "newAdapter for fake container")
 	a.cfg = fresh.cfg
+	a.baseURL = fresh.baseURL
 	a.wsURL = fresh.wsURL
 	a.client = fresh.client
 }
@@ -198,6 +199,24 @@ func TestNew_MissingNumber(t *testing.T) {
 func TestNew_BadScheme(t *testing.T) {
 	_, err := New(Config{BaseURL: "ftp://127.0.0.1:8080", Number: "+15550001"})
 	asserts.Error(t, err, "New with a non-http BaseURL should fail")
+}
+
+// TestNew_RejectsUnusableBaseURL covers the BaseURL shapes that would otherwise
+// break one channel silently: a query or fragment mis-builds every REST path
+// while the receive socket still dials, and userinfo makes gorilla refuse the
+// dial while REST sends keep working.
+func TestNew_RejectsUnusableBaseURL(t *testing.T) {
+	for _, tc := range []struct{ name, baseURL string }{
+		{"Query", "http://127.0.0.1:8080/?token=abc"},
+		{"ForcedEmptyQuery", "http://127.0.0.1:8080/?"},
+		{"Fragment", "http://127.0.0.1:8080#frag"},
+		{"Userinfo", "http://bot:pw@127.0.0.1:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(Config{BaseURL: tc.baseURL, Number: "+15550001"})
+			asserts.ErrorIs(t, err, ErrMissingConfig, "New with an unusable BaseURL should fail")
+		})
+	}
 }
 
 func TestNew_Defaults(t *testing.T) {
@@ -317,6 +336,42 @@ func TestReceive_FallsBackToSource(t *testing.T) {
 	asserts.Equal(t, got[0].UserID, "uuid-9", "UserID should fall back to envelope source")
 }
 
+// TestReceive_SkipsEnvelopeWithNoSender pins that an envelope carrying none of
+// the three source forms is dropped: dispatching it would hand a handler an
+// empty UserID and ChannelID, and a reply would POST an empty recipient.
+func TestReceive_SkipsEnvelopeWithNoSender(t *testing.T) {
+	f := startAPI(t)
+	a, _ := newAdapter(validConfig())
+	var got []*core.Message
+	done := make(chan struct{}, 4)
+	ws := connectAdapter(t, a, captureDeps(&got, done, nil), f)
+
+	writeEnvelope(t, ws, `{"envelope":{"timestamp":1700000000000,"dataMessage":{"message":"anonymous"}}}`)
+	writeEnvelope(t, ws, `{"envelope":{"sourceNumber":"+15550002","timestamp":1700000001000,"dataMessage":{"message":"real"}}}`)
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, len(got), 1, "only the identified message should dispatch")
+	asserts.Equal(t, got[0].Content, "real", "the identified message should be the one dispatched")
+}
+
+// TestReceive_SkipsOwnMessageByAccount covers the self-drop against the
+// container's own normalized number, which can be formatted differently from
+// the operator-supplied Config.Number.
+func TestReceive_SkipsOwnMessageByAccount(t *testing.T) {
+	f := startAPI(t)
+	a, _ := newAdapter(validConfig())
+	var got []*core.Message
+	done := make(chan struct{}, 4)
+	ws := connectAdapter(t, a, captureDeps(&got, done, nil), f)
+
+	writeEnvelope(t, ws, `{"account":"+15559999","envelope":{"sourceNumber":"+15559999","timestamp":1700000000000,"dataMessage":{"message":"from myself"}}}`)
+	writeEnvelope(t, ws, `{"account":"+15559999","envelope":{"sourceNumber":"+15550002","timestamp":1700000001000,"dataMessage":{"message":"from someone else"}}}`)
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, len(got), 1, "the bot's own message should be dropped")
+	asserts.Equal(t, got[0].Content, "from someone else", "only the other party's message should dispatch")
+}
+
 func TestSend_Direct(t *testing.T) {
 	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
@@ -341,8 +396,15 @@ func TestSend_Group(t *testing.T) {
 
 	req := awaitSend(t, f)
 	recipients := req["recipients"].([]any)
-	var wantRecipient any = "group." + base64.StdEncoding.EncodeToString([]byte("grp=="))
+	// Asserted as a literal, not recomputed with Send's own formula, so the
+	// wire convention is visible and a change to it fails loudly. A group id is
+	// base64-encoded twice on purpose: signal-cli reports groupId as base64 of
+	// the raw 32-byte id, and signal-cli-rest-api's public form base64s that
+	// string again ("group." + base64("grp==") == "group.Z3JwPT0=", which its
+	// /v2/send handler decodes once to recover signal-cli's own "grp==").
+	var wantRecipient any = "group.Z3JwPT0="
 	asserts.Equal(t, recipients[0], wantRecipient, "group recipient should be the base64 REST form")
+	asserts.Equal(t, wantRecipient, any(restGroupPrefix+base64.StdEncoding.EncodeToString([]byte("grp=="))), "literal must match the documented encoding")
 }
 
 // TestSend_NeedsNoReceiveSocket pins the REST independence: Send works before
@@ -467,6 +529,46 @@ func TestDisconnect_CleanNoDone(t *testing.T) {
 	asserts.NoError(t, a.Disconnect(), "Disconnect when already disconnected is a no-op")
 }
 
+// TestReconnect_AfterDisconnect pins that a Signal bot is reusable: unlike the
+// whatsmeow adapter (whose store closes on Disconnect), nothing here is
+// single-run. It also exercises the per-connection state — the second Connect
+// installs a fresh wsConn, and the first connection's teardown must not have
+// left anything behind that swallows the second one's messages.
+func TestReconnect_AfterDisconnect(t *testing.T) {
+	f := startAPI(t)
+	a, _ := newAdapter(validConfig())
+	var got []*core.Message
+	done := make(chan struct{}, 4)
+	loopErr := make(chan error, 2)
+	deps := captureDeps(&got, done, loopErr)
+
+	ws := connectAdapter(t, a, deps, f)
+	writeEnvelope(t, ws, directReceive)
+	awaitDispatch(t, done, 1)
+	asserts.NoError(t, a.Disconnect(), "first Disconnect")
+
+	// Second run on the same adapter.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	asserts.NoError(t, a.Connect(ctx, deps), "second Connect should succeed on the same adapter")
+	t.Cleanup(func() { _ = a.Disconnect() })
+	ws2 := acceptWS(t, f)
+	asserts.True(t, ws2 != ws, "the second Connect should dial a new socket")
+
+	writeEnvelope(t, ws2, `{"envelope":{"sourceNumber":"+15550002","timestamp":1700000009000,"dataMessage":{"message":"after reconnect"}}}`)
+	awaitDispatch(t, done, 1)
+
+	asserts.Equal(t, len(got), 2, "both runs should dispatch")
+	asserts.Equal(t, got[1].Content, "after reconnect", "the second run's message should arrive")
+	asserts.NoError(t, a.Disconnect(), "second Disconnect")
+
+	select {
+	case err := <-loopErr:
+		t.Fatalf("Done should not fire on intentional Disconnect, got %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestDisconnect_DrainsInflightDispatch(t *testing.T) {
 	f := startAPI(t)
 	a, _ := newAdapter(validConfig())
@@ -574,6 +676,19 @@ func TestAttachments(t *testing.T) {
 	asserts.Equal(t, sa.ContentType, "image/jpeg", "attachment content type")
 	asserts.Equal(t, sa.Filename, "cat.jpg", "attachment filename")
 	asserts.Equal(t, sa.Size, int64(1234), "attachment size")
+}
+
+// TestAttachments_EscapesID pins that an attachment id is escaped as one path
+// segment. The id is sender-influenced, so a "../" in it must not walk the URL
+// onto a different container endpoint.
+func TestAttachments_EscapesID(t *testing.T) {
+	a, _ := newAdapter(Config{BaseURL: "http://127.0.0.1:8080", Number: "+15550001"})
+	m := &core.Message{Raw: &Message{Attachments: []Attachment{{ID: "../../v1/register/+15550002"}}}}
+
+	atts, err := a.Attachments(m)
+	asserts.NoError(t, err, "Attachments should succeed")
+	asserts.Equal(t, atts[0].URL, "http://127.0.0.1:8080/v1/attachments/..%2F..%2Fv1%2Fregister%2F+15550002",
+		"a traversal id must stay inside the attachments path segment")
 }
 
 func TestAttachments_NonSignalMessage(t *testing.T) {

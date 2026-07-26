@@ -815,7 +815,23 @@ Optional `signal.Config` fields: `DialTimeout` (bounds the receive-socket
 handshake, default 10s), `SendTimeout` (bounds each send round-trip, default
 30s), and `HTTPClient` (the outbound REST client).
 
+> ⚠️ **The adapter does not reconnect.** Losing the receive socket — the
+> `--restart=always` container being updated, a proxy dropping an idle
+> connection — ends `Run` with a `receive socket closed` error. That is unlike
+> Slack, Discord, Telegram and whatsmeow, whose SDKs re-dial internally, so the
+> usual `log.Fatal(bot.Run(ctx))` exits the process on the first blip. **Run the
+> bot under a supervisor** (systemd, Docker restart policy, Kubernetes) or
+> re-`Run` it yourself with backoff. A re-dial loop in the adapter is a possible
+> follow-up.
+
 Message the bot from **another** account; it drops its own messages.
+
+A sender who does not share their phone number arrives with a UUID instead (the
+`sourceNumber` field is absent — Signal's phone-number privacy), so
+`Message.UserID`/`ChannelID` is that UUID; whether the container accepts it as a
+`/v2/send` recipient depends on its signal-cli version, so a reply may fail with
+the container's own error. An envelope carrying no sender identity at all is
+dropped with a warning.
 
 **Groups.** A group message arrives with `ChannelID` set to `"group:"+groupID`,
 and replying to that `ChannelID` posts back to the group — the adapter converts

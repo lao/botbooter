@@ -55,6 +55,11 @@ const (
 	// Envelopes are small (attachments arrive as ids, not inline bytes); the
 	// cap only bounds a misbehaving peer.
 	maxMessageBytes = 1 << 20 // 1 MiB
+
+	// maxErrorBodyBytes caps how much of a REST response body is read — enough
+	// for the container's {"error": "..."} payload, and enough to let a success
+	// body be drained so the connection can be reused.
+	maxErrorBodyBytes = 4 << 10 // 4 KiB
 )
 
 // ErrMissingConfig is returned by New when a required Config field is empty.
@@ -104,9 +109,15 @@ type Attachment struct {
 }
 
 type adapter struct {
-	cfg    Config
-	wsURL  string // receive socket, derived from BaseURL + Number
-	client *http.Client
+	cfg Config
+	// baseURL is the validated BaseURL: an http/https URL with no query,
+	// fragment or userinfo, so a REST path can simply be appended to it. Path
+	// segments are escaped exactly once on the way in (url.PathEscape), which
+	// url.URL.JoinPath would not do — it runs path.Join, so a segment
+	// containing "../" would silently retarget the request at another endpoint.
+	baseURL string
+	wsURL   string // receive socket, derived from BaseURL + Number
+	client  *http.Client
 
 	mu     sync.Mutex
 	conn   *wsConn
@@ -165,10 +176,11 @@ func newAdapter(cfg Config) (*adapter, error) {
 		return nil, fmt.Errorf("%w: Number is required", ErrMissingConfig)
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
-	wsURL, err := receiveSocketURL(cfg.BaseURL, cfg.Number)
+	base, err := parseBaseURL(cfg.BaseURL)
 	if err != nil {
 		return nil, err
 	}
+	wsURL := receiveSocketURL(base, cfg.Number)
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = defaultDialTimeout
 	}
@@ -179,36 +191,63 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &adapter{cfg: cfg, wsURL: wsURL, client: client}, nil
+	return &adapter{cfg: cfg, baseURL: base.String(), wsURL: wsURL, client: client}, nil
 }
 
-// receiveSocketURL derives the ws/wss receive endpoint from the http/https
-// base URL.
-func receiveSocketURL(baseURL, number string) (string, error) {
+// parseBaseURL validates the container's base URL. A query, fragment or
+// userinfo is rejected rather than carried: each one breaks a channel silently
+// and asymmetrically — a query or fragment mis-builds every REST path (the
+// suffix lands inside the query string) while the receive socket still dials,
+// and gorilla refuses a dial URL with userinfo outright while net/http turns it
+// into a working Basic-auth header. Failing here names the real cause instead.
+func parseBaseURL(baseURL string) (*url.URL, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
-		return "", fmt.Errorf("signal: invalid BaseURL: %w", err)
+		return nil, fmt.Errorf("signal: invalid BaseURL: %w", err)
 	}
 	switch u.Scheme {
-	case "http":
-		u.Scheme = "ws"
-	case "https":
-		u.Scheme = "wss"
+	case "http", "https":
 	default:
-		return "", fmt.Errorf("signal: BaseURL scheme must be http or https, got %q", u.Scheme)
+		return nil, fmt.Errorf("signal: BaseURL scheme must be http or https, got %q", u.Scheme)
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/v1/receive/" + url.PathEscape(number)
-	return u.String(), nil
+	if u.RawQuery != "" || u.ForceQuery {
+		return nil, fmt.Errorf("%w: BaseURL must not carry a query string", ErrMissingConfig)
+	}
+	if u.Fragment != "" {
+		return nil, fmt.Errorf("%w: BaseURL must not carry a fragment", ErrMissingConfig)
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("%w: BaseURL must not embed credentials; front the container with a proxy that adds them", ErrMissingConfig)
+	}
+	return u, nil
+}
+
+// receiveSocketURL derives the ws/wss receive endpoint from the validated
+// http/https base URL.
+func receiveSocketURL(base *url.URL, number string) string {
+	u := *base
+	if u.Scheme == "https" {
+		u.Scheme = "wss"
+	} else {
+		u.Scheme = "ws"
+	}
+	return u.String() + "/v1/receive/" + url.PathEscape(number)
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	dialer := websocket.Dialer{HandshakeTimeout: a.cfg.DialTimeout}
 	ws, resp, err := dialer.DialContext(ctx, a.wsURL, nil)
 	if err != nil {
+		// gorilla hands back the failed handshake response precisely so the
+		// caller can say WHY the upgrade was refused — a container in the
+		// default "normal" mode answers 404 here. Report it instead of only
+		// guessing at the cause.
+		detail := ""
 		if resp != nil && resp.Body != nil {
+			detail = ": " + resp.Status + ": " + restErrorMessage(resp.Body)
 			_ = resp.Body.Close()
 		}
-		return fmt.Errorf("signal: receive socket dial failed (is the container running in json-rpc mode?): %w", err)
+		return fmt.Errorf("signal: receive socket dial failed (is the container running in json-rpc mode?)%s: %w", detail, err)
 	}
 	ws.SetReadLimit(maxMessageBytes)
 
@@ -299,12 +338,29 @@ func (a *adapter) handleReceive(c *wsConn, dispatchCtx context.Context, data []b
 		return // receipt, typing, sync, … — not a user message
 	}
 
+	// Every source form is optional in signal-cli's envelope schema: under
+	// Signal's phone-number privacy a sender who does not share their number
+	// arrives with only a UUID. Fall back through all three rather than
+	// dispatching an identity-less message whose reply would POST an empty
+	// recipient. Whether the container accepts a bare UUID recipient on
+	// /v2/send is version-dependent, so a reply may still fail — but it fails
+	// loudly, with the container's own error.
 	source := p.Envelope.SourceNumber
 	if source == "" {
 		source = p.Envelope.Source
 	}
-	// Drop the bot's own messages to avoid reply loops.
-	if source == a.cfg.Number {
+	if source == "" {
+		source = p.Envelope.SourceUUID
+	}
+	if source == "" {
+		a.log().Warn("signal: skipping envelope with no sender identity")
+		return
+	}
+	// Drop the bot's own messages to avoid reply loops. The payload's account is
+	// the container's own normalized form of the bot's number, so comparing
+	// against it as well as the configured one removes the formatting
+	// assumption.
+	if source == a.cfg.Number || source == p.Account {
 		return
 	}
 
@@ -384,7 +440,7 @@ func (a *adapter) Send(ctx context.Context, channelID, text string, _ core.SendO
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.BaseURL+"/v2/send", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/v2/send", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -399,13 +455,17 @@ func (a *adapter) Send(ctx context.Context, channelID, text string, _ core.SendO
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("signal: send failed: %s: %s", resp.Status, restErrorMessage(resp.Body))
 	}
+	// net/http only returns a connection to the idle pool once its body is read
+	// to EOF, so draining the success body is what keeps a chatty bot from
+	// paying a fresh TCP (and TLS) handshake on every single send.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
 	return nil
 }
 
 // restErrorMessage extracts the container's {"error": "..."} payload from a
 // failed response, falling back to the raw (truncated) body.
 func restErrorMessage(body io.Reader) string {
-	raw, err := io.ReadAll(io.LimitReader(body, 4<<10))
+	raw, err := io.ReadAll(io.LimitReader(body, maxErrorBodyBytes))
 	if err != nil || len(raw) == 0 {
 		return "(no error body)"
 	}
@@ -492,7 +552,7 @@ func (a *adapter) Attachments(m *core.Message) ([]core.Attachment, error) {
 		att := &sm.Attachments[i]
 		out = append(out, core.Attachment{
 			IsImage:   strings.HasPrefix(att.ContentType, "image/"),
-			URL:       a.cfg.BaseURL + "/v1/attachments/" + url.PathEscape(att.ID),
+			URL:       a.baseURL + "/v1/attachments/" + url.PathEscape(att.ID),
 			ExtraData: att,
 		})
 	}
