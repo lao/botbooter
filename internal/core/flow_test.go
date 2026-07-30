@@ -16,6 +16,22 @@ import (
 
 func noopComplete(context.Context, *Bot, *Message, Answers) {}
 
+// getConvState / setConvState read and write conversation state through the
+// manager mutex, honoring the get/set "caller must hold m.mu" contract from test
+// code (get/set are unexported map ops that assume the lock is held).
+func getConvState(m *conversationManager, key string) (ConversationState, bool) {
+	var (
+		st ConversationState
+		ok bool
+	)
+	m.withLock(func() { st, ok = m.get(key) })
+	return st, ok
+}
+
+func setConvState(m *conversationManager, key string, st ConversationState) {
+	m.withLock(func() { m.set(key, st) })
+}
+
 func TestNewFlow_Defaults(t *testing.T) {
 	f := NewFlow("f")
 	asserts.Equal(t, f.cancelWord, "cancel", "default cancel word")
@@ -102,13 +118,13 @@ func TestFlow_ValidatorRePromptsSameStep(t *testing.T) {
 	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
 	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "bad")) // invalid
 
-	s, _ := bot.conversations.get(key)
+	s, _ := getConvState(bot.conversations, key)
 	asserts.Equal(t, s.Step, 0, "stayed on step 0 after an invalid answer")
 	_, stored := s.Answers["email"]
 	asserts.False(t, stored, "invalid answer is not stored")
 
 	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "a@b.com")) // valid
-	s2, _ := bot.conversations.get(key)
+	s2, _ := getConvState(bot.conversations, key)
 	asserts.Equal(t, s2.Step, 1, "advanced after a valid answer")
 
 	got := adapter.messages()
@@ -129,7 +145,7 @@ func TestFlow_EmptyAnswerRePrompts(t *testing.T) {
 	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
 	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "   ")) // whitespace = non-answer
 
-	s, _ := bot.conversations.get(key)
+	s, _ := getConvState(bot.conversations, key)
 	asserts.Equal(t, s.Step, 0, "stayed on step 0 for an empty answer")
 	asserts.Equal(t, len(s.Answers), 0, "empty answer is not stored")
 
@@ -154,7 +170,7 @@ func TestFlow_CancelBailsAndRunsOnCancel(t *testing.T) {
 	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "cancel"))
 
 	asserts.True(t, canceled, "OnCancel ran")
-	_, ok := bot.conversations.get(key)
+	_, ok := getConvState(bot.conversations, key)
 	asserts.False(t, ok, "state cleared on cancel")
 }
 
@@ -182,11 +198,11 @@ func TestFlow_TTLSlidesOnEachStep(t *testing.T) {
 	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
 
 	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
-	s1, _ := bot.conversations.get(key)
+	s1, _ := getConvState(bot.conversations, key)
 
 	time.Sleep(2 * time.Millisecond) // ensure the clock advances between steps
 	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "alpha"))
-	s2, _ := bot.conversations.get(key)
+	s2, _ := getConvState(bot.conversations, key)
 
 	asserts.True(t, s2.ExpiresAt.After(s1.ExpiresAt), "TTL slides forward on each successful step")
 }
@@ -202,12 +218,12 @@ func TestFlow_TTLSlidesOnRejectedAnswer(t *testing.T) {
 	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
 
 	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
-	s1, _ := bot.conversations.get(key)
+	s1, _ := getConvState(bot.conversations, key)
 
 	time.Sleep(2 * time.Millisecond) // ensure the clock advances
 	handled := bot.conversations.advance(ctx, bot, msgFrom("u", "c", "bad"))
 	asserts.True(t, handled, "a rejected answer is consumed")
-	s2, ok := bot.conversations.get(key)
+	s2, ok := getConvState(bot.conversations, key)
 	asserts.True(t, ok, "state survives a rejected answer")
 	asserts.Equal(t, s2.Step, 0, "step does not advance on a rejected answer")
 	asserts.True(t, s2.ExpiresAt.After(s1.ExpiresAt), "TTL slides forward even when the answer is rejected")
@@ -223,7 +239,7 @@ func TestFlow_ExpiredStateTimesOut(t *testing.T) {
 		OnTimeout(func(context.Context, *Bot, *Message) { timedOut = true })
 	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
 
-	bot.conversations.set(key, ConversationState{
+	setConvState(bot.conversations, key, ConversationState{
 		FlowID:    "f",
 		ExpiresAt: time.Now().Add(-time.Minute),
 		Answers:   map[string]string{},
@@ -232,7 +248,7 @@ func TestFlow_ExpiredStateTimesOut(t *testing.T) {
 	handled := bot.conversations.advance(ctx, bot, msgFrom("u", "c", "late"))
 	asserts.True(t, handled, "an expired-state message is consumed")
 	asserts.True(t, timedOut, "OnTimeout ran")
-	_, ok := bot.conversations.get(key)
+	_, ok := getConvState(bot.conversations, key)
 	asserts.False(t, ok, "expired state is reaped")
 }
 
@@ -240,7 +256,7 @@ func TestFlow_UnregisteredFlowIDFallsThrough(t *testing.T) {
 	bot := New(SlackBotType, &recordingAdapter{})
 	key := conversationKey(msgFrom("u", "c", ""))
 
-	bot.conversations.set(key, ConversationState{
+	setConvState(bot.conversations, key, ConversationState{
 		FlowID:    "ghost",
 		ExpiresAt: time.Now().Add(time.Hour),
 		Answers:   map[string]string{},
@@ -248,7 +264,7 @@ func TestFlow_UnregisteredFlowIDFallsThrough(t *testing.T) {
 
 	handled := bot.conversations.advance(context.Background(), bot, msgFrom("u", "c", "hello"))
 	asserts.False(t, handled, "state for an unregistered flow falls through to the command table")
-	_, ok := bot.conversations.get(key)
+	_, ok := getConvState(bot.conversations, key)
 	asserts.False(t, ok, "stale state is reaped, not left to panic later")
 }
 
@@ -383,7 +399,7 @@ func TestFlow_OutOfRangeStepFallsThrough(t *testing.T) {
 	key := conversationKey(msgFrom("u", "c", ""))
 
 	// A durable store could load a state whose flow has since lost steps.
-	bot.conversations.set(key, ConversationState{
+	setConvState(bot.conversations, key, ConversationState{
 		FlowID:    "f",
 		Step:      99,
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -392,7 +408,7 @@ func TestFlow_OutOfRangeStepFallsThrough(t *testing.T) {
 
 	handled := bot.conversations.advance(context.Background(), bot, msgFrom("u", "c", "hi"))
 	asserts.False(t, handled, "out-of-range step falls through to the command table")
-	_, ok := bot.conversations.get(key)
+	_, ok := getConvState(bot.conversations, key)
 	asserts.False(t, ok, "corrupt state is reaped, not left to wedge")
 
 	handled2 := bot.conversations.advance(context.Background(), bot, msgFrom("u", "c", "again"))
@@ -448,7 +464,7 @@ func TestFlow_ConcurrentAdvanceNoDeadlock(t *testing.T) {
 	}
 	wg.Wait()
 
-	if s, ok := bot.conversations.get(key); ok {
+	if s, ok := getConvState(bot.conversations, key); ok {
 		asserts.True(t, s.Step >= 0 && s.Step < len(f.steps), "step stays within bounds")
 	}
 }
@@ -462,7 +478,7 @@ func TestFlow_ExpiredStateWithoutOnTimeoutConsumesAndReaps(t *testing.T) {
 	f := NewFlow("f").Ask("a", "a?").OnComplete(noopComplete) // no OnTimeout
 	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
 
-	bot.conversations.set(key, ConversationState{
+	setConvState(bot.conversations, key, ConversationState{
 		FlowID:    "f",
 		ExpiresAt: time.Now().Add(-time.Minute),
 		Answers:   map[string]string{},
@@ -470,7 +486,7 @@ func TestFlow_ExpiredStateWithoutOnTimeoutConsumesAndReaps(t *testing.T) {
 
 	handled := bot.conversations.advance(context.Background(), bot, msgFrom("u", "c", "late"))
 	asserts.True(t, handled, "an expired-state message is consumed even with no OnTimeout set")
-	_, ok := bot.conversations.get(key)
+	_, ok := getConvState(bot.conversations, key)
 	asserts.False(t, ok, "expired state is reaped on the nil-OnTimeout default path")
 }
 
@@ -487,7 +503,7 @@ func TestFlow_CancelWithoutOnCancelConsumesAndReaps(t *testing.T) {
 	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
 	handled := bot.conversations.advance(ctx, bot, msgFrom("u", "c", "cancel"))
 	asserts.True(t, handled, "the cancel word is consumed even with no OnCancel set")
-	_, ok := bot.conversations.get(key)
+	_, ok := getConvState(bot.conversations, key)
 	asserts.False(t, ok, "state is cleared on the nil-OnCancel default path")
 }
 
@@ -515,13 +531,13 @@ func TestFlow_SendFailureStillAdvancesAndLogs(t *testing.T) {
 	asserts.NoError(t, bot.HandleFlow("^f$", f), "register")
 
 	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
-	s, ok := bot.conversations.get(key)
+	s, ok := getConvState(bot.conversations, key)
 	asserts.True(t, ok, "flow starts despite a failed first-prompt send")
 	asserts.Equal(t, s.Step, 0, "on step 0 after start")
 
 	handled := bot.conversations.advance(ctx, bot, msgFrom("u", "c", "alpha"))
 	asserts.True(t, handled, "answer is consumed even though the prompt send fails")
-	s2, _ := bot.conversations.get(key)
+	s2, _ := getConvState(bot.conversations, key)
 	asserts.Equal(t, s2.Step, 1, "flow advances to step 1 despite the send error")
 
 	asserts.True(t, strings.Contains(buf.String(), "failed to send flow prompt"),
