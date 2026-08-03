@@ -5,15 +5,25 @@ all ten adapters, the public facade, and the dependency graph. Method: static re
 every path in the plan, automated scanners (`govulncheck`, `gosec`, `golangci-lint`,
 `go vet`, `go test -race`), and cross-adapter consistency checks.
 
-> **Point-in-time snapshot (this PR's branch, 2026-08-03).** Scanner output and the
-> dependency/toolchain state drift as the tree and its graph move; re-run the tools listed
-> in `SECURITY_PERF_INVESTIGATION.md` rather than treating these results as current. Specific
-> advisory IDs and toolchain version numbers are deliberately kept out of this report so a
-> stale copy can't imply assurance it no longer has.
+> **Archived point-in-time snapshot (this PR's branch, 2026-08-03) — not a standing
+> guarantee.** Scanner output and the dependency/toolchain state drift as the tree and its
+> graph move; re-run the tools listed in `SECURITY_PERF_INVESTIGATION.md` rather than treating
+> these results as current. The `file:line` references below are illustrative of where a
+> concern was observed on this branch and *will* go stale as code moves — treat them as
+> pointers, not as authoritative locations. Specific advisory IDs and toolchain version
+> numbers are deliberately kept out of this report so a stale copy can't imply assurance it no
+> longer has.
+>
+> **Open action (not resolved by this PR):** `govulncheck` flagged a *reachable* `crypto/tls`
+> advisory that requires a Go toolchain bump. It is out of scope for this two-line hardening
+> change and is tracked as an open action (see §4), not covered by the "strong posture"
+> summary below.
 
 ## 1. Executive overview
 
-**Security posture: strong.** The four internet-facing webhook adapters (GitHub, GitLab,
+**Security posture: strong for the reviewed application code, with one open dependency
+action (the reachable `crypto/tls` advisory above, unresolved here).** The four
+internet-facing webhook adapters (GitHub, GitLab,
 Teams, WhatsApp Cloud) are uniformly hardened: full `http.Server` timeout sets, body-size
 caps before `io.ReadAll`, cheap method/path rejection, and no internal detail in error
 responses. Authentication is adapter-specific: GitHub verifies the body HMAC
@@ -93,7 +103,9 @@ host, so this is defense-in-depth only. Fix: `url.PathEscape(media.ID)`, matchin
   goroutine is uncapped but serially fed by a single receive socket (accepted).
 - **`govulncheck`** — triaged reachable-vs-not: advisories against uncalled symbols
   (x/text infinite-loop, slack-go `SecretsVerifier`, os symlink, openpgp) are confirmed
-  **not called** by our code. Re-run before relying on this; the advisory set moves.
+  **not called** by our code. Exception: a *reachable* `crypto/tls` advisory requiring a
+  toolchain bump is **not** mitigated here and is tracked as an open action (§4). Re-run
+  before relying on this; the advisory set moves.
 - **`gosec`** — 5 issues, all pre-existing `//nolint`'d with correct justifications (OAuth
   scope URL, header name, plain-text challenge echo, adapter-owned file paths). No new
   issues introduced by the fixes.
@@ -116,10 +128,13 @@ host, so this is defense-in-depth only. Fix: `url.PathEscape(media.ID)`, matchin
 
 **Done (this PR):** S1 (readSem parity), S2 (media.ID escape).
 
-**Quick wins (out of scope for this PR — dependency/toolchain, not code):** run
-`govulncheck` and a toolchain/dependency sweep at review time and act on whatever it
-reports then. Specific advisory IDs and toolchain versions are intentionally omitted here
-so this report can't drift into wrong as the graph moves.
+**Open actions (out of scope for this PR — dependency/toolchain, not code):**
+- **Reachable `crypto/tls` advisory (toolchain bump) — unresolved.** `govulncheck` flagged a
+  reachable advisory in `crypto/tls` that needs a Go toolchain upgrade. This PR does not
+  address it; it must be tracked and fixed separately rather than assumed clean.
+- Run `govulncheck` and a toolchain/dependency sweep at review time and act on whatever else
+  it reports then. Specific advisory IDs and toolchain versions are intentionally omitted here
+  so this report can't drift into wrong as the graph moves.
 
 **Structural (only if evidence demands):** LRU/TTL on the GitHub reaction dedup set;
 a `readSem`-style cap on Signal dispatch. Neither is warranted at v1 loads.
