@@ -28,6 +28,7 @@ func TestBotType_String(t *testing.T) {
 	asserts.Equal(t, WhatsMeowBotType.String(), "whatsmeow", "WhatsMeow string")
 	asserts.Equal(t, GitHubBotType.String(), "github", "GitHub string")
 	asserts.Equal(t, GitLabBotType.String(), "gitlab", "GitLab string")
+	asserts.Equal(t, BitbucketBotType.String(), "bitbucket", "Bitbucket string")
 	asserts.Equal(t, SignalBotType.String(), "signal", "Signal string")
 	asserts.Equal(t, BotType(999).String(), "BotType(999)", "unknown string")
 }
