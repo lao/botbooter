@@ -88,10 +88,15 @@ type adapter struct {
 	// captured at acquire, so a slot a context-ignoring handler never releases is
 	// confined to that connection rather than leaking for the adapter's lifetime.
 	dispatchSem chan struct{}
-	convs       map[string]conversation // conversationID -> reply routing info
-	convOrder   []string                // FIFO insertion order for bounded eviction
-	token       cachedToken
-	keys        map[string]*jwksKey // kid -> signing key + channel endorsements
+	// readSem bounds concurrent inbound request processing so a flood of large
+	// bodies can't buffer unbounded memory before JWT verification (see
+	// maxConcurrentReads); separate from dispatchSem, which bounds dispatch
+	// goroutines. Allocated once in newAdapter and never reassigned.
+	readSem   chan struct{}
+	convs     map[string]conversation // conversationID -> reply routing info
+	convOrder []string                // FIFO insertion order for bounded eviction
+	token     cachedToken
+	keys      map[string]*jwksKey // kid -> signing key + channel endorsements
 	// keysAt is the last JWKS fetch attempt (rate-limits refreshes); keysFreshAt
 	// is the last successful refresh (drives the jwksMaxAge staleness gate).
 	keysAt      time.Time
@@ -157,5 +162,6 @@ func newAdapter(cfg Config) (*adapter, error) {
 		tokenURL:    "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token",
 		openIDURL:   openIDConfigURL,
 		dispatchSem: make(chan struct{}, maxConcurrentDispatch),
+		readSem:     make(chan struct{}, maxConcurrentReads),
 	}, nil
 }

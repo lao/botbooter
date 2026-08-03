@@ -269,6 +269,23 @@ func TestHandleMessages_SaturatedDispatchReturns503(t *testing.T) {
 	asserts.Equal(t, w2.Code, http.StatusServiceUnavailable, "saturated dispatch sheds load with 503")
 }
 
+// A saturated read semaphore must answer 503 before the body is buffered and
+// unmarshaled, so a flood of large POSTs cannot exhaust memory ahead of the JWT
+// check. Mirrors the github/gitlab sibling test.
+func TestHandleMessages_ReadSaturationReturns503(t *testing.T) {
+	a := testAdapter(t)
+	a.readSem = make(chan struct{}, 1)
+	a.readSem <- struct{}{} // occupy the only inbound slot
+
+	var got []*core.Message
+	body := activityJSON("message", "hi", allowedServiceURL, "user-1", "bot-1", "conv-1")
+	auth := "Bearer " + mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL))
+	w := post(a, captureDeps(&got, nil), body, auth)
+
+	asserts.Equal(t, w.Code, http.StatusServiceUnavailable, "saturated read gate returns 503")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+}
+
 func TestHandleMessages_IgnoresNonMessage(t *testing.T) {
 	a := testAdapter(t)
 	var got []*core.Message
