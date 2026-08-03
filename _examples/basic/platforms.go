@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/lao/botbooter"
+	"github.com/lao/botbooter/bitbucket"
 	"github.com/lao/botbooter/cli"
 	"github.com/lao/botbooter/discord"
 	"github.com/lao/botbooter/github"
@@ -88,6 +89,20 @@ func newBot(botType string) (*botbooter.Bot, error) {
 			Path:    os.Getenv("GITLAB_PATH"),     // optional; defaults to /webhook
 			BaseURL: os.Getenv("GITLAB_BASE_URL"), // optional; empty targets gitlab.com
 		})
+	case "bitbucket":
+		// Cloud (BITBUCKET_BASE_URL empty) or Data Center. Auth is either
+		// Email+APIToken (Atlassian API token) or AccessToken; set one, not both.
+		// Self is required in access-token mode and on Data Center.
+		return bitbucket.New(bitbucket.Config{
+			Email:       os.Getenv("BITBUCKET_EMAIL"),
+			APIToken:    os.Getenv("BITBUCKET_API_TOKEN"),
+			AccessToken: os.Getenv("BITBUCKET_ACCESS_TOKEN"),
+			Self:        os.Getenv("BITBUCKET_SELF"),
+			Secret:      os.Getenv("BITBUCKET_SECRET"), // the webhook's secret
+			Addr:        os.Getenv("BITBUCKET_ADDR"),
+			Path:        os.Getenv("BITBUCKET_PATH"),     // optional; defaults to /webhook
+			BaseURL:     os.Getenv("BITBUCKET_BASE_URL"), // optional; empty targets Bitbucket Cloud
+		})
 	case "signal":
 		return signal.New(signal.Config{
 			BaseURL: os.Getenv("SIGNAL_API_URL"), // signal-cli-rest-api container, e.g. "http://127.0.0.1:8080"
@@ -97,6 +112,6 @@ func newBot(botType string) (*botbooter.Bot, error) {
 		fmt.Fprintln(os.Stderr, `Type "echo <text>" and press enter (Ctrl-D to quit).`)
 		return cli.New(os.Stdin, os.Stdout), nil
 	default:
-		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github, gitlab, signal or cli)", botType)
+		return nil, fmt.Errorf("unknown bot type %q (want slack, discord, telegram, whatsapp, whatsmeow, teams, github, gitlab, bitbucket, signal or cli)", botType)
 	}
 }

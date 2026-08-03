@@ -7,9 +7,9 @@
 [![Releases](https://img.shields.io/github/v/release/lao/botbooter.svg?include_prereleases&color=blue)](https://github.com/lao/botbooter/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, GitLab, Signal, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
+> A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, GitLab, Bitbucket, Signal, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
-Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, Microsoft Teams, a GitHub issue or PR comment, a GitLab issue or merge-request note, Signal, or stdin.
+Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, Microsoft Teams, a GitHub issue or PR comment, a GitLab issue or merge-request note, a Bitbucket pull-request or issue comment, Signal, or stdin.
 
 > ⚠️ **Not production ready.** botbooter is pre-1.0 and under active development. The
 > public API may change without notice, and it has not been hardened or battle-tested for
@@ -18,7 +18,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), GitLab (Note Hook webhook — reply to issue and merge-request comments), Signal (signal-cli-rest-api container), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), GitLab (Note Hook webhook — reply to issue and merge-request comments), Bitbucket (Cloud + Data Center webhook — reply to pull-request and issue comments), Signal (signal-cli-rest-api container), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Emoji reactions** — register `bot.OnReaction` once and reply to reactions uniformly across Slack, Discord, Telegram, WhatsApp and GitHub (see [Reactions](#reactions)).
@@ -75,6 +75,7 @@ go run ./_examples/basic whatsmeow  # WhatsApp Web flavor: no credentials — sc
 go run ./_examples/basic teams      # uses TEAMS_APP_ID / TEAMS_APP_PASSWORD / TEAMS_ADDR (+ optional TEAMS_APP_TENANT_ID / TEAMS_PATH)
 go run ./_examples/basic github     # uses GITHUB_TOKEN / GITHUB_WEBHOOK_SECRET / GITHUB_ADDR (+ optional GITHUB_PATH)
 go run ./_examples/basic gitlab     # uses GITLAB_TOKEN / GITLAB_SECRET / GITLAB_ADDR (+ optional GITLAB_PATH / GITLAB_BASE_URL)
+go run ./_examples/basic bitbucket  # uses BITBUCKET_EMAIL+BITBUCKET_API_TOKEN (or BITBUCKET_ACCESS_TOKEN) / BITBUCKET_SECRET / BITBUCKET_ADDR (+ optional BITBUCKET_SELF / BITBUCKET_PATH / BITBUCKET_BASE_URL)
 go run ./_examples/basic signal     # uses SIGNAL_API_URL / SIGNAL_NUMBER
 
 go run ./_examples/reactions slack  # same platform args; replies when someone adds an emoji reaction (see Reactions below)
@@ -97,6 +98,7 @@ Import `botbooter` for the shared types plus the one `botbooter/<platform>` pack
 | `teams.New(cfg teams.Config)` | `(*Bot, error)` | Azure Bot Framework; runs an inbound webhook HTTP server. |
 | `github.New(cfg github.Config)` | `(*Bot, error)` | Issue/PR comments via `issue_comment` webhook; PAT or GitHub App auth. |
 | `gitlab.New(cfg gitlab.Config)` | `(*Bot, error)` | Issue/MR comments via Note Hook webhook; access-token auth. |
+| `bitbucket.New(cfg bitbucket.Config)` | `(*Bot, error)` | PR/issue comments via webhook; Cloud + Data Center in one package; API-token or access-token auth. |
 | `signal.New(cfg signal.Config)` | `(*Bot, error)` | REST + receive WebSocket to a signal-cli-rest-api container; no keys. |
 
 WhatsApp comes in **two flavors selected by import path** — `whatsapp/cloud` (official Meta Cloud API: Business account, webhook + public HTTPS URL, no third-party deps) and `whatsapp/whatsmeow` (unofficial WhatsApp Web multidevice protocol via [whatsmeow](https://github.com/tulir/whatsmeow): pair by QR code like WhatsApp Web, session persisted in a local SQLite file — `Config.DBPath`, default `botbooter-whatsapp-meow.db` in the working directory — no Meta account or webhook). Only the flavor you import is compiled into your binary.
@@ -147,7 +149,7 @@ bot.HandleFunc("^echo ", func(ctx context.Context, b *botbooter.Bot, m *botboote
 "Thread" means something different on each platform, so `InReplyTo(m)` hands the whole `Message` to the adapter and it picks the anchor. Two scenarios spell out the behavior:
 
 - **A comment already inside a thread** → the reply continues **that same thread**. On Slack the reply is posted with `thread_ts = m.ReplyToID` (the thread root the inbound message carried); on Discord/Telegram/WhatsApp it quotes / references `m.ID`.
-- **A top-level comment in a channel** → the reply is a **direct reply to that comment**, anchored on it, *not* forced into the channel root. On Slack a top-level message has no thread root, so it gets a plain top-level reply (Slack does **not** open a brand-new thread off it — that would only bury the reply under an empty thread); on Discord it becomes an inline reply referencing the message, on Telegram a `reply_to_message_id`, and on WhatsApp (Cloud API) a quoted reply. The WhatsApp Web (whatsmeow) flavor currently ignores the threading anchor and sends a plain message.
+- **A top-level comment in a channel** → the reply is a **direct reply to that comment**, anchored on it, *not* forced into the channel root. On Slack a top-level message has no thread root, so it gets a plain top-level reply (Slack does **not** open a brand-new thread off it — that would only bury the reply under an empty thread); on Discord it becomes an inline reply referencing the message, on Telegram a `reply_to_message_id`, and on WhatsApp (Cloud API) a quoted reply. On Bitbucket (Cloud and Data Center) it is a comment whose `parent.id` is the target comment id. The WhatsApp Web (whatsmeow) flavor currently ignores the threading anchor and sends a plain message.
 
 For a raw, platform-specific anchor there's **`botbooter.WithThreadID(id)`** — the adapter uses the string verbatim (a Slack `thread_ts`, or a reply/quote message id elsewhere) and it wins over `InReplyTo`. You own platform-correctness with it. Per-platform anchor semantics, the precedence and fallback rules, and how `ReplyToID` vs `ID` are chosen are documented in [_docs/platforms.md](_docs/platforms.md#threaded-replies).
 
@@ -250,7 +252,8 @@ Things to know (v1):
   `reactions:read` scope; Discord needs the reaction intents enabled; Telegram
   delivers group reactions only when the bot is an admin; GitHub has **no
   reaction webhook** and instead **polls** opted-in repos (`Config.ReactionPollRepos`);
-  Teams, GitLab and Signal surface no reaction events. See
+  Teams, GitLab, Bitbucket and Signal surface no reaction events (Bitbucket has
+  none to surface — no comment reactions on either flavor). See
   [_docs/platforms.md](_docs/platforms.md) and `_examples/reactions/main.go`.
 - **Slack can't filter other bots' reactions** (the event carries no bot flag),
   so guard reply-emitting handlers against cross-bot loops.
@@ -264,7 +267,7 @@ for _, a := range attachments {
 }
 ```
 
-`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp Cloud API). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/Signal/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp Cloud API resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram). Signal's URL points at the signal-cli-rest-api container's `/v1/attachments/{id}` endpoint, so it is only as reachable (and as private) as the container (see [_docs/platforms.md](_docs/platforms.md#signal)). GitHub and GitLab comments carry markdown rather than an upload channel, so `GetAttachments` returns none there.
+`Attachment.URL` is empty on platforms that deliver media by id (Telegram, WhatsApp Cloud API). Call `b.ResolveAttachmentURL(ctx, a)` for a downloadable link on any platform — Discord/Teams/Signal/CLI return `a.URL` as-is, while Slack/Telegram/WhatsApp Cloud API resolve one on demand. The Telegram link embeds the bot token (a one-line warning logs on each resolve, suppressible via `BOTBOOTER_TELEGRAM_SUPPRESS_URL_WARNING`); see [_docs/platforms.md](_docs/platforms.md#telegram). Signal's URL points at the signal-cli-rest-api container's `/v1/attachments/{id}` endpoint, so it is only as reachable (and as private) as the container (see [_docs/platforms.md](_docs/platforms.md#signal)). GitHub, GitLab and Bitbucket comments carry markdown rather than an upload channel, so `GetAttachments` returns none there.
 
 WhatsApp Web (whatsmeow) media is end-to-end encrypted and has no URL at all — fetch and decrypt the bytes with `whatsmeow.Download(ctx, bot, a)`.
 
@@ -301,8 +304,8 @@ if ev, ok := slack.RawEvent(m); ok {
 	_ = ev.ThreadTimeStamp // anything on the raw *slackevents.MessageEvent
 }
 
-// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, cloud.RawMessage (WhatsApp Cloud API), whatsmeow.RawMessage (WhatsApp Web), teams.RawMessage, github.RawEvent, gitlab.RawEvent, signal.RawMessage, cli.RawData.
-// Underlying client per platform (WhatsApp Cloud API, Teams and Signal have none — they speak REST over plain HTTP, plus a receive WebSocket for Signal):
+// Raw event per platform: discord.RawEvent, slack.RawEvent, telegram.RawUpdate, cloud.RawMessage (WhatsApp Cloud API), whatsmeow.RawMessage (WhatsApp Web), teams.RawMessage, github.RawEvent, gitlab.RawEvent, bitbucket.RawEvent, signal.RawMessage, cli.RawData.
+// Underlying client per platform (WhatsApp Cloud API, Teams, Bitbucket Data Center and Signal have none — they speak REST over plain HTTP, plus a receive WebSocket for Signal):
 client := slack.Client(bot)        // *slack.Client (nil if not a Slack bot)
 sock := slack.SocketClient(bot)    // *socketmode.Client (nil if not a Slack bot)
 session := discord.Session(bot)    // *discordgo.Session
@@ -310,9 +313,10 @@ tg := telegram.Client(bot)         // *bot.Bot
 wa := whatsmeow.Client(bot)        // *whatsmeow.Client (WhatsApp Web flavor)
 gh := github.Client(bot)           // *go-github Client — labels, reactions, checks, anything beyond replies
 gl := gitlab.Client(bot)           // *client-go Client — labels, awards, pipelines, anything beyond replies
+bb := bitbucket.CloudClient(bot)   // *ktrysmt Cloud client — nil on a Data Center bot (which replies over plain net/http)
 
 // Webhook adapters bound with ":0" report their actual listen address:
-addr := github.Addr(bot)           // also cloud.Addr, teams.Addr, gitlab.Addr — the resolved host:port
+addr := github.Addr(bot)           // also cloud.Addr, teams.Addr, gitlab.Addr, bitbucket.Addr — the resolved host:port
 
 // Route the framework's own logs (panic recovery, poll errors, …) to your logger:
 bot.SetLogger(slog.Default())      // any *slog.Logger; a method on the Bot itself, platform-agnostic
@@ -349,6 +353,7 @@ documentation for each live in **[_docs/platforms.md](_docs/platforms.md)**.
 | Microsoft Teams | Azure Bot app id + password (+ optional tenant id) + bind addr | [_docs/platforms.md](_docs/platforms.md#microsoft-teams) |
 | GitHub | PAT **or** App (id + installation id + private key) + webhook secret + bind addr | [_docs/platforms.md](_docs/platforms.md#github) |
 | GitLab | access token (personal/project/group) + webhook secret token + bind addr | [_docs/platforms.md](_docs/platforms.md#gitlab) |
+| Bitbucket | API token (`email`+token) or access token + webhook secret + bind addr (+ `Self` for access-token/Data Center) | [_docs/platforms.md](_docs/platforms.md#bitbucket) |
 | Signal | no keys — a running signal-cli-rest-api container (registered number) + its URL | [_docs/platforms.md](_docs/platforms.md#signal) |
 | CLI | nothing (local stdin/stdout) | [_docs/platforms.md](_docs/platforms.md#cli) |
 
@@ -385,7 +390,7 @@ Alternatives:
 
 ## Roadmap
 
-- [x] Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, GitLab, Signal and CLI adapters
+- [x] Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, GitLab, Bitbucket, Signal and CLI adapters
 - [x] Middleware and attachment abstraction
 - [x] Unify attachment URL retrieval for all implementations
 - [ ] WeChat, Mastodon adapters
