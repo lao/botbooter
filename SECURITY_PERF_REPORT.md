@@ -54,22 +54,26 @@ unmeasured; `BenchmarkDispatch` was judged speculative absent evidence of a prob
 
 | ID | Severity | Area | Location | Description | Status |
 |----|----------|------|----------|-------------|--------|
-| S1 | Low | DoS / consistency | `internal/teams/server.go:109-121`, `internal/whatsapp/cloud/cloud.go:302-313` | Teams & Cloud lacked the pre-auth read-concurrency semaphore (`readSem`, cap 16) that GitHub & GitLab have — the copied-scaffolding drift CLAUDE.md warns to sweep (locations are the fix as landed) | **Fixed** |
-| S2 | Info | Defense-in-depth | `internal/whatsapp/cloud/cloud.go:527-529` | Wire-derived `media.ID` interpolated into the Graph API URL path unescaped (location is the fix as landed) | **Fixed** |
+| S1 | Low | DoS / consistency | `internal/teams/server.go` (`handleMessages`), `internal/whatsapp/cloud/cloud.go` (`handleWebhook`) | Teams & Cloud lacked the pre-auth read-concurrency semaphore (`readSem`, cap 16) that GitHub & GitLab have — the copied-scaffolding drift CLAUDE.md warns to sweep | **Fixed** |
+| S2 | Info | Defense-in-depth | `internal/whatsapp/cloud/cloud.go` (`ResolveAttachmentURL`) | Wire-derived `media.ID` interpolated into the Graph API URL path unescaped | **Fixed** |
 
 ### S1 — pre-auth read-concurrency parity (fixed)
 
 GitHub and GitLab bound concurrent inbound body reads at `maxConcurrentReads = 16` before
-the body is buffered, capping pre-auth read memory at 16 × the body cap. Teams and Cloud
-bounded only *post-auth dispatch* (256), so pre-auth read buffering was limited by
+the body is buffered, capping the *synchronous read* window at 16 × the body cap. Teams and
+Cloud bounded only *post-auth dispatch* (256), so pre-auth read buffering was limited by
 connection count × 1 MiB rather than a hard 16 × 1 MiB. Impact is minor (each read is
 already capped at 1 MiB and lifetime-bounded by `ReadTimeout`), but it is a genuine
 correctness/consistency gap in the deliberately-duplicated webhook scaffolding.
 
-Fix: added the same `readSem` acquire/`defer` release at the top of `teams.handleMessages`
-and `cloud.handleWebhook`, mirroring the siblings exactly. Both shed with 503 (their
-platforms retry), matching each adapter's existing dispatch-shed response. Sweeps to: all
-four webhook adapters now hold the identical `readSem` + `dispatchSem` shape.
+Fix: added the same `readSem` acquire/release at the top of `teams.handleMessages` and
+`cloud.handleWebhook`. Cloud uses the sibling `defer` release, since its synchronous
+portion (HMAC + parse) is fast. Teams deliberately diverges: it releases the slot *before*
+`validateInbound`, because that call can block on a cold JWKS fetch — so the 16-slot gate
+bounds the read itself, **not** any body still referenced during the JWKS window. This
+divergence is documented in-code. Both shed with 503 (their platforms retry), matching each
+adapter's existing dispatch-shed response. Sweeps to: all four webhook adapters now hold the
+`readSem` + `dispatchSem` shape.
 
 ### S2 — escape wire-derived media ID (fixed)
 
@@ -84,8 +88,8 @@ host, so this is defense-in-depth only. Fix: `url.PathEscape(media.ID)`, matchin
   servers set the full timeout set, cap bodies, reject non-POST cheaply, and write only
   `WriteHeader` (errors logged, never returned in the response body).
 - **Teams serviceUrl SSRF** — `serviceurl` claim from the signed token is compared to the
-  body value (`auth.go:108-116`); `isAllowedServiceHost` enforces https + Bot-Framework
-  host allowlist (`auth.go:277-292`). JWT is alg-pinned to RS256, checks aud/iss/exp with
+  body value; `isAllowedServiceHost` (`auth.go`) enforces https + Bot-Framework
+  host allowlist. JWT is alg-pinned to RS256, checks aud/iss/exp with
   5-min leeway, and binds signing keys to the channel. JWKS cache has max-age refresh,
   min-refresh-interval (unknown-kid DoS guard) and a stale-fallback ceiling.
 - **Secrets & logging** — no config-secret redaction wrapper exists, but no log or format
