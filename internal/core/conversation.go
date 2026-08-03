@@ -2,18 +2,11 @@ package core
 
 import (
 	"context"
-	"log/slog"
 	"maps"
 	"strings"
 	"sync"
 	"time"
 )
-
-// conversationShards is the fixed number of striped locks the conversationManager
-// holds. It bounds lock memory by construction: there is no per-key lock map that
-// grows with distinct conversations. Two keys that hash to the same shard
-// serialize unnecessarily, but with this many shards that is rare and brief.
-const conversationShards = 256
 
 // defaultSweepInterval is how often the background sweeper reaps expired flow
 // state when started without an explicit interval.
@@ -27,7 +20,8 @@ const defaultSweepInterval = time.Minute
 const defaultFlowTimeout = 10 * time.Minute
 
 // ConversationState is the per-conversation flow state the engine carries between
-// messages.
+// messages, keyed per user+channel and held in memory for the life of the
+// process (a restart loses every in-flight flow).
 type ConversationState struct {
 	FlowID    string
 	Step      int
@@ -41,130 +35,62 @@ func (s ConversationState) isExpired(now time.Time) bool {
 	return !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(now)
 }
 
-// memConversationStore is the in-memory home for in-flight flow state: a map
-// guarded by its own RWMutex, held only for the map access itself and never
-// across a validator. A process restart loses everything in it. It is touched
-// both under the manager's striped locks and from the background sweeper, so its
-// own RWMutex keeps it safe for concurrent use.
-type memConversationStore struct {
-	mu sync.RWMutex
+// conversationManager owns the in-process coordination for flows: the per-
+// conversation state map plus the background TTL sweeper, both guarded by one
+// mutex.
+//
+// ponytail: single global mutex, not per-key striped locks. It serializes every
+// conversation's state transition — and the user validator that runs under it,
+// per Validate's "keep it fast" contract — against every other conversation. For
+// a single-instance in-memory chat bot that is ample; shard the lock by key only
+// if flow throughput is ever a measured bottleneck.
+type conversationManager struct {
+	mu sync.Mutex
 	m  map[string]ConversationState
 }
 
-func newMemConversationStore() *memConversationStore {
-	return &memConversationStore{m: make(map[string]ConversationState)}
-}
-
-func (s *memConversationStore) Get(key string) (ConversationState, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	st, ok := s.m[key]
-	return st, ok
-}
-
-// Set stores state under key.
-func (s *memConversationStore) Set(key string, state ConversationState) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[key] = state
-}
-
-func (s *memConversationStore) Delete(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.m, key)
-}
-
-// expiredKeys returns the keys whose ExpiresAt is set and at or before now. A zero
-// ExpiresAt never expires.
-func (s *memConversationStore) expiredKeys(now time.Time) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var expired []string
-	for k, st := range s.m {
-		if st.isExpired(now) {
-			expired = append(expired, k)
-		}
-	}
-	return expired
-}
-
-// conversationManager owns the in-process coordination for flows: a fixed-size
-// striped lock set plus the background TTL sweeper over the in-memory store. The
-// user validator runs UNDER a shard lock, never inside a store call.
-type conversationManager struct {
-	store *memConversationStore
-	locks [conversationShards]sync.Mutex
-}
-
 func newConversationManager() *conversationManager {
-	return &conversationManager{store: newMemConversationStore()}
+	return &conversationManager{m: make(map[string]ConversationState)}
 }
 
-// shardFor returns the lock guarding key. The same key always maps to the same
-// shard. FNV-1a is inlined over the key's bytes to avoid the per-call hasher heap
-// allocation fnv.New32a() incurs (it returns an interface).
-func (m *conversationManager) shardFor(key string) *sync.Mutex {
-	const (
-		offset32 = 2166136261
-		prime32  = 16777619
-	)
-	h := uint32(offset32)
-	for i := 0; i < len(key); i++ {
-		h ^= uint32(key[i])
-		h *= prime32
-	}
-	return &m.locks[h%conversationShards]
-}
-
-// withLock runs fn while holding key's shard lock, releasing it even if fn
-// panics. The panic propagates to dispatch's recover; the shard stays usable for
-// the next operation on any key it guards.
-func (m *conversationManager) withLock(key string, fn func()) {
-	mu := m.shardFor(key)
-	mu.Lock()
-	defer mu.Unlock()
+// withLock runs fn while holding the manager mutex, releasing it even if fn
+// panics (the panic propagates to dispatch's recover). The get/set/del helpers
+// assume this lock is held.
+func (m *conversationManager) withLock(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	fn()
 }
 
-// sweepRecovered runs sweep with a recover so a panic in it cannot take down the
-// sweeper goroutine (and with it the process), mirroring the recover that guards
-// dispatch in core.go. logger (may be nil → slog.Default) is passed in rather than
-// held on the manager so a sweeper goroutine never shares mutable diagnostics
-// state with a concurrent reconnect.
-func (m *conversationManager) sweepRecovered(now time.Time, logger *slog.Logger) {
-	defer func() {
-		if r := recover(); r != nil {
-			if logger == nil {
-				logger = slog.Default()
-			}
-			logger.Error("botbooter: recovered from panic in conversation sweeper", "panic", r)
-		}
-	}()
-	m.sweep(now)
+// get, set and del are plain map operations; the caller MUST hold m.mu (via
+// withLock).
+func (m *conversationManager) get(key string) (ConversationState, bool) {
+	st, ok := m.m[key]
+	return st, ok
 }
 
-// sweep deletes every expired entry as of now. It takes each key's shard lock and
-// re-checks expiry under it, so it can never race a concurrent advance that just
-// refreshed the entry's TTL.
+func (m *conversationManager) set(key string, st ConversationState) { m.m[key] = st }
+
+func (m *conversationManager) del(key string) { delete(m.m, key) }
+
+// sweep deletes every entry expired as of now. It holds the manager mutex across
+// the whole scan, so it can never race a concurrent advance that just refreshed
+// an entry's TTL (deleting during a map range is safe in Go).
 func (m *conversationManager) sweep(now time.Time) {
-	for _, key := range m.store.expiredKeys(now) {
-		m.withLock(key, func() {
-			if st, ok := m.store.Get(key); ok && st.isExpired(now) {
-				m.store.Delete(key)
+	m.withLock(func() {
+		for key, st := range m.m {
+			if st.isExpired(now) {
+				delete(m.m, key)
 			}
-		})
-	}
+		}
+	})
 }
 
 // startSweeper runs sweep on an interval until ctx is done, then closes the
 // returned channel so a caller can observe that the goroutine has exited — making
 // the sweeper leak-free and testable. A non-positive interval falls back to
-// defaultSweepInterval. logger (may be nil) routes sweeper panic recovery through
-// the Bot's configured diagnostics sink; it is captured by the goroutine, not
-// stored on the manager, so a reconnect that starts a fresh sweeper never races a
-// lingering old one over shared state.
-func (m *conversationManager) startSweeper(ctx context.Context, interval time.Duration, logger *slog.Logger) <-chan struct{} {
+// defaultSweepInterval.
+func (m *conversationManager) startSweeper(ctx context.Context, interval time.Duration) <-chan struct{} {
 	if interval <= 0 {
 		interval = defaultSweepInterval
 	}
@@ -178,7 +104,7 @@ func (m *conversationManager) startSweeper(ctx context.Context, interval time.Du
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				m.sweepRecovered(time.Now(), logger)
+				m.sweep(time.Now())
 			}
 		}
 	}()
@@ -257,7 +183,7 @@ func (b *Bot) sendFlowMessage(ctx context.Context, channelID, text string) {
 	}
 }
 
-// start begins flow for msg's conversation. Under the shard lock it records the
+// start begins flow for msg's conversation. Under the lock it records the
 // initial state if and only if none exists (set-if-absent); after releasing the
 // lock it sends the first prompt. A losing racer — state already present — is a
 // no-op, and its trigger message is dropped, never consumed as the first answer.
@@ -265,11 +191,11 @@ func (m *conversationManager) start(ctx context.Context, b *Bot, msg *Message, f
 	key := conversationKey(msg)
 
 	var started bool
-	m.withLock(key, func() {
-		if _, ok := m.store.Get(key); ok {
+	m.withLock(func() {
+		if _, ok := m.get(key); ok {
 			return // already active for this conversation; drop the trigger
 		}
-		m.store.Set(key, ConversationState{
+		m.set(key, ConversationState{
 			FlowID:    flow.id,
 			Step:      0,
 			Answers:   map[string]string{},
@@ -296,7 +222,7 @@ func (m *conversationManager) advance(ctx context.Context, b *Bot, msg *Message)
 		handled bool
 		action  func()
 	)
-	m.withLock(key, func() {
+	m.withLock(func() {
 		handled, action = m.transitionLocked(ctx, b, key, msg, now)
 	})
 
@@ -316,7 +242,7 @@ func (m *conversationManager) advance(ctx context.Context, b *Bot, msg *Message)
 // reaped but reported handled (consuming the trigger) and runs the optional
 // OnTimeout. The asymmetry is deliberate — see the design spec.
 func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key string, msg *Message, now time.Time) (handled bool, action func()) {
-	state, ok := m.store.Get(key)
+	state, ok := m.get(key)
 	if !ok {
 		return false, nil // no active flow; dispatch continues to the command table
 	}
@@ -325,7 +251,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 	if !ok {
 		// State outlived its flow registration (e.g. a renamed flow); reap and
 		// fall through rather than panic.
-		m.store.Delete(key)
+		m.del(key)
 		return false, nil
 	}
 
@@ -335,12 +261,12 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 	// the state in place to wedge every
 	// later message until its TTL.)
 	if state.Step < 0 || state.Step >= len(flow.steps) {
-		m.store.Delete(key)
+		m.del(key)
 		return false, nil
 	}
 
 	if state.isExpired(now) {
-		m.store.Delete(key)
+		m.del(key)
 		if flow.onTimeout != nil {
 			return true, func() { flow.onTimeout(ctx, b, msg) }
 		}
@@ -355,7 +281,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 
 	// The cancel word shadows every step, so it precedes validation.
 	if flow.cancelWord != "" && content == flow.cancelWord {
-		m.store.Delete(key)
+		m.del(key)
 		if flow.onCancel != nil {
 			return true, func() { flow.onCancel(ctx, b, msg) }
 		}
@@ -370,7 +296,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 	// quiet lets it expire.
 	slideTTL := func() {
 		state.ExpiresAt = now.Add(flow.timeoutOrDefault())
-		m.store.Set(key, state)
+		m.set(key, state)
 	}
 
 	// Empty/whitespace answers are non-answers: re-prompt without storing an answer.
@@ -415,7 +341,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 	// engine reusing the underlying map.
 	if state.Step == len(flow.steps)-1 {
 		completed := Answers(maps.Clone(answers))
-		m.store.Delete(key)
+		m.del(key)
 		return true, func() { flow.onComplete(ctx, b, msg, completed) }
 	}
 

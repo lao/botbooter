@@ -472,10 +472,10 @@ func (b *Bot) Connect(ctx context.Context) error {
 	// sweeper to observe cancellation and exit (production teardown never blocks
 	// on sweeperDone), so a fast reconnect can briefly run two sweepers against
 	// the shared per-Bot conversationManager. That overlap is benign: sweep
-	// re-checks expiry under each shard lock before deleting, so a concurrent
+	// re-checks expiry under the manager lock before deleting, so a concurrent
 	// double-sweep is idempotent.
 	if b.conversations != nil && len(b.flows) > 0 {
-		c.sweeperDone = b.conversations.startSweeper(runCtx, defaultSweepInterval, b.log())
+		c.sweeperDone = b.conversations.startSweeper(runCtx, defaultSweepInterval)
 	}
 	return nil
 }

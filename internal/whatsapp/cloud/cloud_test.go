@@ -38,7 +38,7 @@ func validConfig() Config {
 func testAdapter() *adapter {
 	cfg := validConfig()
 	cfg.Path = defaultPath
-	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: http.DefaultClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch)}
+	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: http.DefaultClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch), readSem: make(chan struct{}, maxConcurrentReads)}
 }
 
 // sign returns the X-Hub-Signature-256 header value for body under secret.
@@ -484,6 +484,32 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	a.drainDispatch(ctx)
 }
 
+// readSpy counts Read calls so a test can prove a shed request's body was
+// never touched.
+type readSpy struct{ reads int }
+
+func (s *readSpy) Read([]byte) (int, error) { s.reads++; return 0, io.EOF }
+
+// A saturated read semaphore must answer 503 before the (up to maxRequestBytes)
+// body is buffered, so a flood of large POSTs cannot exhaust memory ahead of the
+// signature check. Mirrors the github/gitlab sibling test.
+func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
+	a := testAdapter()
+	a.readSem = make(chan struct{}, 1)
+	a.readSem <- struct{}{} // occupy the only inbound slot
+
+	var got []*core.Message
+	spy := &readSpy{}
+	r := httptest.NewRequest(http.MethodPost, "/webhook", spy)
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, []byte(textWebhook)))
+	w := httptest.NewRecorder()
+	a.handleWebhook(context.Background(), w, r, captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusServiceUnavailable, "saturated read gate returns 503")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+	asserts.Equal(t, spy.reads, 0, "shed request's body is never read")
+}
+
 func TestHandleWebhook_StatusOnlyIgnored(t *testing.T) {
 	a := testAdapter()
 	var got []*core.Message
@@ -711,6 +737,29 @@ func TestResolveAttachmentURL(t *testing.T) {
 	asserts.Equal(t, gotMethod, http.MethodGet, "resolve should GET")
 	asserts.Equal(t, gotPath, "/v23.0/MID", "resolve should target /{graph-version}/{media-id}")
 	asserts.Equal(t, gotAuth, "Bearer tok", "resolve should set the bearer token")
+}
+
+// A wire-derived media ID with URL-significant characters must be PathEscaped so
+// it cannot alter the request path (defense-in-depth; it can't escape the pinned
+// host regardless).
+func TestResolveAttachmentURL_EscapesMediaID(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		_, _ = io.WriteString(w, `{"url":"https://lookaside.fbsbx.com/media/blob"}`)
+	}))
+	defer srv.Close()
+
+	a := testAdapter()
+	a.baseURL = srv.URL
+	a.http = srv.Client()
+	a.cfg.GraphVersion = "v23.0"
+
+	_, err := a.ResolveAttachmentURL(context.Background(),
+		core.Attachment{ExtraData: &Media{ID: "a/b?c"}})
+
+	asserts.NoError(t, err, "resolve should succeed")
+	asserts.Equal(t, gotPath, "/v23.0/a%2Fb%3Fc", "media id is PathEscaped in the request path")
 }
 
 func TestResolveAttachmentURL_NoMediaID(t *testing.T) {

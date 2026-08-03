@@ -10,52 +10,23 @@ import (
 	"github.com/lao/botbooter/internal/asserts"
 )
 
-func TestMemConversationStore_GetSetDelete(t *testing.T) {
-	s := newMemConversationStore()
-
-	_, ok := s.Get("k")
-	asserts.False(t, ok, "missing key reports absent")
-
-	s.Set("k", ConversationState{FlowID: "f", Step: 2})
-	st, ok := s.Get("k")
-	asserts.True(t, ok, "present after Set")
-	asserts.Equal(t, st.FlowID, "f", "FlowID round-trips")
-	asserts.Equal(t, st.Step, 2, "Step round-trips")
-
-	s.Delete("k")
-	_, ok = s.Get("k")
-	asserts.False(t, ok, "absent after Delete")
-}
-
-func TestMemConversationStore_ExpiredKeys(t *testing.T) {
-	s := newMemConversationStore()
-	now := time.Now()
-	s.Set("at", ConversationState{ExpiresAt: now}) // == now → expired
-	s.Set("past", ConversationState{ExpiresAt: now.Add(-time.Second)})
-	s.Set("future", ConversationState{ExpiresAt: now.Add(time.Hour)})
-	s.Set("zero", ConversationState{}) // no expiry
-
-	set := map[string]bool{}
-	for _, k := range s.expiredKeys(now) {
-		set[k] = true
-	}
-
-	asserts.True(t, set["at"], "ExpiresAt == now is expired")
-	asserts.True(t, set["past"], "past ExpiresAt is expired")
-	asserts.False(t, set["future"], "future ExpiresAt is not expired")
-	asserts.False(t, set["zero"], "zero ExpiresAt never expires")
-	asserts.Equal(t, len(set), 2, "exactly two keys expired")
-}
-
-func TestConversationManager_StripedLockBounded(t *testing.T) {
+func TestConversationManager_GetSetDel(t *testing.T) {
 	m := newConversationManager()
 
-	// Lock memory is bounded by construction: a fixed array, not a per-key map.
-	asserts.Equal(t, len(m.locks), conversationShards, "fixed shard count")
+	m.withLock(func() {
+		_, ok := m.get("k")
+		asserts.False(t, ok, "missing key reports absent")
 
-	a := m.shardFor("alpha")
-	b := m.shardFor("alpha")
-	asserts.True(t, a == b, "the same key maps to the same shard deterministically")
+		m.set("k", ConversationState{FlowID: "f", Step: 2})
+		st, ok := m.get("k")
+		asserts.True(t, ok, "present after set")
+		asserts.Equal(t, st.FlowID, "f", "FlowID round-trips")
+		asserts.Equal(t, st.Step, 2, "Step round-trips")
+
+		m.del("k")
+		_, ok = m.get("k")
+		asserts.False(t, ok, "absent after del")
+	})
 }
 
 func TestConversationManager_WithLockReleasesOnPanic(t *testing.T) {
@@ -63,46 +34,49 @@ func TestConversationManager_WithLockReleasesOnPanic(t *testing.T) {
 
 	func() {
 		defer func() { _ = recover() }()
-		m.withLock("k", func() { panic("boom") })
+		m.withLock(func() { panic("boom") })
 	}()
 
-	// The shard must have been released; a second op on the same key (same shard)
-	// must not deadlock.
+	// The mutex must have been released; a second op must not deadlock.
 	done := make(chan struct{})
 	go func() {
-		m.withLock("k", func() {})
+		m.withLock(func() {})
 		close(done)
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("withLock wedged the shard after a panic")
+		t.Fatal("withLock wedged the mutex after a panic")
 	}
 }
 
 func TestConversationManager_Sweep(t *testing.T) {
 	m := newConversationManager()
 	now := time.Now()
-	m.store.Set("expired", ConversationState{FlowID: "f", ExpiresAt: now.Add(-time.Minute)})
-	m.store.Set("fresh", ConversationState{FlowID: "f", ExpiresAt: now.Add(time.Minute)})
-	m.store.Set("noexpiry", ConversationState{FlowID: "f"})
+	m.withLock(func() {
+		m.set("expired", ConversationState{FlowID: "f", ExpiresAt: now.Add(-time.Minute)})
+		m.set("fresh", ConversationState{FlowID: "f", ExpiresAt: now.Add(time.Minute)})
+		m.set("noexpiry", ConversationState{FlowID: "f"})
+	})
 
 	m.sweep(now)
 
-	_, ok := m.store.Get("expired")
-	asserts.False(t, ok, "expired entry is swept")
-	_, ok = m.store.Get("fresh")
-	asserts.True(t, ok, "fresh entry survives")
-	_, ok = m.store.Get("noexpiry")
-	asserts.True(t, ok, "zero-ExpiresAt entry survives")
+	m.withLock(func() {
+		_, ok := m.get("expired")
+		asserts.False(t, ok, "expired entry is swept")
+		_, ok = m.get("fresh")
+		asserts.True(t, ok, "fresh entry survives")
+		_, ok = m.get("noexpiry")
+		asserts.True(t, ok, "zero-ExpiresAt entry survives")
+	})
 }
 
 func TestConversationManager_SweeperLifecycleExits(t *testing.T) {
 	m := newConversationManager()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	done := m.startSweeper(ctx, 10*time.Millisecond, nil)
+	done := m.startSweeper(ctx, 10*time.Millisecond)
 	cancel()
 
 	select {
@@ -114,15 +88,19 @@ func TestConversationManager_SweeperLifecycleExits(t *testing.T) {
 
 func TestConversationManager_SweeperReapsExpired(t *testing.T) {
 	m := newConversationManager()
-	m.store.Set("k", ConversationState{FlowID: "f", ExpiresAt: time.Now().Add(-time.Minute)})
+	m.withLock(func() {
+		m.set("k", ConversationState{FlowID: "f", ExpiresAt: time.Now().Add(-time.Minute)})
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m.startSweeper(ctx, 5*time.Millisecond, nil)
+	m.startSweeper(ctx, 5*time.Millisecond)
 
 	deadline := time.After(2 * time.Second)
 	for {
-		if _, ok := m.store.Get("k"); !ok {
+		var present bool
+		m.withLock(func() { _, present = m.get("k") })
+		if !present {
 			return
 		}
 		select {
@@ -189,8 +167,11 @@ func TestConversationManager_AdvanceHappyPath(t *testing.T) {
 	asserts.Equal(t, got[0], "name?", "first prompt")
 	asserts.Equal(t, got[1], "color?", "second prompt")
 
-	_, ok := bot.conversations.store.Get(conversationKey(msgFrom("u", "c", "")))
-	asserts.False(t, ok, "state cleared after completion")
+	var present bool
+	bot.conversations.withLock(func() {
+		_, present = bot.conversations.get(conversationKey(msgFrom("u", "c", "")))
+	})
+	asserts.False(t, present, "state cleared after completion")
 }
 
 func TestConversationManager_SecretAnswerKeepsExactBytes(t *testing.T) {
@@ -323,14 +304,15 @@ func TestBot_SweeperLifecycle_ConnectDisconnect(t *testing.T) {
 }
 
 // TestConversationManager_SweepConcurrentWithAdvance hammers sweep against a
-// goroutine that keeps refreshing a key's TTL under the shard lock. Both touch
-// the same shard, so under -race this asserts no data race and that an actively
-// refreshed entry is never reaped (the under-lock re-check always sees a future
-// ExpiresAt).
+// goroutine that keeps refreshing a key's TTL under the manager lock. Under -race
+// this asserts no data race and that an actively refreshed entry is never reaped
+// (sweep holds the lock across its scan, so it always sees a future ExpiresAt).
 func TestConversationManager_SweepConcurrentWithAdvance(t *testing.T) {
 	m := newConversationManager()
 	key := "u\x00c"
-	m.store.Set(key, ConversationState{FlowID: "f", ExpiresAt: time.Now().Add(time.Hour)})
+	m.withLock(func() {
+		m.set(key, ConversationState{FlowID: "f", ExpiresAt: time.Now().Add(time.Hour)})
+	})
 
 	const rounds = 2000
 	var wg sync.WaitGroup
@@ -338,13 +320,13 @@ func TestConversationManager_SweepConcurrentWithAdvance(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			m.withLock(key, func() {
-				st, ok := m.store.Get(key)
+			m.withLock(func() {
+				st, ok := m.get(key)
 				if !ok {
 					st = ConversationState{FlowID: "f"}
 				}
 				st.ExpiresAt = time.Now().Add(time.Hour)
-				m.store.Set(key, st)
+				m.set(key, st)
 			})
 		}
 	}()
@@ -356,11 +338,12 @@ func TestConversationManager_SweepConcurrentWithAdvance(t *testing.T) {
 	}()
 	wg.Wait()
 
-	_, ok := m.store.Get(key)
+	var ok bool
+	m.withLock(func() { _, ok = m.get(key) })
 	asserts.True(t, ok, "an actively-refreshed entry is never swept")
 }
 
-// TestConversationManager_ConcurrentWithLock proves the shard locks serialize the
+// TestConversationManager_ConcurrentWithLock proves the manager lock serializes the
 // read-modify-write for a key: 50 increments across 5 keys land exactly once each
 // with no lost updates. Run under -race to also assert no data race on the map.
 func TestConversationManager_ConcurrentWithLock(t *testing.T) {
@@ -374,21 +357,23 @@ func TestConversationManager_ConcurrentWithLock(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			key := "k" + strconv.Itoa(i%keys)
-			m.withLock(key, func() {
-				st, _ := m.store.Get(key)
+			m.withLock(func() {
+				st, _ := m.get(key)
 				st.FlowID = "f"
 				st.Step++
-				m.store.Set(key, st)
+				m.set(key, st)
 			})
 		}(i)
 	}
 	wg.Wait()
 
 	total := 0
-	for i := 0; i < keys; i++ {
-		st, ok := m.store.Get("k" + strconv.Itoa(i))
-		asserts.True(t, ok, "key should exist after concurrent writes")
-		total += st.Step
-	}
+	m.withLock(func() {
+		for i := 0; i < keys; i++ {
+			st, ok := m.get("k" + strconv.Itoa(i))
+			asserts.True(t, ok, "key should exist after concurrent writes")
+			total += st.Step
+		}
+	})
 	asserts.Equal(t, total, goroutines, "every increment applied exactly once (no lost updates)")
 }

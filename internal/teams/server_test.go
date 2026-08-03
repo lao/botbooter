@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -267,6 +268,32 @@ func TestHandleMessages_SaturatedDispatchReturns503(t *testing.T) {
 	// Second request finds the semaphore full and is shed with 503, not acked.
 	w2 := post(a, deps, body, auth)
 	asserts.Equal(t, w2.Code, http.StatusServiceUnavailable, "saturated dispatch sheds load with 503")
+}
+
+// readSpy counts Read calls so a test can prove a shed request's body was
+// never touched.
+type readSpy struct{ reads int }
+
+func (s *readSpy) Read([]byte) (int, error) { s.reads++; return 0, io.EOF }
+
+// A saturated read semaphore must answer 503 before the body is buffered and
+// unmarshaled, so a flood of large POSTs cannot exhaust memory ahead of the JWT
+// check. Mirrors the github/gitlab sibling test.
+func TestHandleMessages_ReadSaturationReturns503(t *testing.T) {
+	a := testAdapter(t)
+	a.readSem = make(chan struct{}, 1)
+	a.readSem <- struct{}{} // occupy the only inbound slot
+
+	var got []*core.Message
+	spy := &readSpy{}
+	r := httptest.NewRequest(http.MethodPost, a.cfg.Path, spy)
+	r.Header.Set("Authorization", "Bearer "+mintToken(t, testKID, validClaims(a.cfg.AppID, allowedServiceURL)))
+	w := httptest.NewRecorder()
+	a.handleMessages(context.Background(), w, r, captureDeps(&got, nil))
+
+	asserts.Equal(t, w.Code, http.StatusServiceUnavailable, "saturated read gate returns 503")
+	asserts.Equal(t, len(got), 0, "nothing dispatched")
+	asserts.Equal(t, spy.reads, 0, "shed request's body is never read")
 }
 
 func TestHandleMessages_IgnoresNonMessage(t *testing.T) {
