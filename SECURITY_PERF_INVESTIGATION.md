@@ -85,9 +85,11 @@ probably applies to siblings; sweep all):
 
 ### 5. Loop & abuse resistance
 
-- Self-message filters per platform (documented matrix) — verify each against code;
-  the known gaps (Slack reactions, GitLab other-bots, Signal, WhatsApp) should appear
-  in the report as accepted risks with mitigations for consumers (idempotency, rate limits).
+- Self-message filters per platform (documented matrix) — verify each against code.
+  Every platform filters its *own* messages; the known gaps are *other-bot* filtering
+  where the platform carries no bot marker (Slack reactions, GitLab notes, Signal,
+  WhatsApp) — these should appear in the report as accepted risks with mitigations for
+  consumers (idempotency, rate limits).
 - No built-in rate limiting on dispatch: a hostile chat can drive unbounded handler
   concurrency? Check goroutine-per-message vs. serialized dispatch per adapter.
 - GitHub reaction poller: API budget logic (3000 req/h) — can a malicious repo list

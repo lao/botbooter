@@ -9,8 +9,13 @@ every path in the plan, automated scanners (`govulncheck`, `gosec`, `golangci-li
 
 **Security posture: strong.** The four internet-facing webhook adapters (GitHub, GitLab,
 Teams, WhatsApp Cloud) are uniformly hardened: full `http.Server` timeout sets, body-size
-caps before `io.ReadAll`, cheap method/path rejection, constant-time secret compares, and
-no internal detail in error responses. The highest-risk question — whether a forged inbound
+caps before `io.ReadAll`, cheap method/path rejection, and no internal detail in error
+responses. Authentication is adapter-specific: GitHub verifies the body HMAC
+(`X-Hub-Signature-256` via go-github's constant-time `ValidateSignature`); GitLab compares
+`X-Gitlab-Token` with `subtle.ConstantTimeCompare` before reading the body; WhatsApp Cloud
+verifies the body HMAC with `hmac.Equal` (and its GET verify-token handshake with
+`subtle.ConstantTimeCompare`); Teams verifies an RS256-signed JWT against the Bot
+Connector JWKS (alg-pinned, aud/iss/exp checked) rather than a shared secret. The highest-risk question — whether a forged inbound
 Teams Activity can redirect the bot's outbound replies to an attacker host — is **fully
 mitigated**: the reply `serviceUrl` is bound to the RS256-signed `serviceurl` claim *and*
 constrained to an https Bot-Framework host allowlist, both enforced before the value is
@@ -22,18 +27,20 @@ accepted limitation.
 (keep-alives preserved); no client or transport is allocated per `Send`. The dispatch hot
 path composes the middleware chain and compiles every command regex **once** (at
 connect/registration), not per message; `Message` is passed by pointer with no per-message
-deep copies. No unbounded memory growth: the Teams conversation map is FIFO-capped (10k),
-flow state is TTL-swept, and in-flight drain tracking is a symmetric, panic-safe atomic
-counter. No benchmarks were added — no hot-path allocation problem exists to measure, so
-`BenchmarkDispatch` would be speculative.
+deep copies. No unbounded memory growth, with one accepted exception: the Teams
+conversation map is FIFO-capped (10k), flow state is TTL-swept, in-flight drain tracking
+is a symmetric, panic-safe atomic counter, and the GitHub reaction dedup set is unbounded
+in principle but negligible at poller rates (accepted, §3). No benchmarks were added —
+the static read found no per-message allocation hotspots, but allocation behavior remains
+unmeasured; `BenchmarkDispatch` was judged speculative absent evidence of a problem.
 
 ## 2. Findings
 
 | ID | Severity | Area | Location | Description | Status |
 |----|----------|------|----------|-------------|--------|
-| S1 | Low | DoS / consistency | `internal/teams/server.go`, `internal/whatsapp/cloud/cloud.go` | Teams & Cloud lacked the pre-auth read-concurrency semaphore (`readSem`, cap 16) that GitHub & GitLab have — the copied-scaffolding drift CLAUDE.md warns to sweep | **Fixed** |
-| S2 | Info | Defense-in-depth | `internal/whatsapp/cloud/cloud.go:503` | Wire-derived `media.ID` interpolated into the Graph API URL path unescaped | **Fixed** |
-| S3 | Low | Dependencies | `go.mod` (stdlib `crypto/tls`) | `govulncheck` GO-2026-5856 (ECH privacy leak), fixed in go1.26.5 — a toolchain bump | Accepted (see §4) |
+| S1 | Low | DoS / consistency | `internal/teams/server.go:109-121`, `internal/whatsapp/cloud/cloud.go:302-313` | Teams & Cloud lacked the pre-auth read-concurrency semaphore (`readSem`, cap 16) that GitHub & GitLab have — the copied-scaffolding drift CLAUDE.md warns to sweep (locations are the fix as landed) | **Fixed** |
+| S2 | Info | Defense-in-depth | `internal/whatsapp/cloud/cloud.go:527-529` | Wire-derived `media.ID` interpolated into the Graph API URL path unescaped (location is the fix as landed) | **Fixed** |
+| S3 | Low | Dependencies | `go.mod:7` (stdlib `crypto/tls`) | `govulncheck` GO-2026-5856 (ECH privacy leak), fixed in go1.25.12 / go1.26.5; pinned toolchain is go1.25.11 — one patch behind | Accepted (see §4) |
 
 ### S1 — pre-auth read-concurrency parity (fixed)
 
@@ -95,16 +102,18 @@ host, so this is defense-in-depth only. Fix: `url.PathEscape(media.ID)`, matchin
 - **Flow-secret durable-store exclusion** is aspirational — no `Store` implementation
   exists yet, so nothing durably persists secrets; harmless until one is added.
 - **Signal dispatch** is uncapped but bounded by a single serial receive socket.
-- **Self-message filter gaps** (Slack reactions, GitLab other-bots, Signal, WhatsApp) are
-  documented platform limitations; consumers must be idempotent and rate-limit.
+- **Other-bot filter gaps** — every platform drops the bot's *own* messages (self filters
+  verified on all ten adapters); what cannot be filtered is *other* bots where the
+  platform carries no bot marker (Slack `reaction_added`, GitLab notes, Signal, WhatsApp).
+  Documented platform limitations; consumers must be idempotent and rate-limit.
 
 ## 4. Prioritized improvements
 
 **Done (this PR):** S1 (readSem parity), S2 (media.ID escape).
 
 **Quick wins (out of scope for this PR — dependency/toolchain, not code):**
-- Bump the build toolchain past go1.26.5 (or confirm the pinned go1.25.x patch carries the
-  crypto/tls fix) to clear GO-2026-5856.
+- Bump the pinned toolchain go1.25.11 → go1.25.12 (or go1.26.5+) to pick up the
+  crypto/tls fix and clear GO-2026-5856.
 - Opportunistically bump `slack-go` (`SecretsVerifier` CVE, uncalled) and `x/text` on the
   next dependency sweep.
 
