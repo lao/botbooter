@@ -34,10 +34,10 @@ var (
 	ErrFlowAlreadyRegistered = errors.New("botbooter: flow id already registered")
 )
 
-// NewFlow starts building a Flow with the given stable id. The id is load-bearing
-// for persistence and must stay stable across deploys: a future Store keys
-// in-flight state by it, and a renamed id orphans that state. The flow recognizes
-// the default cancel word until CancelWord changes it.
+// NewFlow starts building a Flow with the given stable id. In-flight conversation
+// state keys by it, so a flow renamed across a deploy orphans any conversation
+// mid-flow (its next message finds no matching flow and falls through). The flow
+// recognizes the default cancel word until CancelWord changes it.
 func NewFlow(id string) *Flow {
 	return &Flow{id: id, cancelWord: defaultCancelWord}
 }
@@ -62,8 +62,7 @@ func Validate(fn func(string) error) AskOption {
 
 // Secret marks a step's answer as sensitive. Its scope is precise:
 //
-//   - It keeps the answer out of the framework's own logging and excludes the key
-//     from any state serialized to a Store, so secrets never reach durable storage.
+//   - It keeps the answer out of the framework's own logging.
 //   - Its answer is stored with its exact bytes: ordinary answers are trimmed of
 //     surrounding whitespace, but a secret (password, token) keeps leading and
 //     trailing whitespace, which can be meaningful.

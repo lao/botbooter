@@ -27,23 +27,6 @@ func TestMemConversationStore_GetSetDelete(t *testing.T) {
 	asserts.False(t, ok, "absent after Delete")
 }
 
-func TestMemConversationStore_VersionBump(t *testing.T) {
-	s := newMemConversationStore()
-
-	s.Set("k", ConversationState{FlowID: "f"})
-	st, _ := s.Get("k")
-	asserts.Equal(t, st.Version, uint64(1), "first Set bumps Version to 1")
-
-	s.Set("k", ConversationState{FlowID: "f", Step: 1})
-	st, _ = s.Get("k")
-	asserts.Equal(t, st.Version, uint64(2), "second Set bumps Version to 2")
-
-	// A caller-supplied Version is ignored: the store owns the counter.
-	s.Set("k", ConversationState{FlowID: "f", Version: 99})
-	st, _ = s.Get("k")
-	asserts.Equal(t, st.Version, uint64(3), "store overrides a caller-supplied Version")
-}
-
 func TestMemConversationStore_ExpiredKeys(t *testing.T) {
 	s := newMemConversationStore()
 	now := time.Now()
@@ -113,30 +96,6 @@ func TestConversationManager_Sweep(t *testing.T) {
 	asserts.True(t, ok, "fresh entry survives")
 	_, ok = m.store.Get("noexpiry")
 	asserts.True(t, ok, "zero-ExpiresAt entry survives")
-}
-
-// fakeExpirer reports a fixed key set as expired regardless of the store's actual
-// contents, letting a test drive sweep's under-lock re-check independently of the
-// snapshot.
-type fakeExpirer struct {
-	*memConversationStore
-	report []string
-}
-
-func (f *fakeExpirer) expiredKeys(time.Time) []string { return f.report }
-
-func TestConversationManager_SweepRechecksUnderLock(t *testing.T) {
-	store := newMemConversationStore()
-	now := time.Now()
-	// The snapshot claims "k" is expired, but the store holds a fresh "k" — as if
-	// advance refreshed the TTL between the snapshot and the delete.
-	store.Set("k", ConversationState{FlowID: "f", ExpiresAt: now.Add(time.Hour)})
-	m := &conversationManager{store: &fakeExpirer{memConversationStore: store, report: []string{"k"}}}
-
-	m.sweep(now)
-
-	_, ok := m.store.Get("k")
-	asserts.True(t, ok, "the under-lock re-check spares a still-fresh entry")
 }
 
 func TestConversationManager_SweeperLifecycleExits(t *testing.T) {
@@ -361,30 +320,6 @@ func TestBot_SweeperLifecycle_ConnectDisconnect(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("sweeper goroutine did not exit after Disconnect (leak)")
 	}
-}
-
-// panicStore is a ConversationStore whose Delete panics, used to prove the
-// background sweeper recovers rather than crashing the process. expiredKeys/Get
-// are promoted from the embedded memConversationStore.
-type panicStore struct {
-	*memConversationStore
-}
-
-func (p *panicStore) Delete(string) { panic("store delete exploded") }
-
-func TestConversationManager_SweeperRecoversFromStorePanic(t *testing.T) {
-	store := newMemConversationStore()
-	store.Set("k", ConversationState{FlowID: "f", ExpiresAt: time.Now().Add(-time.Minute)})
-	m := &conversationManager{store: &panicStore{memConversationStore: store}}
-
-	// sweepRecovered must swallow the store's panic; if it propagated, the test
-	// binary would crash here.
-	m.sweepRecovered(time.Now(), nil)
-
-	// Delete panicked before removing the entry, so it remains — and the manager
-	// is still alive.
-	_, ok := store.Get("k")
-	asserts.True(t, ok, "a panicking Delete is recovered; the sweeper did not crash")
 }
 
 // TestConversationManager_SweepConcurrentWithAdvance hammers sweep against a

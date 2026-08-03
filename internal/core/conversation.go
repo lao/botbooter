@@ -27,20 +27,12 @@ const defaultSweepInterval = time.Minute
 const defaultFlowTimeout = 10 * time.Minute
 
 // ConversationState is the per-conversation flow state the engine carries between
-// messages. It is flat and serializable by design so a future durable Store can
-// persist it without migration; secret answers are excluded from any serialized
-// form (see flow.go). Version bumps on every Set within a key's lifetime; it is
-// unused by the single-instance v1 (the in-process striped locks suffice) and is
-// exercised from day one so the eventual Store-backed compare-and-swap path needs
-// no state change. It is not preserved across a delete-and-recreate of the same
-// key (a swept conversation that restarts begins again at 1) — the multi-instance
-// CAS path owns cross-lifetime versioning when it lands.
+// messages.
 type ConversationState struct {
 	FlowID    string
 	Step      int
 	Answers   map[string]string
 	ExpiresAt time.Time
-	Version   uint64
 }
 
 // isExpired reports whether s has a set expiry that is at or before now. A zero
@@ -49,31 +41,11 @@ func (s ConversationState) isExpired(now time.Time) bool {
 	return !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(now)
 }
 
-// ConversationStore persists per-conversation flow state by key. The default
-// implementation is in-memory (memConversationStore); the interface is the seam a
-// durable backend (e.g. Redis) drops into later. The conversationManager
-// serializes logical access per key with its striped locks, but a store is still
-// touched from the background sweeper, so implementations must be safe for
-// concurrent use.
-type ConversationStore interface {
-	Get(key string) (ConversationState, bool)
-	Set(key string, state ConversationState)
-	Delete(key string)
-}
-
-// expirer is the optional sweeper capability a ConversationStore may implement: it
-// reports the keys eligible for reaping at a given instant. memConversationStore
-// implements it; a backend with native TTLs (e.g. Redis) need not, and the
-// manager simply skips background sweeping for such a store. This mirrors the
-// AttachmentResolver optional-capability idiom in core.go.
-type expirer interface {
-	expiredKeys(now time.Time) []string
-}
-
-// memConversationStore is the default in-memory ConversationStore: a map guarded
-// by its own RWMutex, held only for the map access itself and never across a
-// validator. It is the volatile home for in-flight flows; a process restart loses
-// everything in it.
+// memConversationStore is the in-memory home for in-flight flow state: a map
+// guarded by its own RWMutex, held only for the map access itself and never
+// across a validator. A process restart loses everything in it. It is touched
+// both under the manager's striped locks and from the background sweeper, so its
+// own RWMutex keeps it safe for concurrent use.
 type memConversationStore struct {
 	mu sync.RWMutex
 	m  map[string]ConversationState
@@ -90,12 +62,10 @@ func (s *memConversationStore) Get(key string) (ConversationState, bool) {
 	return st, ok
 }
 
-// Set stores state under key, bumping Version past the previous value for the key
-// (1 for a fresh key) so the field is always monotonic and correct.
+// Set stores state under key.
 func (s *memConversationStore) Set(key string, state ConversationState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state.Version = s.m[key].Version + 1
 	s.m[key] = state
 }
 
@@ -120,12 +90,10 @@ func (s *memConversationStore) expiredKeys(now time.Time) []string {
 }
 
 // conversationManager owns the in-process coordination for flows: a fixed-size
-// striped lock set plus the background TTL sweeper. The ConversationStore behind
-// it owns only persistence. The user validator runs UNDER a shard lock, never
-// inside a store call, so a durable store can later sit behind compare-and-swap
-// without relocating the validator (which is arbitrary user Go code).
+// striped lock set plus the background TTL sweeper over the in-memory store. The
+// user validator runs UNDER a shard lock, never inside a store call.
 type conversationManager struct {
-	store ConversationStore
+	store *memConversationStore
 	locks [conversationShards]sync.Mutex
 }
 
@@ -159,11 +127,11 @@ func (m *conversationManager) withLock(key string, fn func()) {
 	fn()
 }
 
-// sweepRecovered runs sweep with a recover so a panic in a custom
-// ConversationStore cannot take down the sweeper goroutine (and with it the
-// process), mirroring the recover that guards dispatch in core.go. logger (may be
-// nil → slog.Default) is passed in rather than held on the manager so a sweeper
-// goroutine never shares mutable diagnostics state with a concurrent reconnect.
+// sweepRecovered runs sweep with a recover so a panic in it cannot take down the
+// sweeper goroutine (and with it the process), mirroring the recover that guards
+// dispatch in core.go. logger (may be nil → slog.Default) is passed in rather than
+// held on the manager so a sweeper goroutine never shares mutable diagnostics
+// state with a concurrent reconnect.
 func (m *conversationManager) sweepRecovered(now time.Time, logger *slog.Logger) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -178,13 +146,9 @@ func (m *conversationManager) sweepRecovered(now time.Time, logger *slog.Logger)
 
 // sweep deletes every expired entry as of now. It takes each key's shard lock and
 // re-checks expiry under it, so it can never race a concurrent advance that just
-// refreshed the entry's TTL. A store without the expirer capability is a no-op.
+// refreshed the entry's TTL.
 func (m *conversationManager) sweep(now time.Time) {
-	ex, ok := m.store.(expirer)
-	if !ok {
-		return
-	}
-	for _, key := range ex.expiredKeys(now) {
+	for _, key := range m.store.expiredKeys(now) {
 		m.withLock(key, func() {
 			if st, ok := m.store.Get(key); ok && st.isExpired(now) {
 				m.store.Delete(key)
@@ -236,8 +200,7 @@ func (a Answers) Lookup(key string) (string, bool) {
 }
 
 // flowStep is one question in a Flow: a prompt, the key its answer is stored
-// under, an optional validator, and whether the answer is a secret (excluded from
-// any serialized state — see flow.go).
+// under, an optional validator, and whether the answer is a secret (see flow.go).
 type flowStep struct {
 	key      string
 	prompt   string
@@ -366,9 +329,10 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 		return false, nil
 	}
 
-	// A Store-loaded state whose flow has since lost steps could index out of
-	// range; reap and fall through instead of panicking. (A bare panic would be
-	// eaten by dispatch's recover but leave the state in place to wedge every
+	// A state whose flow has since lost steps (a flow rebuilt with fewer steps
+	// across a reconnect) could index out of range; reap and fall through instead
+	// of panicking. (A bare panic would be eaten by dispatch's recover but leave
+	// the state in place to wedge every
 	// later message until its TTL.)
 	if state.Step < 0 || state.Step >= len(flow.steps) {
 		m.store.Delete(key)
@@ -456,9 +420,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 	}
 
 	// Otherwise advance, slide the TTL, and send the next prompt. The in-memory
-	// store volatile-holds the full state (secrets included, per the Secret()
-	// contract); secret exclusion happens only at the future durable-Store
-	// boundary.
+	// store volatile-holds the full state, secrets included per the Secret() contract.
 	state.Step++
 	slideTTL()
 	return true, send(flow.steps[state.Step].prompt)
