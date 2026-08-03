@@ -484,6 +484,12 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	a.drainDispatch(ctx)
 }
 
+// readSpy counts Read calls so a test can prove a shed request's body was
+// never touched.
+type readSpy struct{ reads int }
+
+func (s *readSpy) Read([]byte) (int, error) { s.reads++; return 0, io.EOF }
+
 // A saturated read semaphore must answer 503 before the (up to maxRequestBytes)
 // body is buffered, so a flood of large POSTs cannot exhaust memory ahead of the
 // signature check. Mirrors the github/gitlab sibling test.
@@ -493,14 +499,15 @@ func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
 	a.readSem <- struct{}{} // occupy the only inbound slot
 
 	var got []*core.Message
-	body := []byte(textWebhook)
-	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(textWebhook))
-	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, body))
+	spy := &readSpy{}
+	r := httptest.NewRequest(http.MethodPost, "/webhook", spy)
+	r.Header.Set(signatureHeader, sign(a.cfg.AppSecret, []byte(textWebhook)))
 	w := httptest.NewRecorder()
 	a.handleWebhook(context.Background(), w, r, captureDeps(&got, nil))
 
 	asserts.Equal(t, w.Code, http.StatusServiceUnavailable, "saturated read gate returns 503")
 	asserts.Equal(t, len(got), 0, "nothing dispatched")
+	asserts.Equal(t, spy.reads, 0, "shed request's body is never read")
 }
 
 func TestHandleWebhook_StatusOnlyIgnored(t *testing.T) {
