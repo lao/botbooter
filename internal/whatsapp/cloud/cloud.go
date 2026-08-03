@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,11 @@ const (
 	// dispatcher is saturated, so a burst of deliveries cannot spawn unbounded
 	// goroutines.
 	maxConcurrentDispatch = 256
+
+	// maxConcurrentReads bounds concurrent inbound request processing (the body
+	// read before signature verification), capping peak pre-auth read memory at
+	// maxConcurrentReads times maxRequestBytes. Mirrors the github/gitlab siblings.
+	maxConcurrentReads = 16
 
 	// maxErrorBodyBytes caps how much of a non-2xx response body is read into errors.
 	maxErrorBodyBytes = 4 << 10 // 4 KiB
@@ -148,6 +154,11 @@ type adapter struct {
 	// handler never releases is confined to that connection rather than leaking for
 	// the adapter's lifetime.
 	dispatchSem chan struct{}
+	// readSem bounds concurrent inbound request processing so a flood of large
+	// bodies can't buffer unbounded memory before signature verification (see
+	// maxConcurrentReads); separate from dispatchSem, which bounds dispatch
+	// goroutines. Allocated once in newAdapter and never reassigned.
+	readSem chan struct{}
 }
 
 // log returns the Bot's logger handed over at Connect, or slog.Default()
@@ -206,7 +217,7 @@ func newAdapter(cfg Config) (*adapter, error) {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch)}, nil
+	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: cfg.HTTPClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch), readSem: make(chan struct{}, maxConcurrentReads)}, nil
 }
 
 func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
@@ -288,6 +299,19 @@ func (a *adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
+	// Bound concurrent inbound reads before buffering the body: a flood of large
+	// bodies is shed with 503 (Meta retries) rather than buffering unbounded
+	// memory. readSem is allocated once in newAdapter, so this direct read races
+	// nothing. Separate from dispatchSem, which bounds post-ack dispatch.
+	select {
+	case a.readSem <- struct{}{}:
+	default:
+		a.log().Warn("whatsapp: inbound concurrency limit reached; shedding with 503", "limit", maxConcurrentReads)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { <-a.readSem }()
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -500,8 +524,10 @@ func (a *adapter) ResolveAttachmentURL(ctx context.Context, att core.Attachment)
 		return "", nil
 	}
 
-	url := fmt.Sprintf("%s/%s/%s", a.baseURL, a.cfg.GraphVersion, media.ID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// PathEscape the wire-derived media ID so it cannot alter the request path;
+	// it stays confined to the pinned graph.facebook.com host either way.
+	endpoint := fmt.Sprintf("%s/%s/%s", a.baseURL, a.cfg.GraphVersion, url.PathEscape(media.ID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
 	}

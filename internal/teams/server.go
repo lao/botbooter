@@ -30,6 +30,10 @@ const (
 	// inbound Activities cannot spawn unbounded work. The handler acquires a slot
 	// before acking and sheds load with 503 (the platform retries) when full.
 	maxConcurrentDispatch = 256
+	// maxConcurrentReads bounds concurrent inbound request processing (the body
+	// read + JSON unmarshal before JWT verification), capping peak pre-auth read
+	// memory at maxConcurrentReads times maxRequestBytes. Mirrors github/gitlab.
+	maxConcurrentReads = 16
 )
 
 // conversation holds what a reply needs: the serviceUrl to POST to and the bot's
@@ -103,17 +107,37 @@ func serve(srv *http.Server, ln net.Listener, done func(error)) {
 }
 
 func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
+	// Bound concurrent inbound reads before buffering + unmarshaling the body: a
+	// flood of large bodies is shed with 503 (the platform retries) rather than
+	// buffering unbounded memory. readSem is allocated once in newAdapter, so this
+	// direct read races nothing. Separate from dispatchSem, which bounds post-ack
+	// dispatch.
+	select {
+	case a.readSem <- struct{}{}:
+	default:
+		a.log().Warn("teams: inbound concurrency limit reached; shedding with 503", "limit", maxConcurrentReads)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
+		<-a.readSem
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	var act inboundActivity
 	if err := json.Unmarshal(body, &act); err != nil {
+		<-a.readSem
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	// Release the read slot as soon as the body is buffered + unmarshaled: unlike
+	// the GitHub/GitLab siblings, validateInbound below can block on a cold JWKS
+	// fetch (up to jwksFetchTimeout), so holding readSem across it would gate
+	// throughput far more aggressively than the fast HMAC path readSem is sized for.
+	<-a.readSem
 
 	// Authenticate before trusting the body. Use the request context, not runCtx:
 	// core cancels runCtx before srv.Shutdown drains this handler, so a JWKS
