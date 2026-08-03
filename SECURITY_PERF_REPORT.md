@@ -5,6 +5,12 @@ all ten adapters, the public facade, and the dependency graph. Method: static re
 every path in the plan, automated scanners (`govulncheck`, `gosec`, `golangci-lint`,
 `go vet`, `go test -race`), and cross-adapter consistency checks.
 
+> **Point-in-time snapshot (this PR's branch, 2026-08-03).** Scanner output and the
+> dependency/toolchain state drift as the tree and its graph move; re-run the tools listed
+> in `SECURITY_PERF_INVESTIGATION.md` rather than treating these results as current. Specific
+> advisory IDs and toolchain version numbers are deliberately kept out of this report so a
+> stale copy can't imply assurance it no longer has.
+
 ## 1. Executive overview
 
 **Security posture: strong.** The four internet-facing webhook adapters (GitHub, GitLab,
@@ -40,7 +46,6 @@ unmeasured; `BenchmarkDispatch` was judged speculative absent evidence of a prob
 |----|----------|------|----------|-------------|--------|
 | S1 | Low | DoS / consistency | `internal/teams/server.go:109-121`, `internal/whatsapp/cloud/cloud.go:302-313` | Teams & Cloud lacked the pre-auth read-concurrency semaphore (`readSem`, cap 16) that GitHub & GitLab have — the copied-scaffolding drift CLAUDE.md warns to sweep (locations are the fix as landed) | **Fixed** |
 | S2 | Info | Defense-in-depth | `internal/whatsapp/cloud/cloud.go:527-529` | Wire-derived `media.ID` interpolated into the Graph API URL path unescaped (location is the fix as landed) | **Fixed** |
-| S3 | Low | Dependencies | `go.mod:7` (stdlib `crypto/tls`) | `govulncheck` GO-2026-5856 (ECH privacy leak), fixed in go1.25.12 / go1.26.5; pinned toolchain is go1.25.11 — one patch behind | Accepted (see §4) |
 
 ### S1 — pre-auth read-concurrency parity (fixed)
 
@@ -86,9 +91,9 @@ host, so this is defense-in-depth only. Fix: `url.PathEscape(media.ID)`, matchin
 - **Send / dispatch perf** — shared pooled `http.Client` per adapter; middleware and regex
   composed once; no defer-in-loop; webhook dispatch bounded + shed. Signal's dispatch
   goroutine is uncapped but serially fed by a single receive socket (accepted).
-- **`govulncheck`** — of 5 reported, only `crypto/tls` (S3) is reachable; the other four
+- **`govulncheck`** — triaged reachable-vs-not: advisories against uncalled symbols
   (x/text infinite-loop, slack-go `SecretsVerifier`, os symlink, openpgp) are confirmed
-  **not called** by our code.
+  **not called** by our code. Re-run before relying on this; the advisory set moves.
 - **`gosec`** — 5 issues, all pre-existing `//nolint`'d with correct justifications (OAuth
   scope URL, header name, plain-text challenge echo, adapter-owned file paths). No new
   issues introduced by the fixes.
@@ -111,11 +116,10 @@ host, so this is defense-in-depth only. Fix: `url.PathEscape(media.ID)`, matchin
 
 **Done (this PR):** S1 (readSem parity), S2 (media.ID escape).
 
-**Quick wins (out of scope for this PR — dependency/toolchain, not code):**
-- Bump the pinned toolchain go1.25.11 → go1.25.12 (or go1.26.5+) to pick up the
-  crypto/tls fix and clear GO-2026-5856.
-- Opportunistically bump `slack-go` (`SecretsVerifier` CVE, uncalled) and `x/text` on the
-  next dependency sweep.
+**Quick wins (out of scope for this PR — dependency/toolchain, not code):** run
+`govulncheck` and a toolchain/dependency sweep at review time and act on whatever it
+reports then. Specific advisory IDs and toolchain versions are intentionally omitted here
+so this report can't drift into wrong as the graph moves.
 
 **Structural (only if evidence demands):** LRU/TTL on the GitHub reaction dedup set;
 a `readSem`-style cap on Signal dispatch. Neither is warranted at v1 loads.
