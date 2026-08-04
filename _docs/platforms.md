@@ -2,8 +2,10 @@
 
 How to provision credentials for each platform botbooter supports. Slack,
 Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
-Cloud API, Microsoft Teams, GitHub, GitLab and Bitbucket need cloud credentials
-plus a public HTTPS webhook; WhatsApp Web (whatsmeow) needs only a QR scan;
+Cloud API, Microsoft Teams, GitHub and GitLab need cloud credentials plus a
+public HTTPS webhook; Bitbucket needs an API or access token plus a webhook
+secret, against either Bitbucket Cloud or a self-hosted Data Center instance;
+WhatsApp Web (whatsmeow) needs only a QR scan;
 Signal needs no credentials at all, only a running signal-cli-rest-api container
 with a registered phone number; the CLI needs nothing.
 

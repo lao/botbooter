@@ -18,7 +18,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 
 ## Features
 
-- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), GitLab (Note Hook webhook — reply to issue and merge-request comments), Bitbucket (Cloud + Data Center webhook — reply to pull-request and issue comments), Signal (signal-cli-rest-api container), and a built-in **CLI adapter** for local development and testing with no credentials.
+- **One API, multiple platforms** — Slack (Socket Mode), Discord (Gateway), Telegram (long polling), WhatsApp (two flavors: Cloud API webhook, or WhatsApp Web via whatsmeow — QR-linked, no Meta account), Microsoft Teams (Azure Bot Framework webhook), GitHub (`issue_comment` webhook — reply to issue and PR comments), GitLab (Note Hook webhook — reply to issue and merge-request comments), Bitbucket (Cloud + Data Center webhook — reply to pull-request comments on both flavors, plus issue comments on Cloud), Signal (signal-cli-rest-api container), and a built-in **CLI adapter** for local development and testing with no credentials.
 - **Regex command routing** — patterns are compiled once and matched against message content; first match wins.
 - **Middleware chain** — wrap every message (logging, auth, metrics, …) with `next`-style composition.
 - **Emoji reactions** — register `bot.OnReaction` once and reply to reactions uniformly across Slack, Discord, Telegram, WhatsApp and GitHub (see [Reactions](#reactions)).
@@ -98,7 +98,7 @@ Import `botbooter` for the shared types plus the one `botbooter/<platform>` pack
 | `teams.New(cfg teams.Config)` | `(*Bot, error)` | Azure Bot Framework; runs an inbound webhook HTTP server. |
 | `github.New(cfg github.Config)` | `(*Bot, error)` | Issue/PR comments via `issue_comment` webhook; PAT or GitHub App auth. |
 | `gitlab.New(cfg gitlab.Config)` | `(*Bot, error)` | Issue/MR comments via Note Hook webhook; access-token auth. |
-| `bitbucket.New(cfg bitbucket.Config)` | `(*Bot, error)` | PR/issue comments via webhook; Cloud + Data Center in one package; API-token or access-token auth. |
+| `bitbucket.New(cfg bitbucket.Config)` | `(*Bot, error)` | PR comments (both flavors) + issue comments (Cloud only) via webhook; Cloud + Data Center in one package; API-token or access-token auth. |
 | `signal.New(cfg signal.Config)` | `(*Bot, error)` | REST + receive WebSocket to a signal-cli-rest-api container; no keys. |
 
 WhatsApp comes in **two flavors selected by import path** — `whatsapp/cloud` (official Meta Cloud API: Business account, webhook + public HTTPS URL, no third-party deps) and `whatsapp/whatsmeow` (unofficial WhatsApp Web multidevice protocol via [whatsmeow](https://github.com/tulir/whatsmeow): pair by QR code like WhatsApp Web, session persisted in a local SQLite file — `Config.DBPath`, default `botbooter-whatsapp-meow.db` in the working directory — no Meta account or webhook). Only the flavor you import is compiled into your binary.
