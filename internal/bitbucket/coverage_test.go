@@ -101,9 +101,10 @@ func TestResolveSelfCloud(t *testing.T) {
 
 // A cancelled context aborts the Cloud whoami probe.
 func TestResolveSelfCloudCancelled(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(500 * time.Millisecond)
-		_, _ = w.Write([]byte(`{"uuid":"{x}"}`))
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// Block until the connection is torn down (at srv.Close) rather than on a
+		// fixed sleep, so the orphaned probe request exits promptly.
+		<-r.Context().Done()
 	}))
 	defer srv.Close()
 	a := cloudTestAdapter(t, srv.URL)

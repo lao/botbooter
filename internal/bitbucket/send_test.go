@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	gobitbucket "github.com/ktrysmt/go-bitbucket"
@@ -53,26 +54,41 @@ func TestParseChannelID(t *testing.T) {
 	}
 }
 
-// capture records the last request a test server received.
+// capture records the last request a test server received. Its fields are written
+// from the server's handler goroutine and read from the test goroutine, so access
+// is guarded by mu.
 type capture struct {
+	mu     sync.Mutex
 	method string
 	path   string
 	body   map[string]any
 }
 
+func (c *capture) record(r *http.Request) {
+	raw, _ := io.ReadAll(r.Body)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.method, c.path = r.Method, r.URL.Path
+	_ = json.Unmarshal(raw, &c.body)
+}
+
+// snapshot returns the recorded request under the lock.
+func (c *capture) snapshot() (method, path string, body map[string]any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.method, c.path, c.body
+}
+
 func recordingServer(t *testing.T, status int) (*httptest.Server, *capture) {
 	t.Helper()
-	cap := &capture{}
+	rec := &capture{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cap.method = r.Method
-		cap.path = r.URL.Path
-		raw, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(raw, &cap.body)
+		rec.record(r)
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"id":1}`))
 	}))
 	t.Cleanup(srv.Close)
-	return srv, cap
+	return srv, rec
 }
 
 func cloudTestAdapter(t *testing.T, baseURL string) *adapter {
@@ -83,43 +99,46 @@ func cloudTestAdapter(t *testing.T, baseURL string) *adapter {
 }
 
 func TestSendCloudPullRequest(t *testing.T) {
-	srv, cap := recordingServer(t, http.StatusCreated)
+	srv, rec := recordingServer(t, http.StatusCreated)
 	a := cloudTestAdapter(t, srv.URL)
 
 	err := a.Send(context.Background(), "myws/myrepo!42", "hello", core.SendOptions{})
 	asserts.NoError(t, err, "send")
-	asserts.Equal(t, cap.method, http.MethodPost, "POST")
-	asserts.Equal(t, cap.path, "/repositories/myws/myrepo/pullrequests/42/comments", "PR comment URL")
-	content, _ := cap.body["content"].(map[string]any)
+	method, path, body := rec.snapshot()
+	asserts.Equal(t, method, http.MethodPost, "POST")
+	asserts.Equal(t, path, "/repositories/myws/myrepo/pullrequests/42/comments", "PR comment URL")
+	content, _ := body["content"].(map[string]any)
 	asserts.Equal(t, content["raw"], "hello", "content.raw carries the text")
-	_, hasParent := cap.body["parent"]
+	_, hasParent := body["parent"]
 	asserts.False(t, hasParent, "plain send omits parent")
 }
 
 func TestSendCloudPullRequestThreaded(t *testing.T) {
-	srv, cap := recordingServer(t, http.StatusCreated)
+	srv, rec := recordingServer(t, http.StatusCreated)
 	a := cloudTestAdapter(t, srv.URL)
 
 	err := a.SendThreaded(context.Background(), "myws/myrepo!42", "1001", "reply")
 	asserts.NoError(t, err, "send threaded")
-	parent, ok := cap.body["parent"].(map[string]any)
+	_, _, body := rec.snapshot()
+	parent, ok := body["parent"].(map[string]any)
 	asserts.True(t, ok, "parent set")
 	asserts.Equal(t, parent["id"].(float64), float64(1001), "parent.id is the reply target")
 }
 
 func TestSendCloudIssue(t *testing.T) {
-	srv, cap := recordingServer(t, http.StatusCreated)
+	srv, rec := recordingServer(t, http.StatusCreated)
 	a := cloudTestAdapter(t, srv.URL)
 
 	err := a.Send(context.Background(), "myws/myrepo#7", "issue reply", core.SendOptions{})
 	asserts.NoError(t, err, "send")
-	asserts.Equal(t, cap.path, "/repositories/myws/myrepo/issues/7/comments", "issue comment URL")
-	content, _ := cap.body["content"].(map[string]any)
+	_, path, body := rec.snapshot()
+	asserts.Equal(t, path, "/repositories/myws/myrepo/issues/7/comments", "issue comment URL")
+	content, _ := body["content"].(map[string]any)
 	asserts.Equal(t, content["raw"], "issue reply", "content.raw carries the text")
 }
 
 func TestSendDataCenterPullRequest(t *testing.T) {
-	srv, cap := recordingServer(t, http.StatusCreated)
+	srv, rec := recordingServer(t, http.StatusCreated)
 	a := &adapter{
 		dataCenter: true,
 		fl:         &serverFlavor{baseURL: srv.URL + dataCenterAPIPath, http: srv.Client(), applyAuth: func(*http.Request) {}},
@@ -127,15 +146,16 @@ func TestSendDataCenterPullRequest(t *testing.T) {
 
 	err := a.Send(context.Background(), "PROJ/myrepo!42", "dc hello", core.SendOptions{})
 	asserts.NoError(t, err, "send")
-	asserts.Equal(t, cap.method, http.MethodPost, "POST")
-	asserts.Equal(t, cap.path, dataCenterAPIPath+"/projects/PROJ/repos/myrepo/pull-requests/42/comments", "DC PR comment URL")
-	asserts.Equal(t, cap.body["text"], "dc hello", "DC body uses text, not content.raw")
-	_, hasContent := cap.body["content"]
+	method, path, body := rec.snapshot()
+	asserts.Equal(t, method, http.MethodPost, "POST")
+	asserts.Equal(t, path, dataCenterAPIPath+"/projects/PROJ/repos/myrepo/pull-requests/42/comments", "DC PR comment URL")
+	asserts.Equal(t, body["text"], "dc hello", "DC body uses text, not content.raw")
+	_, hasContent := body["content"]
 	asserts.False(t, hasContent, "DC body has no content.raw")
 }
 
 func TestSendDataCenterThreaded(t *testing.T) {
-	srv, cap := recordingServer(t, http.StatusCreated)
+	srv, rec := recordingServer(t, http.StatusCreated)
 	a := &adapter{
 		dataCenter: true,
 		fl:         &serverFlavor{baseURL: srv.URL + dataCenterAPIPath, http: srv.Client(), applyAuth: func(*http.Request) {}},
@@ -143,7 +163,8 @@ func TestSendDataCenterThreaded(t *testing.T) {
 
 	err := a.SendThreaded(context.Background(), "PROJ/myrepo!42", "3003", "reply")
 	asserts.NoError(t, err, "send threaded")
-	parent, ok := cap.body["parent"].(map[string]any)
+	_, _, body := rec.snapshot()
+	parent, ok := body["parent"].(map[string]any)
 	asserts.True(t, ok, "parent set")
 	asserts.Equal(t, parent["id"].(float64), float64(3003), "parent.id threads the reply")
 }

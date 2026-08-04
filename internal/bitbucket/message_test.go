@@ -57,6 +57,23 @@ func TestCloudParseComment(t *testing.T) {
 		asserts.NotNil(t, raw.CloudIssueComment, "cloud issue comment union set")
 	})
 
+	t.Run("FractionalTimestamp", func(t *testing.T) {
+		// Bitbucket Cloud can send fractional seconds with an explicit numeric
+		// offset; parseRFC3339 must preserve the instant and sub-second precision,
+		// not fall back to the zero time.
+		payload := `{
+			"actor": {"uuid": "{actor-uuid}"},
+			"repository": {"full_name": "myws/myrepo"},
+			"pullrequest": {"id": 42},
+			"comment": {"id": 1001, "content": {"raw": "x"}, "created_on": "2026-08-03T10:00:00.123456+00:00"}
+		}`
+		msg, ok := (&cloudFlavor{}).parseComment("pullrequest:comment_created", []byte(payload))
+		asserts.True(t, ok, "parsed")
+		want := time.Date(2026, 8, 3, 10, 0, 0, 123456000, time.UTC)
+		asserts.True(t, msg.Timestamp.Equal(want), "fractional-second timestamp preserved")
+		asserts.Equal(t, msg.Timestamp.Nanosecond(), 123456000, "sub-second precision preserved")
+	})
+
 	t.Run("Unparseable", func(t *testing.T) {
 		_, ok := (&cloudFlavor{}).parseComment("pullrequest:comment_created", []byte(`{not json`))
 		asserts.False(t, ok, "unparseable body rejected")

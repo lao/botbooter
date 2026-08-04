@@ -7,8 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,7 +34,7 @@ func sign(secret string, body []byte) string {
 func discardDeps(disp chan *core.Message) core.AdapterDeps {
 	return core.AdapterDeps{
 		Dispatch: func(_ context.Context, m *core.Message) { disp <- m },
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:   discardLogger(),
 	}
 }
 
@@ -56,7 +54,7 @@ func newCloudAdapter(t *testing.T) *adapter {
 	t.Helper()
 	a, err := newAdapter(Config{Secret: testSecret, Addr: "127.0.0.1:0", Email: "e@x", APIToken: "tok"})
 	asserts.NoError(t, err, "new adapter")
-	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	a.logger = discardLogger()
 	return a
 }
 
@@ -144,7 +142,7 @@ func TestIngressDataCenter(t *testing.T) {
 	disp := make(chan *core.Message, 1)
 	a, err := newAdapter(Config{Secret: testSecret, Addr: "127.0.0.1:0", AccessToken: "tok", BaseURL: "https://bb.example.com", Self: "someone-else"})
 	asserts.NoError(t, err, "dc adapter")
-	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	a.logger = discardLogger()
 	body := []byte(serverPRComment)
 	rec := serveWebhook(a, discardDeps(disp), "pr:comment:added", body, sign(testSecret, body))
 	asserts.Equal(t, rec.Code, http.StatusOK, "acked")
@@ -227,7 +225,7 @@ func TestOnPullRequestCallback(t *testing.T) {
 			OnPullRequest: func(_ context.Context, ev *PullRequestEvent) { got <- ev }}
 		a, err := newAdapter(cfg)
 		asserts.NoError(t, err, "adapter")
-		a.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		a.logger = discardLogger()
 		body := []byte(cloudPREvent)
 		rec := serveWebhook(a, core.AdapterDeps{Logger: a.logger}, "pullrequest:created", body, sign(testSecret, body))
 		asserts.Equal(t, rec.Code, http.StatusOK, "acked")
@@ -252,7 +250,7 @@ func TestOnPullRequestCallback(t *testing.T) {
 			OnPullRequest: func(_ context.Context, ev *PullRequestEvent) { got <- ev }}
 		a, err := newAdapter(cfg)
 		asserts.NoError(t, err, "adapter")
-		a.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		a.logger = discardLogger()
 		a.self = "{pr-actor}" // matches cloudPREvent author
 		body := []byte(cloudPREvent)
 		rec := serveWebhook(a, core.AdapterDeps{Logger: a.logger}, "pullrequest:created", body, sign(testSecret, body))
@@ -270,7 +268,7 @@ func TestOnPullRequestCallback(t *testing.T) {
 			OnPullRequest: func(_ context.Context, ev *PullRequestEvent) { got <- ev }}
 		a, err := newAdapter(cfg)
 		asserts.NoError(t, err, "adapter")
-		a.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		a.logger = discardLogger()
 		body := []byte(cloudPREvent)
 		// pullrequest:approved is not a reviewable-content change → catUnknown.
 		rec := serveWebhook(a, core.AdapterDeps{Logger: a.logger}, "pullrequest:approved", body, sign(testSecret, body))
@@ -289,7 +287,7 @@ func TestOnPushCallback(t *testing.T) {
 		OnPush: func(_ context.Context, ev *PushEvent) { got <- ev }}
 	a, err := newAdapter(cfg)
 	asserts.NoError(t, err, "adapter")
-	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	a.logger = discardLogger()
 	body := []byte(cloudPushEvent)
 	rec := serveWebhook(a, core.AdapterDeps{Logger: a.logger}, "repo:push", body, sign(testSecret, body))
 	asserts.Equal(t, rec.Code, http.StatusOK, "acked")
@@ -411,7 +409,7 @@ func TestConnectWhoamiBudget(t *testing.T) {
 func TestDisconnectDrainDeadline(t *testing.T) {
 	a, err := newAdapter(Config{Secret: testSecret, Addr: "127.0.0.1:0", AccessToken: "tok", Self: "someone-else"})
 	asserts.NoError(t, err, "adapter")
-	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	a.logger = discardLogger()
 	a.drainBudget = 10 * time.Millisecond
 
 	deps := core.AdapterDeps{
@@ -442,7 +440,7 @@ func TestDisconnectDrainDeadline(t *testing.T) {
 func TestReconnect(t *testing.T) {
 	a, err := newAdapter(Config{Secret: testSecret, Addr: "127.0.0.1:0", AccessToken: "tok", Self: "someone-else"})
 	asserts.NoError(t, err, "adapter")
-	a.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	a.logger = discardLogger()
 	deps := core.AdapterDeps{
 		Dispatch:   func(context.Context, *core.Message) {},
 		Disconnect: func() error { return a.Disconnect() },
