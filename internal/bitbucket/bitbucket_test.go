@@ -23,6 +23,8 @@ func TestNewValidation(t *testing.T) {
 		{name: "MissingAddr", cfg: Config{Secret: "s", Email: "e", APIToken: "t"}, wantErr: ErrMissingConfig},
 		{name: "NoAuth", cfg: Config{Secret: "s", Addr: ":0"}, wantErr: ErrMissingConfig},
 		{name: "BothAuthModes", cfg: Config{Secret: "s", Addr: ":0", Email: "e", APIToken: "t", AccessToken: "a"}, wantErr: ErrAmbiguousAuth},
+		{name: "AccessTokenWithEmail", cfg: Config{Secret: "s", Addr: ":0", Email: "e", AccessToken: "a", Self: "{me}"}, wantErr: ErrAmbiguousAuth},
+		{name: "AccessTokenWithAPIToken", cfg: Config{Secret: "s", Addr: ":0", APIToken: "t", AccessToken: "a", Self: "{me}"}, wantErr: ErrAmbiguousAuth},
 		{name: "AccessTokenNoSelf", cfg: Config{Secret: "s", Addr: ":0", AccessToken: "a"}, wantErr: ErrMissingConfig},
 		{name: "DataCenterNoSelf", cfg: Config{Secret: "s", Addr: ":0", Email: "e", APIToken: "t", BaseURL: "https://bb.example.com"}, wantErr: ErrMissingConfig},
 	}
@@ -42,6 +44,7 @@ func TestNewValid(t *testing.T) {
 		{name: "CloudAPIToken", cfg: baseCloud()},
 		{name: "CloudAccessToken", cfg: Config{Secret: "s", Addr: ":0", AccessToken: "a", Self: "{me}"}},
 		{name: "DataCenter", cfg: Config{Secret: "s", Addr: ":0", Email: "e", APIToken: "t", BaseURL: "https://bb.example.com", Self: "botuser"}},
+		{name: "DataCenterAccessToken", cfg: Config{Secret: "s", Addr: ":0", AccessToken: "a", BaseURL: "https://bb.example.com", Self: "botuser"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,9 +86,15 @@ func TestRequestByteLimitScales(t *testing.T) {
 	asserts.NoError(t, err, "small adapter")
 	asserts.Equal(t, small.maxRequestBytes, int64(smallRequestBytes), "comment-only bot keeps small cap")
 
-	cfg := baseCloud()
-	cfg.OnPush = func(context.Context, *PushEvent) {}
-	large, err := newAdapter(cfg)
-	asserts.NoError(t, err, "large adapter")
-	asserts.Equal(t, large.maxRequestBytes, int64(largeRequestBytes), "push bot raises the cap")
+	pushCfg := baseCloud()
+	pushCfg.OnPush = func(context.Context, *PushEvent) {}
+	pushAdapter, err := newAdapter(pushCfg)
+	asserts.NoError(t, err, "push adapter")
+	asserts.Equal(t, pushAdapter.maxRequestBytes, int64(largeRequestBytes), "push bot raises the cap")
+
+	prCfg := baseCloud()
+	prCfg.OnPullRequest = func(context.Context, *PullRequestEvent) {}
+	prAdapter, err := newAdapter(prCfg)
+	asserts.NoError(t, err, "pull-request adapter")
+	asserts.Equal(t, prAdapter.maxRequestBytes, int64(largeRequestBytes), "pull-request bot raises the cap")
 }

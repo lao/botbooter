@@ -279,7 +279,10 @@ func newAdapter(cfg Config) (*adapter, error) {
 
 	apiTokenMode := cfg.Email != "" && cfg.APIToken != ""
 	accessMode := cfg.AccessToken != ""
-	if apiTokenMode && accessMode {
+	// An access token alongside ANY Basic-auth field — even just one of
+	// Email/APIToken — is ambiguous: the caller has half-specified two modes, and
+	// silently ignoring the stray field would pick a mode they may not have meant.
+	if accessMode && (cfg.Email != "" || cfg.APIToken != "") {
 		return nil, ErrAmbiguousAuth
 	}
 	if !apiTokenMode && !accessMode {
