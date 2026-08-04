@@ -193,6 +193,9 @@ func (f *serverFlavor) postComment(ctx context.Context, t commentTarget, text st
 		return fmt.Errorf("bitbucket: create pull request comment on %s/%s!%d: unexpected status %d: %s",
 			t.project, t.repo, t.id, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
+	// Drain a bounded amount of the success body so the keep-alive connection can
+	// be reused rather than dropped when we close it.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	return nil
 }
 
