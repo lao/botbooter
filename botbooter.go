@@ -1,16 +1,18 @@
 // Package botbooter holds the platform-agnostic shared types for building chat
 // bots that behave the same way across Slack, Discord, Telegram, WhatsApp,
-// Microsoft Teams, GitHub, GitLab, Signal and a local CLI.
+// Microsoft Teams, GitHub, GitLab, Bitbucket, Signal and a local CLI.
 //
 // This package is SDK-free: it imports no platform SDK and only re-exports the
 // shared types from internal/core. Construct a bot from one of the per-platform
 // packages — botbooter/slack, botbooter/discord, botbooter/telegram,
 // botbooter/whatsapp/cloud, botbooter/whatsapp/whatsmeow, botbooter/teams,
-// botbooter/github, botbooter/gitlab, botbooter/signal or botbooter/cli — each
-// of which pulls in only its own platform SDK (WhatsApp Cloud API and Teams
-// speak REST APIs over plain HTTP and need none; GitHub pulls google/go-github
-// plus bradleyfalzon/ghinstallation for GitHub App auth; GitLab pulls
-// gitlab.com/gitlab-org/api/client-go; Signal speaks REST plus a receive
+// botbooter/github, botbooter/gitlab, botbooter/bitbucket, botbooter/signal or
+// botbooter/cli — each of which pulls in only its own platform SDK (WhatsApp
+// Cloud API and Teams speak REST APIs over plain HTTP and need none; GitHub
+// pulls google/go-github plus bradleyfalzon/ghinstallation for GitHub App auth;
+// GitLab pulls gitlab.com/gitlab-org/api/client-go; Bitbucket pulls
+// ktrysmt/go-bitbucket for its Cloud REST 2.0 client and speaks plain HTTP to
+// Data Center; Signal speaks REST plus a receive
 // WebSocket to a signal-cli-rest-api container and pulls only the
 // gorilla/websocket transport), then drive it through the shared types
 // re-exported here. A bot that uses one platform never compiles the other
@@ -64,6 +66,7 @@ const (
 	WhatsMeowBotType = core.WhatsMeowBotType
 	GitHubBotType    = core.GitHubBotType
 	GitLabBotType    = core.GitLabBotType
+	BitbucketBotType = core.BitbucketBotType
 	SignalBotType    = core.SignalBotType
 )
 

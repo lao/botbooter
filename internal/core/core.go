@@ -39,6 +39,7 @@ const (
 	WhatsMeowBotType
 	GitHubBotType
 	GitLabBotType
+	BitbucketBotType
 	SignalBotType
 )
 
@@ -64,6 +65,8 @@ func (t BotType) String() string {
 		return "github"
 	case GitLabBotType:
 		return "gitlab"
+	case BitbucketBotType:
+		return "bitbucket"
 	case SignalBotType:
 		return "signal"
 	default:

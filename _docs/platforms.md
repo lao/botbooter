@@ -2,8 +2,10 @@
 
 How to provision credentials for each platform botbooter supports. Slack,
 Discord and Telegram need tokens (from their app portals or BotFather); WhatsApp
-Cloud API, Microsoft Teams, GitHub and GitLab need cloud credentials
-plus a public HTTPS webhook; WhatsApp Web (whatsmeow) needs only a QR scan;
+Cloud API, Microsoft Teams, GitHub and GitLab need cloud credentials plus a
+public HTTPS webhook; Bitbucket needs an API or access token plus a webhook
+secret, against either Bitbucket Cloud or a self-hosted Data Center instance;
+WhatsApp Web (whatsmeow) needs only a QR scan;
 Signal needs no credentials at all, only a running signal-cli-rest-api container
 with a registered phone number; the CLI needs nothing.
 
@@ -18,6 +20,7 @@ with a registered phone number; the CLI needs nothing.
 - Microsoft Teams, [Azure Bot resource](https://learn.microsoft.com/azure/bot-service/abs-quickstart) · [Bot Framework authentication](https://learn.microsoft.com/azure/bot-service/rest-api/bot-framework-rest-connector-authentication)
 - GitHub, [Webhooks](https://docs.github.com/webhooks) · [Creating a GitHub App](https://docs.github.com/apps/creating-github-apps) · [Personal access tokens](https://docs.github.com/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 - GitLab, [Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/) · [Webhook events](https://docs.gitlab.com/user/project/integrations/webhook_events/) · [Personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/)
+- Bitbucket, [Cloud webhooks](https://support.atlassian.com/bitbucket-cloud/docs/manage-webhooks/) · [Cloud event payloads](https://support.atlassian.com/bitbucket-cloud/docs/event-payloads/) · [API tokens](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/) · [Data Center webhooks](https://confluence.atlassian.com/bitbucketserver/manage-webhooks-938025878.html)
 - Signal, [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) · [API reference](https://bbernhard.github.io/signal-cli-rest-api/)
 - CLI, [`_examples/basic`](../_examples/basic) and the [README Quickstart](../README.md#quickstart)
 
@@ -737,6 +740,158 @@ the right outcome.
 
 ---
 
+## Bitbucket
+
+botbooter listens for **pull-request and issue comment webhooks** and replies by
+creating comments through the Bitbucket REST API. **One package serves both
+flavors**, selected by `Config.BaseURL`: empty targets **Bitbucket Cloud** (REST
+2.0 via [ktrysmt/go-bitbucket](https://github.com/ktrysmt/go-bitbucket)), a value
+like `https://bitbucket.example.com` targets a **Data Center** instance (REST 1.0
+over plain HTTP; the `/rest/api/1.0` prefix is appended for you). Like WhatsApp,
+Teams, GitHub and GitLab, the adapter runs its own webhook server: it binds a
+local `Addr`, and you put a **TLS-terminating reverse proxy** (or ngrok while
+developing) in front and register the public HTTPS URL as the repository webhook.
+
+Issue comments are **Cloud only** — Data Center has no issue tracker — so a
+`workspace/repo#N` channel id on a Data Center bot is rejected. Bitbucket has
+**no comment reactions** on either flavor, so there is no reaction ingress (a
+permanent omission, not a future slice), and comments carry markdown with no
+upload channel, so `GetAttachments` returns none.
+
+**Two auth modes, pick exactly one** ([app passwords were removed
+platform-wide on 2026-07-28](https://www.atlassian.com/blog/bitbucket/app-passwords-deprecation)
+and are never offered):
+
+- **API token** (`Config.Email` + `Config.APIToken`) — an
+  [Atlassian API token](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/),
+  sent as HTTP Basic `email:token`. This is user-bound, so on Cloud the bot
+  resolves its own identity at connect via `GET /2.0/user` and `Config.Self` is
+  optional.
+- **Access token** (`Config.AccessToken`) — a repository, project or workspace
+  access token, sent as Bearer. These are **not bound to a user account**, so
+  `GET /2.0/user` returns `401` for them; `Config.Self` is therefore **required**
+  in access-token mode. It is also required on **Data Center** (which has no
+  whoami endpoint at all). Set it to the bot's own **account UUID** (`{…}`) on
+  Cloud, or its **user slug** on Data Center — it is how the adapter drops its own
+  comments to avoid reply loops.
+
+#### Step 1, Create the webhook
+
+On the repository (Cloud: *Repository settings → Webhooks → Add webhook*; Data
+Center: *Repository settings → Webhooks → Create webhook*):
+
+- **URL**: your public `https://…/webhook` endpoint (from ngrok or your proxy).
+- **Secret**: a random string; the adapter **requires** it and verifies the
+  `X-Hub-Signature` HMAC-SHA256 of the raw body against it (the same header and
+  algorithm on both flavors), rejecting a mismatch with `401`.
+- **Triggers**: the **comment** events — Cloud *Pull request → Comment created*
+  and *Issue → Comment created*; Data Center *Pull request → Comment added*. Add
+  the PR-changed and push triggers (Cloud *Pull request created/updated*,
+  *Repository push*; Data Center *Pull request opened/source updated*, *Repository
+  push*) only if you set the matching `Config` callback; every other enabled
+  trigger is acked and ignored.
+
+#### Step 2, Run the bot
+
+```go
+import "github.com/lao/botbooter/bitbucket"
+
+bot, err := bitbucket.New(bitbucket.Config{
+	Email:    os.Getenv("BITBUCKET_EMAIL"),     // API-token (Basic) auth …
+	APIToken: os.Getenv("BITBUCKET_API_TOKEN"), // … both together
+	Secret:   os.Getenv("BITBUCKET_SECRET"),    // the webhook's secret
+	Addr:     ":8080",                          // a bare "8080" is accepted
+})
+```
+
+Optional `bitbucket.Config` fields: `AccessToken` (the Bearer alternative to
+`Email`+`APIToken`), `Self` (required for access-token mode and Data Center),
+`Path` (webhook route, default `/webhook`), `BaseURL` (a Data Center instance;
+empty targets Cloud), `HTTPClient` (the outbound API client; defaults to a
+30-second timeout), and two callbacks that route further deliveries on the same
+endpoint — `OnPullRequest` (reviewable actions only — Cloud
+`pullrequest:created`/`updated`, Data Center `pr:opened`/`pr:from_ref_updated`;
+PRs the bot authored are dropped) and `OnPush` (unfiltered — ref filtering is the
+callback's job). Both run on dispatch goroutines covered by the shutdown drain, so
+hand long work off and return. Unset, those deliveries are acked and dropped.
+
+#### Step 3, Expose the local server
+
+```bash
+ngrok http 8080
+```
+
+Point the webhook's URL at `https://…/webhook`, then comment on any pull request
+(or Cloud issue) in the repository. Comment from an account **other than the
+bot's**: the adapter drops the bot's own comments by actor identity, but Bitbucket
+comment webhooks carry no bot flag, so *other* bots' comments are still dispatched
+— guard reply-emitting handlers if two bots share a repository.
+
+`Message.ChannelID` is `workspace/repo!N` for a pull request or `workspace/repo#N`
+for a Cloud issue (Data Center uses the project key: `PROJECTKEY/repo!N`, and a
+personal repository's `~USERNAME/repo!N`), so
+replies land on the same pull request or issue, and `bitbucket.SendThreaded` (used
+by `bot.ReplyToMessage`) nests a reply under a comment's `parent.id` on both
+flavors. `bitbucket.RawEvent(m)` returns a `*bitbucket.Message` with exactly one
+of `CloudPRComment`, `CloudIssueComment` and `ServerPRComment` set, and
+`bitbucket.CloudClient(bot)` exposes the ktrysmt Cloud client for anything beyond
+commenting — **it is `nil` on a Data Center bot**, whose replies go out over plain
+`net/http`. `bitbucket.Addr(bot)` reports the bound address when you bind `:0`.
+
+**Comment edits are ignored.** An edit arrives under a separate event key
+(`pullrequest:comment_updated` / `pr:comment:edited`) the adapter does not route,
+so — unlike GitLab — there is no in-payload edit action to filter; only the
+*created*/*added* keys dispatch.
+
+Every authentic delivery is acked `200` — *before* dispatch, and also when it is
+dropped (self-authored, an edit, an unhandled key, a nil callback), unreadable
+(over the body cap, or truncated), unparseable or shed under a concurrency bound.
+An unreadable/unparseable body and a shed delivery are logged as warnings; the
+other drops are silent. The one exception is the `401` on a bad signature. This
+matters because **Bitbucket Cloud times a delivery out at 10 seconds and retries a
+failure twice with no backoff** (it does **not** auto-disable a hook like GitLab),
+so a slow or `5xx` response turns into duplicate deliveries. A retry after our own
+timeout, or a manual *Resend*, can also double-deliver, so **handlers must be
+idempotent** — never assume a comment is received exactly once.
+
+**Environment variables** (suggested names; the config is plain Go):
+
+| Variable | Value |
+|---|---|
+| `BITBUCKET_EMAIL` | Atlassian account email; required with `BITBUCKET_API_TOKEN` |
+| `BITBUCKET_API_TOKEN` | Atlassian API token (Basic auth); pair with `BITBUCKET_EMAIL` |
+| `BITBUCKET_ACCESS_TOKEN` | repository/project/workspace access token (Bearer); alternative to the two above |
+| `BITBUCKET_SELF` | bot's account UUID (Cloud) or user slug (DC); required for access-token mode and Data Center |
+| `BITBUCKET_SECRET` | webhook secret for the `X-Hub-Signature` HMAC; required |
+| `BITBUCKET_ADDR` | local bind address, e.g. `:8080` (a bare port is accepted) |
+| `BITBUCKET_PATH` | optional webhook route; defaults to `/webhook` |
+| `BITBUCKET_BASE_URL` | optional Data Center instance URL; empty targets Bitbucket Cloud |
+
+#### No response?
+
+- **`401` on every delivery**: the webhook's secret does not match `Secret`, so
+  the `X-Hub-Signature` HMAC fails. Fix the secret on the webhook.
+- **`New` returns an error**: both auth modes set, or neither, is
+  `bitbucket.ErrAmbiguousAuth`; a missing `Secret`/`Addr`, or a missing `Self` in
+  access-token mode or on Data Center, is `bitbucket.ErrMissingConfig`.
+- **`200` but no reply**: the comment's author is the bot itself (ignored by
+  design), the delivery was an edit or an unhandled key, or no registered pattern
+  matched. Check the bot's log — an oversized/truncated/unparseable body or a
+  saturated concurrency bound is acked `200` and logged as a warning. On Cloud in
+  API-token mode, check the startup log — if `GET /2.0/user` cannot resolve the
+  bot shuts down (a bot that cannot recognize itself would reply-loop); in
+  access-token mode or on Data Center this is why `Self` is required.
+- **Replies fail / `Send` errors**: the token lacks permission on the repository,
+  or a `workspace/repo#N` issue channel id was used on a Data Center bot (issues
+  are Cloud only) — both unwrap as `bitbucket.ErrBadChannelID` for the channel-id
+  case, with `errors.Is`.
+- **Endpoint never hit**: the webhook URL must be your public `https://…/webhook`
+  and reach `Addr` through the proxy; only `POST` is accepted on the route.
+
+**Official docs:** [Cloud webhooks](https://support.atlassian.com/bitbucket-cloud/docs/manage-webhooks/) · [Cloud event payloads](https://support.atlassian.com/bitbucket-cloud/docs/event-payloads/) · [API tokens](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/) · [Data Center webhooks](https://confluence.atlassian.com/bitbucketserver/manage-webhooks-938025878.html) · [ngrok](https://ngrok.com/download)
+
+---
+
 ## Signal
 
 Signal has no official bot API, so botbooter talks to a
@@ -923,6 +1078,7 @@ Two options carry the anchor:
 | **Teams** | — (options ignored) | — | — | always a plain channel send |
 | **GitHub** | — (options ignored) | — | — | always a plain issue comment (issue comment threads are flat — a reply already lands in the conversation) |
 | **GitLab** | — (options ignored) | — | — | always a plain note (threading via GitLab discussions — the payload's `discussion_id` — is a deliberate v1 omission) |
+| **Bitbucket** | `m.ID` (the comment id) | a **comment id** | `parent.id` on the new comment (Cloud and Data Center) | plain top-level comment |
 | **Signal** | — (options ignored) | — | — | always a plain channel send (quoted replies are a possible follow-up) |
 | **CLI** | — (options ignored) | — | — | always a plain channel send |
 
