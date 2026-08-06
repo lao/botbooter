@@ -382,6 +382,27 @@ func TestConnectWhoamiFailureFatal(t *testing.T) {
 	}
 }
 
+// A whoami that succeeds but returns an empty identity is as fatal as an error:
+// an empty self silently disables the reply-loop guard, so the bot must not serve.
+func TestConnectWhoamiEmptyIdentityFatal(t *testing.T) {
+	a := newCloudAdapter(t)
+	a.fl = &stubFlavor{} // self == "", err == nil
+	done := make(chan error, 1)
+	deps := core.AdapterDeps{
+		Dispatch:   func(context.Context, *core.Message) {},
+		Done:       func(err error) { done <- err },
+		Disconnect: func() error { return a.Disconnect() },
+		Logger:     a.logger,
+	}
+	asserts.NoError(t, a.Connect(context.Background(), deps), "connect returns (probe is async)")
+	select {
+	case err := <-done:
+		asserts.ErrorIs(t, err, ErrMissingConfig, "empty identity reported via Done")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done not called on empty identity")
+	}
+}
+
 // A hanging whoami is bounded by selfResolveBudget, so Connect does not leave the
 // listener bound forever.
 func TestConnectWhoamiBudget(t *testing.T) {
