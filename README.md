@@ -7,6 +7,14 @@
 [![Releases](https://img.shields.io/github/v/release/lao/botbooter.svg?include_prereleases&color=blue)](https://github.com/lao/botbooter/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+<p align="center">
+  <a href="https://raw.githubusercontent.com/lao/botbooter/main/.github/assets/lao_botbooter_oblique.svg">
+    <img src=".github/assets/lao_botbooter_oblique.svg" alt="lao/botbooter repository terrain — 145 files rendered as an oblique code map; hover or focus a file to inspect it, activate its link to open the file on GitHub" width="100%">
+  </a>
+</p>
+
+> _Interactive map — [open the SVG directly](https://raw.githubusercontent.com/lao/botbooter/main/.github/assets/lao_botbooter_oblique.svg) to hover, focus, and click files (GitHub renders it statically inline)._
+
 > A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, GitLab, Bitbucket, Signal, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
 Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command handlers and optional middleware, then run the bot. botbooter abstracts the platform behind a single `Bot` type so your business logic does not care whether a message came from Slack, Discord, Telegram, WhatsApp, Microsoft Teams, a GitHub issue or PR comment, a GitLab issue or merge-request note, a Bitbucket pull-request or issue comment, Signal, or stdin.
