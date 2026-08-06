@@ -247,6 +247,12 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 			probeCtx, cancel := context.WithTimeout(ctx, a.selfResolveBudget)
 			self, resolveErr := a.fl.resolveSelf(probeCtx)
 			cancel()
+			// An empty identity with no error (e.g. whoami returns a blank uuid)
+			// is as dangerous as a failure: isSelf would never match, silently
+			// disabling the reply-loop guard. Treat it as fatal, like GitLab does.
+			if resolveErr == nil && self == "" {
+				resolveErr = fmt.Errorf("%w: whoami returned an empty identity", ErrMissingConfig)
+			}
 			if resolveErr != nil {
 				_ = ln.Close()        // Serve never runs, so nothing else closes it
 				if ctx.Err() == nil { // a canceled startup is a shutdown, not a failure
