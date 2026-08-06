@@ -161,7 +161,7 @@ per-user state machine. Register it like a command; a matching message starts it
 and each later message from that conversation is routed to the active flow.
 
 ```go
-signup := botbooter.NewFlow("signup"). // id must be stable (load-bearing for persistence)
+signup := botbooter.NewFlow("signup"). // id must be stable (in-flight state keys by it)
 	Ask("name", "What's your name?").
 	Ask("email", "What's your email?", botbooter.Validate(validEmail)).
 	Ask("password", "Choose a password.", botbooter.Secret()).
@@ -207,9 +207,9 @@ Things to know (v1):
   attachment (stickers, locations, member joins, …) before dispatch, mirroring their
   ordinary message handling. Mid-flow this means such a message neither answers a
   step (no empty-answer re-prompt) nor slides the idle TTL — a text reply does both.
-- **`Secret()`** keeps an answer out of framework logs and any future serialized
-  `Store` state. It is **not** encryption, does not police your own middleware, and
-  does not hide the answer from other members of a public channel.
+- **`Secret()`** keeps an answer out of framework logs. It is **not** encryption,
+  does not police your own middleware, and does not hide the answer from other
+  members of a public channel.
 - **In-memory only.** In-flight flows live in memory and are lost on restart;
   v1 is single-instance. (A pluggable `Store` and multi-instance are on the roadmap.)
 - **Best-effort ordering.** State is never corrupted under concurrent delivery, but a
