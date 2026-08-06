@@ -211,7 +211,7 @@ Things to know (v1):
   does not police your own middleware, and does not hide the answer from other
   members of a public channel.
 - **In-memory only.** In-flight flows live in memory and are lost on restart;
-  v1 is single-instance. (A pluggable `Store` and multi-instance are on the roadmap.)
+  v1 is single-instance.
 - **Best-effort ordering.** State is never corrupted under concurrent delivery, but a
   user who sends faster than prompts arrive may have an answer matched to a later step.
 - **Restart needs cancel.** Re-triggering a flow while it is active is consumed as an
