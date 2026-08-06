@@ -115,8 +115,8 @@ func NewFlow(id string) *Flow { return core.NewFlow(id) }
 // step. See [core.Validate].
 func Validate(fn func(string) error) AskOption { return core.Validate(fn) }
 
-// Secret marks a flow step's answer sensitive: kept out of framework logs and any
-// future serialized Store state. It is not encryption. See [core.Secret].
+// Secret marks a flow step's answer sensitive: kept out of framework logs. It is
+// not encryption. See [core.Secret].
 func Secret() AskOption { return core.Secret() }
 
 // InReplyTo anchors a send on m so the adapter posts into m's thread or

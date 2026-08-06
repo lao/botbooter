@@ -126,8 +126,7 @@ func (a Answers) Lookup(key string) (string, bool) {
 }
 
 // flowStep is one question in a Flow: a prompt, the key its answer is stored
-// under, an optional validator, and whether the answer is a secret (excluded from
-// any serialized state — see flow.go).
+// under, an optional validator, and whether the answer is a secret (see flow.go).
 type flowStep struct {
 	key      string
 	prompt   string
@@ -256,9 +255,10 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 		return false, nil
 	}
 
-	// A Store-loaded state whose flow has since lost steps could index out of
-	// range; reap and fall through instead of panicking. (A bare panic would be
-	// eaten by dispatch's recover but leave the state in place to wedge every
+	// A state whose flow has since lost steps (a flow rebuilt with fewer steps
+	// across a reconnect) could index out of range; reap and fall through instead
+	// of panicking. (A bare panic would be eaten by dispatch's recover but leave
+	// the state in place to wedge every
 	// later message until its TTL.)
 	if state.Step < 0 || state.Step >= len(flow.steps) {
 		m.del(key)
@@ -346,9 +346,7 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 	}
 
 	// Otherwise advance, slide the TTL, and send the next prompt. The in-memory
-	// store volatile-holds the full state (secrets included, per the Secret()
-	// contract); secret exclusion happens only at the future durable-Store
-	// boundary.
+	// store volatile-holds the full state, secrets included per the Secret() contract.
 	state.Step++
 	slideTTL()
 	return true, send(flow.steps[state.Step].prompt)
