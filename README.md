@@ -8,12 +8,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/lao/botbooter/main/.github/assets/lao_botbooter_oblique.svg">
-    <img src=".github/assets/lao_botbooter_oblique.svg" alt="lao/botbooter repository terrain — 145 files rendered as an oblique code map; hover or focus a file to inspect it, activate its link to open the file on GitHub" width="100%">
+  <a href="https://raw.githubusercontent.com/lao/botbooter/main/.github/assets/lao_botbooter_structure.svg">
+    <img src=".github/assets/lao_botbooter_structure.svg" alt="lao/botbooter repository structure — 146 files rendered as a classic oblique code map; hover or focus a file to inspect it, activate its link to open the file on GitHub" width="100%">
   </a>
 </p>
 
-> _Interactive map — [open the SVG directly](https://raw.githubusercontent.com/lao/botbooter/main/.github/assets/lao_botbooter_oblique.svg) to hover, focus, and click files (GitHub renders it statically inline)._
+> _Interactive map — [open the SVG directly](https://raw.githubusercontent.com/lao/botbooter/main/.github/assets/lao_botbooter_structure.svg) to hover, focus, and click files (GitHub renders it statically inline)._
 
 > A small, framework-style toolkit for writing chat bots **once** and running them on **Slack, Discord, Telegram, WhatsApp, Microsoft Teams, GitHub, GitLab, Bitbucket, Signal, or a local CLI** — with the same handlers, middleware, and attachment access on every platform.
 
