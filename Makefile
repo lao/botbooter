@@ -1,4 +1,4 @@
-.PHONY: all build test test-race test-examples cover lint fmt fmt-examples vet vet-examples vuln run-cli tidy clean publish
+.PHONY: all build test test-race test-examples cover bench soak endurance lint fmt fmt-examples vet vet-examples vuln run-cli tidy clean publish
 
 # Default target: format, vet, lint and race-test. The lifecycle code is
 # concurrency-heavy, so the pre-commit gate runs the race detector.
@@ -21,6 +21,23 @@ test-examples:
 cover:
 	go test -race -covermode=atomic -coverprofile=coverage.txt ./...
 	go tool cover -func=coverage.txt | tail -1
+
+# Dispatch benchmarks with allocation stats. No -race: the detector distorts
+# time/op and allocs/op. Use -cpu to see the parallel benchmark scale with cores.
+bench:
+	go test -bench=. -benchmem -run='^$$' -cpu=1,4,8 ./internal/core/
+
+# Race-focused run of the load/soak/overload tests. These also run in test-race;
+# this target isolates them for a quick concurrency check. -v because the
+# throughput and concurrency numbers are logged, and go test hides logs on pass.
+soak:
+	go test -race -v -count=1 -run 'Soak|Overload|ConcurrentReads' ./...
+
+# Gated real-platform endurance smokes; skipped unless the BOTBOOTER_{SLACK,DISCORD}_*
+# env vars are exported. Timeout must exceed the configured endurance duration.
+# -v surfaces the sent/received tallies (and the skip reason when ungated).
+endurance:
+	go test -v -count=1 -timeout 15m -run 'Endurance' ./...
 
 lint:
 	golangci-lint run ./...

@@ -14,12 +14,17 @@ make test       # go test ./...
 make test-race  # race detector (CI runs this; the lifecycle code is concurrency-heavy)
 make cover      # race + atomic coverage, prints total
 make lint       # golangci-lint v2 (needs golangci-lint installed)
+make bench      # dispatch benchmarks (internal/core), -benchmem, -cpu=1,4,8
+make soak       # load/soak/overload tests alone under -race (also part of test-race)
+make endurance  # env-gated sustained-connection smokes against real Slack/Discord
 make run-cli    # run _examples/basic in CLI mode, no credentials
 ```
 
 Run a single test: `go test -race -run TestBot_Connect/AlreadyConnected ./...` (subtests use `t.Run`, address them with `Parent/Child`).
 
-The suite is hermetic by default. `TestConnectSlack_StartsAndStops` does real Slack network I/O and is skipped unless `BOTBOOTER_SLACK_NETWORK_TEST` is set.
+The suite is hermetic by default — the load/soak/overload tests drive a real `Bot` through `internal/loadtest`'s in-memory adapter and touch no network. Three tests do real network I/O and each skips unless its env var is set: `TestConnectSlack_StartsAndStops` (`BOTBOOTER_SLACK_NETWORK_TEST`), and the two endurance smokes in `botbooter_endurance_test.go` (`BOTBOOTER_SLACK_ENDURANCE_TEST` / `BOTBOOTER_DISCORD_ENDURANCE_TEST`, which also need the `BOTBOOTER_{SLACK,DISCORD}_*` SUT-and-driver credentials documented in that file's comments).
+
+**Benchmarks and dispatch-concurrency tests must `Connect` the Bot before calling `dispatch`.** `Connect` composes the middleware chain once and publishes it in an `atomic.Pointer`; an unconnected Bot silently falls back to composing the chain per call, so an unconnected benchmark measures a path no production message takes (it reports allocs/op scaling with middleware count, where the real figure is 0).
 
 ## Architecture
 
