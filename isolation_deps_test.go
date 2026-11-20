@@ -2,18 +2,15 @@ package botbooter_test
 
 import (
 	"os/exec"
+	"path"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/lao/botbooter/internal/asserts"
 )
 
-// goListDeps returns the transitive build-dependency import paths of pkg as
-// reported by `go list -deps`. It deliberately runs without -test: a wrapper's
-// own _test.go may import any SDK, but those imports never reach a consumer
-// binary, so only the non-test build closure matters for isolation. A go list
-// failure is fatal for the calling subtest so no assertion ever runs against a
-// malformed (error-text) closure.
+// Inspect the build closure a consumer gets without test-only dependencies.
 func goListDeps(t *testing.T, pkg string) string {
 	t.Helper()
 	if _, err := exec.LookPath("go"); err != nil {
@@ -26,106 +23,48 @@ func goListDeps(t *testing.T, pkg string) string {
 	return string(out)
 }
 
-// TestIsolationDeps is the transitive guard the per-package ParseDir guards
-// cannot provide: it proves each public package's full build closure excludes
-// the other platforms' SDKs (and that root excludes all three), while each
-// platform wrapper still includes its own SDK. A future cross-package import
-// (e.g. internal/telegram pulling in internal/slack) would pass every
-// direct-import guard yet fail here. Each package runs as its own subtest so one
-// failure neither hides nor is hidden by the others.
+// Each public package may import only its own platform SDKs and internal adapter.
 func TestIsolationDeps(t *testing.T) {
-	const (
-		discordgo  = "github.com/bwmarrin/discordgo"
-		slackgo    = "github.com/slack-go/slack"
-		gotelegram = "github.com/go-telegram/bot"
-		// jwtv5 is the Teams adapter's only third-party dependency. It must stay
-		// confined to the teams closure and never leak into another package. The
-		// full versioned module path matches the other constants and how
-		// `go list -deps` emits it.
-		jwtv5 = "github.com/golang-jwt/jwt/v5"
-		// gorillaws is the Signal adapter's only third-party dependency (the
-		// receive-socket transport). It is deliberately NOT in any absent list:
-		// slack-go and discordgo pull it in as their own websocket transport, so
-		// its presence proves nothing about cross-platform leakage.
-		gorillaws = "github.com/gorilla/websocket"
-		// gogithubSDK and ghinstall are version-agnostic substrings: go-github
-		// cuts majors often (currently v88) and ghinstallation pins its own
-		// go-github major, so a fully versioned path would miss a future bump.
-		gogithubSDK = "github.com/google/go-github"
-		ghinstall   = "github.com/bradleyfalzon/ghinstallation"
-		// jwtv4 is what ghinstallation (v2.19.0) actually pulls in — confirmed via
-		// `go mod graph` — not jwtv5. It is a different major than Teams' jwtv5
-		// and the two must never be confused: the github row expects jwtv4 present
-		// and jwtv5 absent, and every other row asserts jwtv4 absent so a direct
-		// jwt/v4 import cannot sneak into a non-github closure.
-		jwtv4 = "github.com/golang-jwt/jwt/v4"
-		// The whatsmeow WhatsApp flavor's stack (the whatsmeow SDK and its pure-Go
-		// SQLite session store) must stay confined to whatsapp/whatsmeow — in
-		// particular it must never leak into the Cloud API flavor, whose selling
-		// point is a dependency-free build.
-		whatsmeowSDK  = "go.mau.fi/whatsmeow"
-		moderncSQLite = "modernc.org/sqlite"
-		// gitlabSDK is the GitLab adapter's own SDK. It is hosted on gitlab.com
-		// (not github.com), so its path never collides with go-github's
-		// github.com/google/go-github; it must stay confined to the gitlab
-		// closure and never leak into another package.
-		gitlabSDK = "gitlab.com/gitlab-org/api/client-go"
-		// ktrysmtSDK is the Bitbucket adapter's Cloud REST 2.0 client. It must stay
-		// confined to the bitbucket closure and never leak into another package
-		// (Data Center replies use plain net/http, so even a Bitbucket consumer's
-		// binary carries it only through the Cloud path).
-		ktrysmtSDK = "github.com/ktrysmt/go-bitbucket"
-	)
-	// The SDK checks above miss a cross-import of a marker-less internal package
-	// (internal/cli and internal/whatsapp/cloud pull in no third-party SDK), so
-	// also assert directly on the first-party internal/<platform> build paths:
-	// each public package must contain only its own platform's internal package.
-	const internalBase = "github.com/lao/botbooter/internal/"
-	allPlatforms := []string{"cli", "slack", "discord", "telegram", "whatsapp/cloud", "whatsapp/whatsmeow", "teams", "github", "gitlab", "bitbucket", "signal"}
-	cases := []struct {
-		pkg         string
-		absent      []string
-		present     []string
-		internalOwn string // the one internal/<platform> its closure may contain ("" = none)
+	const module = "github.com/lao/botbooter"
+	platforms := []struct {
+		name string
+		sdks []string
 	}{
-		{"github.com/lao/botbooter", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, nil, ""},
-		{"github.com/lao/botbooter/cli", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, nil, "cli"},
-		{"github.com/lao/botbooter/slack", []string{discordgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, []string{slackgo}, "slack"},
-		{"github.com/lao/botbooter/discord", []string{slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, []string{discordgo}, "discord"},
-		{"github.com/lao/botbooter/telegram", []string{discordgo, slackgo, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, []string{gotelegram}, "telegram"},
-		{"github.com/lao/botbooter/whatsapp/cloud", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, nil, "whatsapp/cloud"},
-		{"github.com/lao/botbooter/whatsapp/whatsmeow", []string{discordgo, slackgo, gotelegram, jwtv5, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, []string{whatsmeowSDK, moderncSQLite}, "whatsapp/whatsmeow"},
-		{"github.com/lao/botbooter/teams", []string{discordgo, slackgo, gotelegram, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, []string{jwtv5}, "teams"},
-		// The github row's closure legitimately contains jwtv4 (pulled in by
-		// ghinstallation) but must not contain jwtv5, which is Teams' own major.
-		{"github.com/lao/botbooter/github", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gitlabSDK, ktrysmtSDK}, []string{gogithubSDK, ghinstall, jwtv4}, "github"},
-		// The gitlab row's closure contains only its own SDK among the banned
-		// set: client-go pulls no jwt, no go-github, and no other platform SDK.
-		{"github.com/lao/botbooter/gitlab", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, ktrysmtSDK}, []string{gitlabSDK}, "gitlab"},
-		// The bitbucket row's closure contains only its own Cloud SDK among the
-		// banned set; ktrysmt pulls no jwt, no go-github, and no other platform SDK.
-		{"github.com/lao/botbooter/bitbucket", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK}, []string{ktrysmtSDK}, "bitbucket"},
-		{"github.com/lao/botbooter/signal", []string{discordgo, slackgo, gotelegram, jwtv5, whatsmeowSDK, moderncSQLite, gogithubSDK, ghinstall, jwtv4, gitlabSDK, ktrysmtSDK}, []string{gorillaws}, "signal"},
+		{"", nil},
+		{"cli", nil},
+		{"slack", []string{"github.com/slack-go/slack"}},
+		{"discord", []string{"github.com/bwmarrin/discordgo"}},
+		{"telegram", []string{"github.com/go-telegram/bot"}},
+		{"whatsapp/cloud", nil},
+		{"whatsapp/whatsmeow", []string{"go.mau.fi/whatsmeow", "modernc.org/sqlite"}},
+		{"teams", []string{"github.com/golang-jwt/jwt/v5"}},
+		{"github", []string{"github.com/google/go-github", "github.com/bradleyfalzon/ghinstallation", "github.com/golang-jwt/jwt/v4"}},
+		{"gitlab", []string{"gitlab.com/gitlab-org/api/client-go"}},
+		{"bitbucket", []string{"github.com/ktrysmt/go-bitbucket"}},
+		{"signal", nil},
 	}
-	for _, tc := range cases {
-		t.Run(tc.pkg, func(t *testing.T) {
-			closure := goListDeps(t, tc.pkg)
-			for _, sdk := range tc.absent {
-				asserts.False(t, strings.Contains(closure, sdk), tc.pkg+" build closure must not contain "+sdk)
-			}
-			for _, sdk := range tc.present {
-				asserts.True(t, strings.Contains(closure, sdk), tc.pkg+" build closure should contain its own SDK "+sdk)
-			}
-			for _, p := range allPlatforms {
-				path := internalBase + p
-				// Match a whole path segment so internal/telegram does not satisfy a
-				// check for internal/teams.
-				contains := strings.Contains(closure, path+"\n") || strings.HasSuffix(closure, path)
-				if p == tc.internalOwn {
-					asserts.True(t, contains, tc.pkg+" should contain its own "+path)
-				} else {
-					asserts.False(t, contains, tc.pkg+" must not contain "+path)
+
+	for _, platform := range platforms {
+		pkg := path.Join(module, platform.name)
+		t.Run(pkg, func(t *testing.T) {
+			deps := strings.Fields(goListDeps(t, pkg))
+			for _, owner := range platforms {
+				if owner.name == "" {
+					continue
 				}
+				want := platform.name == owner.name
+				internal := path.Join(module, "internal", owner.name)
+				asserts.Equal(t, slices.Contains(deps, internal), want, internal+" in dependency tree")
+				for _, sdk := range owner.sdks {
+					present := slices.ContainsFunc(deps, func(dep string) bool {
+						return dep == sdk || strings.HasPrefix(dep, sdk+"/")
+					})
+					asserts.Equal(t, present, want, sdk+" in dependency tree")
+				}
+			}
+			// Slack and Discord also use Gorilla WebSocket transitively.
+			if platform.name == "signal" {
+				asserts.True(t, slices.Contains(deps, "github.com/gorilla/websocket"), "Signal WebSocket transport")
 			}
 		})
 	}
