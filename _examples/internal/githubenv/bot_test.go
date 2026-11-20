@@ -24,6 +24,25 @@ func TestNewBot(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	for _, tc := range []struct {
+		name, token, keyFile string
+		want                 error
+	}{
+		{"no credentials", "", "", github.ErrMissingConfig},
+		{"both modes", "token", file, github.ErrAmbiguousAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GITHUB_TOKEN", tc.token)
+			t.Setenv("GITHUB_PRIVATE_KEY_FILE", tc.keyFile)
+			t.Setenv("GITHUB_APP_ID", "7")
+			t.Setenv("GITHUB_INSTALLATION_ID", "11")
+			_, err := NewBot(github.Config{WebhookSecret: "test", Addr: ":0"})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+
 	for _, tc := range []struct{ name, token, keyFile, appID, installID, wantError string }{
 		{"token", "token", "", "", "", ""},
 		{"app", "", file, "7", "11", ""},
