@@ -24,10 +24,6 @@ import (
 	"github.com/lao/botbooter"
 )
 
-type ExampleBot struct {
-	*botbooter.Bot
-}
-
 func main() {
 	_ = godotenv.Load(".env")
 
@@ -36,32 +32,31 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	b := &ExampleBot{Bot: bot}
 
-	b.AddMiddleware(loggingMiddleware)
-	b.HandleFunc("^echo ", b.echo)
-	b.SetUnknownCommandHandler(b.unknownCommand)
+	bot.AddMiddleware(loggingMiddleware)
+	bot.HandleFunc("^echo ", echo)
+	bot.SetUnknownCommandHandler(unknownCommand)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	log.Printf("botbooter running as %q bot", botType)
-	if err := b.Run(ctx); err != nil {
+	if err := bot.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func (*ExampleBot) unknownCommand(_ context.Context, _ *botbooter.Bot, message *botbooter.Message) {
+func unknownCommand(_ context.Context, _ *botbooter.Bot, message *botbooter.Message) {
 	log.Printf("unknown command: %q", message.Content)
 }
 
-func (b *ExampleBot) echo(ctx context.Context, _ *botbooter.Bot, message *botbooter.Message) {
+func echo(ctx context.Context, bot *botbooter.Bot, message *botbooter.Message) {
 	log.Printf("echo command: %q", message.Content)
 
 	reply := "You said: " + strings.TrimPrefix(message.Content, "echo ")
 	// Reply threads the response into the triggering message (e.g. inside a Slack
 	// thread) instead of posting to the channel root as SendMessageContext would.
-	if err := b.Reply(ctx, message, reply); err != nil {
+	if err := bot.Reply(ctx, message, reply); err != nil {
 		log.Println("failed to send message:", err)
 	}
 }

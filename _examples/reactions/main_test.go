@@ -1,7 +1,9 @@
 package main
 
 import (
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +62,15 @@ func TestAutoIntervalDisabled(t *testing.T) {
 				t.Errorf("autoIntervalDisabled(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGitHubPollingConfigCheckedBeforeAppKey(t *testing.T) {
+	t.Setenv("GITHUB_REPO", "owner/repo")
+	t.Setenv("GITHUB_POLL_SECONDS", "invalid")
+	t.Setenv("GITHUB_PRIVATE_KEY_FILE", filepath.Join(t.TempDir(), "missing"))
+	_, err := newGitHubBot()
+	if err == nil || !strings.Contains(err.Error(), "GITHUB_POLL_SECONDS") {
+		t.Fatalf("newGitHubBot error = %v", err)
 	}
 }

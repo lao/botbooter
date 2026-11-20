@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -49,4 +50,13 @@ func TestWelcomeForEvent(t *testing.T) {
 			t.Error("welcomeForEvent(opened, empty payload) ok, want skip")
 		}
 	})
+}
+
+func TestWebhookModeChecksSecretBeforeAppKey(t *testing.T) {
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "")
+	t.Setenv("GITHUB_PRIVATE_KEY_FILE", filepath.Join(t.TempDir(), "missing"))
+	_, err := newWebhookBot()
+	if err == nil || !strings.Contains(err.Error(), "GITHUB_WEBHOOK_SECRET is required") {
+		t.Fatalf("newWebhookBot error = %v", err)
+	}
 }
