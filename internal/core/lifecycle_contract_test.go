@@ -95,18 +95,13 @@ func TestLifecycle_RunTearsDownOwnConnectionNotSuccessor(t *testing.T) {
 	go func() { errCh <- b.Run(runCtx) }()
 
 	waitFor(t, func() bool { return b.currentConn() != nil }, "Run to connect")
-	original := b.currentConn()
 
-	successor := &connection{
-		cancel:     func() {},
-		loopResult: make(chan error, 1),
-		stopped:    make(chan struct{}),
-		adapter:    a,
-	}
+	successorCtx, stopSuccessor := context.WithCancel(context.Background())
+	defer stopSuccessor()
+	successor := &connection{cancel: stopSuccessor, stopped: successorCtx.Done(), adapter: a}
 	b.mu.Lock()
 	b.conn = successor
 	b.mu.Unlock()
-	asserts.True(t, original != successor, "successor is a distinct connection")
 
 	runCancel()
 
@@ -173,7 +168,7 @@ func TestLifecycle_StaleWatcherDoesNotCancelSuccessor(t *testing.T) {
 func TestConnection_SupersededTeardownDoesNotSwallowAdapterDisconnect(t *testing.T) {
 	a := &watcherAdapter{}
 	_, cancel := context.WithCancel(context.Background())
-	c := &connection{cancel: cancel, loopResult: make(chan error, 1), stopped: make(chan struct{}), adapter: a}
+	c := &connection{cancel: cancel, loopResult: make(chan error, 1), adapter: a}
 
 	asserts.NoError(t, c.teardown(false), "superseded teardown first")
 	asserts.NoError(t, c.teardown(true), "true teardown second")
@@ -189,7 +184,7 @@ func TestConnection_SupersededTeardownDoesNotSwallowAdapterDisconnect(t *testing
 func TestConnection_ConcurrentTrueTeardownsDisconnectOnce(t *testing.T) {
 	a := &watcherAdapter{}
 	_, cancel := context.WithCancel(context.Background())
-	c := &connection{cancel: cancel, loopResult: make(chan error, 1), stopped: make(chan struct{}), adapter: a}
+	c := &connection{cancel: cancel, loopResult: make(chan error, 1), adapter: a}
 
 	const callers = 8
 	var wg sync.WaitGroup

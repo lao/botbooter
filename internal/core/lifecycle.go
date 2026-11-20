@@ -13,8 +13,7 @@ import (
 type connection struct {
 	cancel         context.CancelFunc
 	loopResult     chan error
-	stopped        chan struct{}
-	signalStopOnce sync.Once
+	stopped        <-chan struct{}
 	disconnectOnce sync.Once
 	disconnectErr  error
 	adapter        Adapter
@@ -26,7 +25,6 @@ type connection struct {
 // may disconnect the shared adapter, and concurrent callers share its result.
 func (c *connection) teardown(disconnectAdapter bool) error {
 	c.cancel()
-	c.signalStopOnce.Do(func() { close(c.stopped) })
 	if !disconnectAdapter {
 		return nil
 	}
@@ -64,7 +62,7 @@ func (b *Bot) connect(ctx context.Context) (*connection, error) {
 	c := &connection{
 		cancel:     cancel,
 		loopResult: make(chan error, 1),
-		stopped:    make(chan struct{}),
+		stopped:    runCtx.Done(),
 		adapter:    b.adapter,
 	}
 
@@ -140,7 +138,6 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	var loopErr error
 	select {
-	case <-ctx.Done():
 	case <-c.stopped:
 	case loopErr = <-c.loopResult:
 	}
