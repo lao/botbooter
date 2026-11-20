@@ -1,8 +1,8 @@
 package core
 
 import (
+	"cmp"
 	"context"
-	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -25,7 +25,7 @@ const defaultFlowTimeout = 10 * time.Minute
 type ConversationState struct {
 	FlowID    string
 	Step      int
-	Answers   map[string]string
+	Answers   Answers
 	ExpiresAt time.Time
 }
 
@@ -35,22 +35,14 @@ func (s ConversationState) isExpired(now time.Time) bool {
 	return !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(now)
 }
 
-// conversationManager owns the in-process coordination for flows: the per-
-// conversation state map plus the background TTL sweeper, both guarded by one
-// mutex.
-//
-// ponytail: single global mutex, not per-key striped locks. It serializes every
-// conversation's state transition — and the user validator that runs under it,
-// per Validate's "keep it fast" contract — against every other conversation. For
-// a single-instance in-memory chat bot that is ample; shard the lock by key only
-// if flow throughput is ever a measured bottleneck.
+// The mutex protects all active conversations, including updates during validation.
 type conversationManager struct {
-	mu sync.Mutex
-	m  map[string]ConversationState
+	mu     sync.Mutex
+	active map[string]ConversationState
 }
 
 func newConversationManager() *conversationManager {
-	return &conversationManager{m: make(map[string]ConversationState)}
+	return &conversationManager{active: make(map[string]ConversationState)}
 }
 
 // withLock runs fn while holding the manager mutex, releasing it even if fn
@@ -65,22 +57,22 @@ func (m *conversationManager) withLock(fn func()) {
 // get, set and del are plain map operations; the caller MUST hold m.mu (via
 // withLock).
 func (m *conversationManager) get(key string) (ConversationState, bool) {
-	st, ok := m.m[key]
+	st, ok := m.active[key]
 	return st, ok
 }
 
-func (m *conversationManager) set(key string, st ConversationState) { m.m[key] = st }
+func (m *conversationManager) set(key string, st ConversationState) { m.active[key] = st }
 
-func (m *conversationManager) del(key string) { delete(m.m, key) }
+func (m *conversationManager) del(key string) { delete(m.active, key) }
 
 // sweep deletes every entry expired as of now. It holds the manager mutex across
 // the whole scan, so it can never race a concurrent advance that just refreshed
 // an entry's TTL (deleting during a map range is safe in Go).
 func (m *conversationManager) sweep(now time.Time) {
 	m.withLock(func() {
-		for key, st := range m.m {
+		for key, st := range m.active {
 			if st.isExpired(now) {
-				delete(m.m, key)
+				delete(m.active, key)
 			}
 		}
 	})
@@ -156,23 +148,9 @@ func (f *Flow) timeoutOrDefault() time.Duration {
 	return defaultFlowTimeout
 }
 
-// conversationKey composes the per-conversation store key from a message. It is
-// per-user AND per-channel, so one user can run independent flows in a DM and in a
-// channel. The NUL separator is unambiguous because no supported platform's UserID
-// or ChannelID contains a NUL byte (Slack/Discord/Telegram ids are numeric or
-// alphanumeric, WhatsApp ids are numeric, Teams ids are prefixed alphanumerics
-// like "29:"/"19:", GitHub ids are "owner/repo"/issue-number strings, GitLab ids
-// are "group/project#iid"/"group/project!iid", Signal ids are E.164 numbers or
-// "group:"-prefixed group ids, and the CLI is single-user trusted input).
+// Separate the user and channel IDs with NUL so their boundaries are unambiguous.
 func conversationKey(m *Message) string {
 	return m.UserID + "\x00" + m.ChannelID
-}
-
-// flowByID returns the registered flow with id, if any. A nil registry (a Bot not
-// built via New) reports not-found rather than panicking.
-func (b *Bot) flowByID(id string) (*Flow, bool) {
-	f, ok := b.flows[id]
-	return f, ok
 }
 
 // sendFlowMessage sends a flow prompt, logging (not propagating) a send error so a
@@ -198,7 +176,6 @@ func (m *conversationManager) start(ctx context.Context, b *Bot, msg *Message, f
 		m.set(key, ConversationState{
 			FlowID:    flow.id,
 			Step:      0,
-			Answers:   map[string]string{},
 			ExpiresAt: time.Now().Add(flow.timeoutOrDefault()),
 		})
 		started = true
@@ -209,11 +186,7 @@ func (m *conversationManager) start(ctx context.Context, b *Bot, msg *Message, f
 	}
 }
 
-// advance routes msg into the active flow for its conversation, returning true
-// when it consumed the message (the caller must then NOT fall through to the
-// command table). It runs the state machine under the shard lock and performs the
-// resulting prompt send or lifecycle callback AFTER releasing it — those are user
-// code and/or network I/O and must never hold a shard.
+// advance consumes a message for an active flow. Prompts and callbacks run after unlocking.
 func (m *conversationManager) advance(ctx context.Context, b *Bot, msg *Message) bool {
 	key := conversationKey(msg)
 	now := time.Now()
@@ -232,35 +205,16 @@ func (m *conversationManager) advance(ctx context.Context, b *Bot, msg *Message)
 	return handled
 }
 
-// transitionLocked runs the flow state machine for a single message and MUST be
-// called with key's shard lock held. It returns whether the message was consumed
-// and the post-lock work to run after the lock is released (a prompt send or a
-// lifecycle callback). It performs no I/O itself.
-//
-// Reaping asymmetry: an unregistered or out-of-range state is reaped and reported
-// NOT handled, so dispatch falls through to the command table; an expired state is
-// reaped but reported handled (consuming the trigger) and runs the optional
-// OnTimeout. The asymmetry is deliberate — see the design spec.
+// transitionLocked updates the active conversation under m.mu and returns work
+// for the caller to run after unlocking. Expiry consumes the current message.
 func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key string, msg *Message, now time.Time) (handled bool, action func()) {
 	state, ok := m.get(key)
 	if !ok {
 		return false, nil // no active flow; dispatch continues to the command table
 	}
 
-	flow, ok := b.flowByID(state.FlowID)
-	if !ok {
-		// State outlived its flow registration (e.g. a renamed flow); reap and
-		// fall through rather than panic.
-		m.del(key)
-		return false, nil
-	}
-
-	// A state whose flow has since lost steps (a flow rebuilt with fewer steps
-	// across a reconnect) could index out of range; reap and fall through instead
-	// of panicking. (A bare panic would be eaten by dispatch's recover but leave
-	// the state in place to wedge every
-	// later message until its TTL.)
-	if state.Step < 0 || state.Step >= len(flow.steps) {
+	flow, ok := b.flows[state.FlowID]
+	if !ok || state.Step < 0 || state.Step >= len(flow.steps) {
 		m.del(key)
 		return false, nil
 	}
@@ -290,64 +244,42 @@ func (m *conversationManager) transitionLocked(ctx context.Context, b *Bot, key 
 
 	step := flow.steps[state.Step]
 
-	// slideTTL refreshes the idle timeout and persists it. The timeout measures
-	// user silence, so any message for the active step — including a rejected or
-	// empty answer — counts as engagement and slides the deadline; only going
-	// quiet lets it expire.
-	slideTTL := func() {
+	// Even an invalid answer restarts the idle timeout.
+	saveProgress := func() {
 		state.ExpiresAt = now.Add(flow.timeoutOrDefault())
 		m.set(key, state)
 	}
 
-	// Empty/whitespace answers are non-answers: re-prompt without storing an answer.
 	if content == "" {
-		slideTTL()
+		saveProgress()
 		return true, send(step.prompt)
 	}
 
-	// The stored (and validated) value is the trimmed content for ordinary steps —
-	// chat clients pad messages — but a Secret() step keeps the exact bytes, since
-	// leading/trailing whitespace can be meaningful in a password or token.
+	// Leading and trailing whitespace can be part of a secret.
 	answer := content
 	if step.secret {
 		answer = msg.Content
 	}
 
-	// The validator runs under the lock; it is documented as "keep it fast".
 	if step.validate != nil {
 		if err := step.validate(answer); err != nil {
-			nudge := step.prompt
-			if e := err.Error(); e != "" {
-				nudge = e
-			}
-			slideTTL()
-			return true, send(nudge)
+			saveProgress()
+			return true, send(cmp.Or(err.Error(), step.prompt))
 		}
 	}
 
-	// Clone before writing rather than mutating in place: Get may return a map that
-	// aliases the store's live state (the in-memory store does), and mutating it here
-	// would write behind the store's own lock, relying solely on the shard lock. A
-	// fresh map keeps transitionLocked from touching data it did not allocate.
-	answers := maps.Clone(state.Answers)
-	if answers == nil {
-		answers = map[string]string{}
+	if state.Answers == nil {
+		state.Answers = make(Answers)
 	}
-	answers[step.key] = answer
-	state.Answers = answers
+	state.Answers[step.key] = answer
 
-	// Last step → clear state and complete. onComplete receives an exclusive copy
-	// of the answers, so a consumer that retains the map is never surprised by the
-	// engine reusing the underlying map.
 	if state.Step == len(flow.steps)-1 {
-		completed := Answers(maps.Clone(answers))
+		// Removing the conversation transfers ownership of its answers to the callback.
 		m.del(key)
-		return true, func() { flow.onComplete(ctx, b, msg, completed) }
+		return true, func() { flow.onComplete(ctx, b, msg, state.Answers) }
 	}
 
-	// Otherwise advance, slide the TTL, and send the next prompt. The in-memory
-	// store volatile-holds the full state, secrets included per the Secret() contract.
 	state.Step++
-	slideTTL()
+	saveProgress()
 	return true, send(flow.steps[state.Step].prompt)
 }

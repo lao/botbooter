@@ -58,7 +58,7 @@ func TestBot_HandleFlow_Contract(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		bot := New(SlackBotType, &recordingAdapter{})
 		asserts.NoError(t, bot.HandleFlow("^f$", valid()), "valid flow registers")
-		_, ok := bot.flowByID("f")
+		_, ok := bot.flows["f"]
 		asserts.True(t, ok, "flow is in the registry")
 	})
 
@@ -66,7 +66,7 @@ func TestBot_HandleFlow_Contract(t *testing.T) {
 		bot := New(SlackBotType, &recordingAdapter{})
 		err := bot.HandleFlow("[bad(", valid())
 		asserts.Error(t, err, "invalid regexp is rejected")
-		_, ok := bot.flowByID("f")
+		_, ok := bot.flows["f"]
 		asserts.False(t, ok, "nothing registered on a bad pattern")
 	})
 
@@ -437,7 +437,7 @@ func TestFlow_SecretAnswerReachesOnComplete(t *testing.T) {
 }
 
 // TestFlow_ConcurrentAdvanceNoDeadlock fires many concurrent answers at one
-// conversation. The shard lock must serialize them with no deadlock, no panic,
+// conversation. The manager mutex must serialize them with no deadlock, no panic,
 // and no map corruption (run under -race). State ends either completed (reaped) or
 // at a valid step.
 func TestFlow_ConcurrentAdvanceNoDeadlock(t *testing.T) {
@@ -559,4 +559,21 @@ func TestFlow_AskSkipsNilOption(t *testing.T) {
 	bot.conversations.start(ctx, bot, msgFrom("u", "c", "f"), f)
 	bot.conversations.advance(ctx, bot, msgFrom("u", "c", "answer"))
 	asserts.Equal(t, got.Get("a"), "answer", "the step with nil options still collects its answer")
+}
+
+func TestCompletedAnswersSurviveNextFlow(t *testing.T) {
+	var runs []Answers
+	flow := NewFlow("signup").Ask("name", "Name?").OnComplete(func(_ context.Context, _ *Bot, _ *Message, answers Answers) { runs = append(runs, answers) })
+	bot := &Bot{adapter: &recordingAdapter{}}
+	if err := bot.HandleFlow("^signup$", flow); err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"signup", "Alice", "signup", "Bob"} {
+		bot.dispatch(t.Context(), msgFrom("user", "channel", text))
+	}
+	if len(runs) != 2 {
+		t.Fatalf("completed %d flows", len(runs))
+	}
+	asserts.Equal(t, runs[1].Get("name"), "Bob", "second run")
+	asserts.Equal(t, runs[0].Get("name"), "Alice", "retained answers from the first run")
 }

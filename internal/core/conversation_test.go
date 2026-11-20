@@ -76,7 +76,7 @@ func TestConversationManager_SweeperLifecycleExits(t *testing.T) {
 	m := newConversationManager()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	done := m.startSweeper(ctx, 10*time.Millisecond)
+	done := m.startSweeper(ctx, 0)
 	cancel()
 
 	select {
