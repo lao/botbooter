@@ -1,6 +1,6 @@
 // Package gitlab receives issue and merge request notes over a webhook and
-// replies through the GitLab API. Internal notes are ignored because replies
-// are public. The webhook token is checked before reading the request body.
+// replies through the GitLab API. Internal notes are ignored because the reply API
+// creates ordinary notes. The webhook token is checked before reading the request body.
 package gitlab
 
 import (
