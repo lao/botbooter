@@ -241,7 +241,7 @@ func TestHandleMessages_DropsBotMessage(t *testing.T) {
 // forced to a single slot so one blocked dispatch saturates it.
 func TestHandleMessages_SaturatedDispatchReturns503(t *testing.T) {
 	a := testAdapter(t)
-	a.dispatchSem = make(chan struct{}, 1) // force a single dispatch slot
+	a.dispatchSlots = make(chan struct{}, 1) // force a single dispatch slot
 
 	release := make(chan struct{})
 	defer close(release)
@@ -281,8 +281,8 @@ func (s *readSpy) Read([]byte) (int, error) { s.reads++; return 0, io.EOF }
 // check. Mirrors the github/gitlab sibling test.
 func TestHandleMessages_ReadSaturationReturns503(t *testing.T) {
 	a := testAdapter(t)
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // occupy the only inbound slot
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // occupy the only inbound slot
 
 	var got []*core.Message
 	spy := &readSpy{}

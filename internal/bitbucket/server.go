@@ -32,7 +32,7 @@ const (
 // handleWebhook reads, authenticates, routes, acks and dispatches one delivery.
 // Unlike GitLab (a plain token header, checkable before the body), Bitbucket
 // signs the body, so the body is read BEFORE auth (GitHub's posture) — the
-// readSem and the body cap bound what an unauthenticated flood can buffer.
+// readSlots and the body cap bound what an unauthenticated flood can buffer.
 //
 // Every authentic delivery is acked 200, even when dropped, unreadable or shed
 // under load: Bitbucket times a delivery out at 10s and retries a failure twice
@@ -41,16 +41,16 @@ const (
 // is not authentic so there is nothing to double-deliver.
 func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	// Bound concurrent inbound processing before buffering the (up to
-	// a.maxRequestBytes) body. a.readSem is allocated once in newAdapter and never
+	// a.maxRequestBytes) body. a.readSlots is allocated once in newAdapter and never
 	// reassigned, so this direct read races nothing.
 	select {
-	case a.readSem <- struct{}{}:
+	case a.readSlots <- struct{}{}:
 	default:
 		a.log().Warn("bitbucket: inbound concurrency limit reached; acking and dropping delivery", "limit", maxConcurrentReads)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	defer func() { <-a.readSem }()
+	defer func() { <-a.readSlots }()
 
 	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, a.maxRequestBytes))
 	if err != nil {
@@ -164,14 +164,12 @@ func (a *adapter) handlePush(dispatchCtx context.Context, w http.ResponseWriter,
 // spawning unbounded goroutines. Shedding with 5xx would not save the delivery —
 // Bitbucket does not re-deliver a success — and would trigger its retry storm.
 func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
-	// Snapshot this connection's semaphore once: Connect installs a fresh one per
-	// connection, and the acquire here and the release in the goroutine must target
-	// the SAME channel even if a reconnect swaps a.sem.
+	// A reconnect installs new slots. Release the slot on the channel we acquired.
 	a.mu.Lock()
-	sem := a.sem
+	dispatchSlots := a.dispatchSlots
 	a.mu.Unlock()
 	select {
-	case sem <- struct{}{}:
+	case dispatchSlots <- struct{}{}:
 	default:
 		a.log().Warn("bitbucket: dispatch concurrency limit reached; acking and dropping delivery", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusOK)
@@ -179,7 +177,7 @@ func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 	}
 	w.WriteHeader(http.StatusOK)
 	a.dispatchAsync(func() {
-		defer func() { <-sem }()
+		defer func() { <-dispatchSlots }()
 		f()
 	})
 }
@@ -233,7 +231,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.logger = deps.Logger
 	// Fresh per-connection dispatch semaphore: a slot a hung handler never releases
 	// dies with this connection instead of leaking across reconnects.
-	a.sem = make(chan struct{}, maxConcurrentDispatch)
+	a.dispatchSlots = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	go func() {

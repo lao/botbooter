@@ -382,7 +382,7 @@ func TestHandleWebhook_Routes401ToInjectedLogger(t *testing.T) {
 func TestHandleWebhook_DispatchSaturationAcksAndDrops(t *testing.T) {
 	a, err := newAdapter(testConfig())
 	asserts.NoError(t, err, "new adapter")
-	a.sem = make(chan struct{}, 1) // force a one-slot bound
+	a.dispatchSlots = make(chan struct{}, 1) // force a one-slot bound
 	var buf bytes.Buffer
 	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -421,8 +421,8 @@ func TestHandleWebhook_DispatchSaturationAcksAndDrops(t *testing.T) {
 func TestHandleWebhook_ReadSaturationAcksAndDrops(t *testing.T) {
 	a, err := newAdapter(testConfig())
 	asserts.NoError(t, err, "new adapter")
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // occupy the only inbound slot
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // occupy the only inbound slot
 	var buf bytes.Buffer
 	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
 

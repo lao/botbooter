@@ -38,7 +38,7 @@ func validConfig() Config {
 func testAdapter() *adapter {
 	cfg := validConfig()
 	cfg.Path = defaultPath
-	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: http.DefaultClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch), readSem: make(chan struct{}, maxConcurrentReads)}
+	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: http.DefaultClient, dispatchSlots: make(chan struct{}, maxConcurrentDispatch), readSlots: make(chan struct{}, maxConcurrentReads)}
 }
 
 // sign returns the X-Hub-Signature-256 header value for body under secret.
@@ -444,7 +444,7 @@ func TestHandleWebhook_RoutesBadSignatureWarningToInjectedLogger(t *testing.T) {
 // retries) rather than spawning an unbounded goroutine.
 func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	a := testAdapter()
-	a.dispatchSem = make(chan struct{}, 1) // capacity 1
+	a.dispatchSlots = make(chan struct{}, 1) // capacity 1
 
 	release := make(chan struct{})
 	started := make(chan struct{}, 1)
@@ -495,8 +495,8 @@ func (s *readSpy) Read([]byte) (int, error) { s.reads++; return 0, io.EOF }
 // signature check. Mirrors the github/gitlab sibling test.
 func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
 	a := testAdapter()
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // occupy the only inbound slot
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // occupy the only inbound slot
 
 	var got []*core.Message
 	spy := &readSpy{}

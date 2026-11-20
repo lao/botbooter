@@ -319,7 +319,7 @@ func TestHandleWebhook_Routes403ToInjectedLogger(t *testing.T) {
 func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	a, err := newAdapter(patConfig())
 	asserts.NoError(t, err, "new adapter")
-	a.sem = make(chan struct{}, 1) // force a one-slot bound
+	a.dispatchSlots = make(chan struct{}, 1) // force a one-slot bound
 
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -356,8 +356,8 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
 	a, err := newAdapter(patConfig())
 	asserts.NoError(t, err, "new adapter")
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // occupy the only inbound slot
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // occupy the only inbound slot
 
 	var got []*core.Message
 	w := httptest.NewRecorder()

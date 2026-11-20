@@ -81,7 +81,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.logger = deps.Logger
 	// Fresh per-connection dispatch semaphore: a slot a hung handler never
 	// releases dies with this connection instead of leaking across reconnects.
-	a.dispatchSem = make(chan struct{}, maxConcurrentDispatch)
+	a.dispatchSlots = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	go serve(srv, ln, deps.Done)
@@ -109,11 +109,11 @@ func serve(srv *http.Server, ln net.Listener, done func(error)) {
 func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWriter, r *http.Request, deps core.AdapterDeps) {
 	// Bound concurrent inbound reads before buffering + unmarshaling the body: a
 	// flood of large bodies is shed with 503 (the platform retries) rather than
-	// buffering unbounded memory. readSem is allocated once in newAdapter, so this
-	// direct read races nothing. Separate from dispatchSem, which bounds post-ack
+	// buffering unbounded memory. readSlots is allocated once in newAdapter, so this
+	// direct read races nothing. Separate from dispatchSlots, which bounds post-ack
 	// dispatch.
 	select {
-	case a.readSem <- struct{}{}:
+	case a.readSlots <- struct{}{}:
 	default:
 		a.log().Warn("teams: inbound concurrency limit reached; shedding with 503", "limit", maxConcurrentReads)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -122,22 +122,22 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
-		<-a.readSem
+		<-a.readSlots
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	var act inboundActivity
 	if err := json.Unmarshal(body, &act); err != nil {
-		<-a.readSem
+		<-a.readSlots
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	// Release the read slot as soon as the body is buffered + unmarshaled: unlike
 	// the GitHub/GitLab siblings, validateInbound below can block on a cold JWKS
-	// fetch (up to jwksFetchTimeout), so holding readSem across it would gate
-	// throughput far more aggressively than the fast HMAC path readSem is sized for.
-	<-a.readSem
+	// fetch (up to jwksFetchTimeout), so holding readSlots across it would gate
+	// throughput far more aggressively than the fast HMAC path readSlots is sized for.
+	<-a.readSlots
 
 	// Authenticate before trusting the body. Use the request context, not runCtx:
 	// core cancels runCtx before srv.Shutdown drains this handler, so a JWKS
@@ -167,12 +167,12 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 	// message the adapter would then drop. Non-blocking so a burst sheds load
 	// instead of stalling the handler. Snapshot the per-connection semaphore once so
 	// the acquire here and the release below target the SAME channel across a
-	// reconnect that swaps a.dispatchSem.
+	// reconnect that swaps a.dispatchSlots.
 	a.mu.Lock()
-	sem := a.dispatchSem
+	dispatchSlots := a.dispatchSlots
 	a.mu.Unlock()
 	select {
-	case sem <- struct{}{}:
+	case dispatchSlots <- struct{}{}:
 	default:
 		a.log().Warn("teams: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -190,7 +190,7 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 	// The semaphore slot is released when dispatch returns.
 	a.inflight.Add(1)
 	go func() {
-		defer func() { <-sem }()
+		defer func() { <-dispatchSlots }()
 		defer a.inflight.Add(-1)
 		deps.Dispatch(dispatchCtx, msg)
 	}()

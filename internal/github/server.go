@@ -28,18 +28,18 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	// only across read+verify+parse (this function); the dispatch goroutine has
 	// its own bound (ackAndDispatch).
 	//
-	// Unlike a.sem (recreated per Connect, so ackAndDispatch snapshots it under
-	// a.mu), a.readSem is allocated once in newAdapter and never reassigned, so
-	// this direct read races nothing. If readSem ever becomes per-connection, it
+	// Unlike a.dispatchSlots (recreated per Connect, so ackAndDispatch snapshots it under
+	// a.mu), a.readSlots is allocated once in newAdapter and never reassigned, so
+	// this direct read races nothing. If readSlots ever becomes per-connection, it
 	// must adopt the same a.mu snapshot pattern.
 	select {
-	case a.readSem <- struct{}{}:
+	case a.readSlots <- struct{}{}:
 	default:
 		a.log().Warn("github: inbound concurrency limit reached; shedding with 503", "limit", maxConcurrentReads)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
-	defer func() { <-a.readSem }()
+	defer func() { <-a.readSlots }()
 
 	// Read then verify as two steps with two distinct failure codes (the
 	// sibling-adapter pattern): a body we cannot read is the client's 400; a
@@ -164,14 +164,12 @@ func (a *adapter) handlePush(dispatchCtx context.Context, w http.ResponseWriter,
 // flood. The reaction poller does not go through here (it has no HTTP response
 // to 503 and its cadence is self-bounded); it uses dispatchAsync directly.
 func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
-	// Snapshot this connection's semaphore once: Connect installs a fresh one per
-	// connection, and the acquire below and the release in the dispatch goroutine
-	// must target the SAME channel even if a later reconnect swaps a.sem.
+	// A reconnect installs new slots. Release the slot on the channel we acquired.
 	a.mu.Lock()
-	sem := a.sem
+	dispatchSlots := a.dispatchSlots
 	a.mu.Unlock()
 	select {
-	case sem <- struct{}{}:
+	case dispatchSlots <- struct{}{}:
 	default:
 		a.log().Warn("github: dispatch concurrency limit reached; shedding with 503", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -179,7 +177,7 @@ func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 	}
 	w.WriteHeader(http.StatusOK)
 	a.dispatchAsync(func() {
-		defer func() { <-sem }()
+		defer func() { <-dispatchSlots }()
 		f()
 	})
 }
@@ -254,7 +252,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.logger = deps.Logger
 	// Fresh per-connection dispatch semaphore: a slot a hung handler never
 	// releases dies with this connection instead of leaking across reconnects.
-	a.sem = make(chan struct{}, maxConcurrentDispatch)
+	a.dispatchSlots = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	// Snapshot the reaction cutoff now, not when the poller goroutine starts:
