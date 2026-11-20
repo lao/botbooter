@@ -7,12 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/signal"
 	"regexp"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -211,25 +208,13 @@ func resolveSendOptions(opts ...SendOption) SendOptions {
 	return o
 }
 
-// AdapterDeps is the set of callbacks an Adapter uses to talk back to the Bot,
-// plus the Bot's logger so adapter diagnostics route through the same sink.
-// DispatchReaction is optional: adapters on platforms without reaction events
-// simply never call it. HasReactionHandlers reports whether any OnReaction
-// handler was registered before Connect, so an adapter whose reaction ingress
-// costs something (the GitHub poller pays API requests per cycle) can skip the
-// work nobody consumes; push-based adapters may ignore it — dispatching to
-// zero handlers is free. Handlers registered after Connect do not flip it: the
-// snapshot follows the register-before-Connect contract.
+// AdapterDeps carries callbacks and the logger for one connection.
 type AdapterDeps struct {
-	Dispatch            func(ctx context.Context, m *Message)
-	DispatchReaction    func(ctx context.Context, r *Reaction)
+	Dispatch         func(ctx context.Context, m *Message)
+	DispatchReaction func(ctx context.Context, r *Reaction)
+	// HasReactionHandlers is a snapshot at Connect. Polling adapters can skip unused work.
 	HasReactionHandlers bool
-	// Done reports that this connection's event loop terminated. Call it AT MOST
-	// ONCE per connection: it writes to a size-1 buffered channel, so a redundant
-	// Done is at best silently dropped and at worst blocks the caller forever
-	// (when Run was woken by ctx/Disconnect and never drains the channel). An
-	// adapter that can emit several terminal events (whatsmeow) must collapse them
-	// into a single Done — e.g. behind a per-connection sync.Once.
+	// Call Done at most once per connection. A second send can block after Run exits.
 	Done       func(err error)
 	Disconnect func() error
 	Logger     *slog.Logger // always non-nil
@@ -254,62 +239,11 @@ type Bot struct {
 	conversations *conversationManager
 	flows         map[string]*Flow
 
-	// dispatchChain is the middleware chain wrapped around the terminal
-	// flow/command handler. Connect composes it once per connection from the
-	// current middleware snapshot and reuses it for every message; a reconnect
-	// re-snapshots, so a Bot reused across runs picks up middleware registered
-	// between runs. Middleware is register-before-Connect, so the snapshot is
-	// stable during a run; the inner handler still reads live Bot state (commands,
-	// flows) on each call. Stored atomically so a straggler dispatch from a prior
-	// connection can read it while a reconnect stores a fresh chain, race-free.
+	// Connect rebuilds the chain between runs. A previous dispatch may still be reading it.
 	dispatchChain atomic.Pointer[CommandHandler]
 
 	mu   sync.Mutex
 	conn *connection
-}
-
-// connection holds a single connection's lifecycle state. Connect creates a
-// fresh one and Disconnect drops it, so nothing from a prior connection can
-// leak into a successor across disconnect→reconnect races.
-type connection struct {
-	cancel   context.CancelFunc
-	done     chan error    // adapter reports event-loop termination here
-	runDone  chan struct{} // closed exactly once when this connection tears down
-	once     sync.Once
-	discOnce sync.Once // scopes adapter.Disconnect to exactly one true teardown
-	discErr  error     // adapter.Disconnect result, recorded once and shared by all true callers
-	adapter  Adapter
-	// sweeperDone is closed by the conversation sweeper goroutine when it exits
-	// (nil when no sweeper started for this connection). It is a test-observable
-	// hook for asserting the background goroutine is gone after teardown; the
-	// production teardown path does not wait on it.
-	sweeperDone <-chan struct{}
-}
-
-// teardown cancels the run context and closes runDone exactly once. It runs the
-// adapter's Disconnect only when disconnectAdapter is true; a superseded
-// connection passes false so it can never disconnect the shared adapter a newer
-// connection now owns.
-//
-// The adapter call sits under its own discOnce, NOT the runDone once: c.cancel
-// wakes adapter ctx-watchers whose deps.Disconnect arrives as a superseded
-// (false) teardown, and if that consumed a shared once first it would swallow
-// the true caller's adapter Disconnect entirely. A false teardown never touches
-// discOnce, while concurrent true callers (b.conn is uninstalled only after
-// teardown returns, so more than one caller can observe itself current)
-// collapse into one adapter Disconnect — the losers block until the winner
-// finishes and share its error via discErr.
-func (c *connection) teardown(disconnectAdapter bool) error {
-	c.cancel()
-	c.once.Do(func() { close(c.runDone) })
-	if !disconnectAdapter {
-		return nil
-	}
-	if c.adapter == nil {
-		return ErrUnknownBotType
-	}
-	c.discOnce.Do(func() { c.discErr = c.adapter.Disconnect() })
-	return c.discErr
 }
 
 // New creates a Bot of the given type backed by adapter.
@@ -408,178 +342,6 @@ func (b *Bot) log() *slog.Logger {
 		return b.logger
 	}
 	return slog.Default()
-}
-
-// Connect starts the adapter's event loop and returns without blocking. It
-// returns ErrAlreadyConnected if a connection is already active, ErrUnknownBotType
-// if the Bot has no adapter, every registration error recorded by AddHandler
-// (joined, one per invalid pattern), or any error from the adapter's own Connect.
-func (b *Bot) Connect(ctx context.Context) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.conn != nil {
-		return ErrAlreadyConnected
-	}
-	if b.adapter == nil {
-		return ErrUnknownBotType
-	}
-	if err := errors.Join(b.setupErrs...); err != nil {
-		return err
-	}
-	// Compose the dispatch chain from the current middleware snapshot, redone on
-	// every Connect so a Bot reused across a reconnect reflects middleware
-	// registered between runs. Register-before-Connect keeps it stable during a run.
-	chain := b.composeDispatchChain()
-	b.dispatchChain.Store(&chain)
-	runCtx, cancel := context.WithCancel(ctx)
-	c := &connection{
-		cancel:  cancel,
-		done:    make(chan error, 1),
-		runDone: make(chan struct{}),
-		adapter: b.adapter,
-	}
-
-	// The callbacks capture THIS connection (c), so a lingering goroutine from a
-	// prior connection writes into its own dead channel and never touches the
-	// shared adapter.
-	deps := AdapterDeps{
-		Dispatch:            b.dispatch,
-		DispatchReaction:    b.dispatchReaction,
-		HasReactionHandlers: len(b.reactionHandlers) > 0,
-		Done:                func(err error) { c.done <- err },
-		Disconnect:          func() error { return b.disconnectConn(c) },
-		Logger:              b.log(),
-	}
-
-	// adapter.Connect is non-blocking by contract. Holding b.mu across it — and
-	// installing b.conn only on success — serializes a concurrent Disconnect
-	// behind this lock instead of racing a half-connected adapter.
-	if err := b.adapter.Connect(runCtx, deps); err != nil {
-		cancel()
-		return err
-	}
-	b.conn = c
-
-	// Start the conversation sweeper on the per-connection run context so it stops
-	// when this connection is torn down and a reconnect installs a fresh one. The
-	// in-memory flow state itself is per-Bot and survives a transient reconnect;
-	// only background sweeping pauses for that window (lazy expiry still applies).
-	// Gated on registered flows so a bot that never calls HandleFlow spins up no
-	// background goroutine. This gate is read once at Connect: a flow registered
-	// AFTER Connect still dispatches (composeDispatchChain's advance reads b.flows
-	// live) but gets no background sweeper until the next reconnect, so its expired
-	// state is only lazily reaped on the user's next message. Flows, like
-	// middleware, are meant to be registered before Connect.
-	//
-	// teardown cancels the old connection's runCtx but does not wait for its
-	// sweeper to observe cancellation and exit (production teardown never blocks
-	// on sweeperDone), so a fast reconnect can briefly run two sweepers against
-	// the shared per-Bot conversationManager. That overlap is benign: sweep
-	// re-checks expiry under the manager lock before deleting, so a concurrent
-	// double-sweep is idempotent.
-	if b.conversations != nil && len(b.flows) > 0 {
-		c.sweeperDone = b.conversations.startSweeper(runCtx, defaultSweepInterval)
-	}
-	return nil
-}
-
-// disconnectConn tears down connection c. If c is still the installed
-// connection the adapter is disconnected; if c has been superseded by a
-// reconnect, only c's own runCtx/runDone are settled and the adapter — now
-// owned by the newer connection — is left untouched.
-//
-// b.conn is cleared only AFTER teardown returns, so a Connect racing a
-// slow adapter Disconnect (drains can take seconds) gets ErrAlreadyConnected
-// instead of starting a second live session on the shared adapter. Concurrent
-// teardowns of the same connection serialize on its sync.Once: the losers
-// block inside teardown until the winner's adapter Disconnect finishes.
-func (b *Bot) disconnectConn(c *connection) error {
-	b.mu.Lock()
-	current := b.conn == c
-	b.mu.Unlock()
-
-	err := c.teardown(current)
-
-	if current {
-		b.mu.Lock()
-		if b.conn == c {
-			b.conn = nil
-		}
-		b.mu.Unlock()
-	}
-	return err
-}
-
-// Disconnect tears down the active connection: it cancels the run context and
-// runs the adapter's Disconnect exactly once. It is safe to call when not
-// connected, returning ErrUnknownBotType only if the Bot has no adapter.
-func (b *Bot) Disconnect() error {
-	b.mu.Lock()
-	c := b.conn
-	b.mu.Unlock()
-
-	if c == nil {
-		if b.adapter == nil {
-			return ErrUnknownBotType
-		}
-		return nil
-	}
-	return b.disconnectConn(c)
-}
-
-// Run connects the Bot and blocks until ctx is canceled, the event loop ends,
-// or Disconnect is called from elsewhere, then disconnects. A clean shutdown
-// (ctx cancellation or a local Disconnect) returns nil rather than ctx.Err(),
-// so callers can safely do log.Fatal(bot.Run(ctx)).
-func (b *Bot) Run(ctx context.Context) error {
-	if err := b.Connect(ctx); err != nil {
-		return err
-	}
-
-	b.mu.Lock()
-	c := b.conn
-	b.mu.Unlock()
-	// A concurrent Disconnect already tore the connection down.
-	if c == nil {
-		return nil
-	}
-
-	var loopErr error
-	select {
-	case <-ctx.Done():
-	case <-c.runDone: // a Disconnect from another goroutine woke us
-	case loopErr = <-c.done:
-	}
-
-	// Tear down the connection Run OWNS, not whatever b.conn currently points at.
-	// If a reconnect superseded c while Run was blocked, b.Disconnect() would tear
-	// down the live successor; disconnectConn(c) instead scopes teardown to c and
-	// degrades to a no-op adapter teardown when c is no longer installed.
-	disconnectErr := b.disconnectConn(c)
-
-	// Graceful shutdown (ctx canceled, or a local Disconnect canceling runCtx)
-	// surfaces as loopErr echoing the canceling context's error; swallow it so
-	// log.Fatal(bot.Run(ctx)) doesn't exit non-zero on a clean Ctrl-C.
-	if errors.Is(loopErr, context.Canceled) ||
-		(ctx.Err() != nil && errors.Is(loopErr, ctx.Err())) {
-		loopErr = nil
-	}
-
-	if disconnectErr != nil {
-		if ctx.Err() != nil {
-			b.log().Error("botbooter: error disconnecting during shutdown", "error", disconnectErr)
-		} else if loopErr == nil {
-			loopErr = disconnectErr
-		}
-	}
-	return loopErr
-}
-
-// Start runs the Bot until the process receives an interrupt or SIGTERM.
-func (b *Bot) Start() error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return b.Run(ctx)
 }
 
 // SendMessage sends text to channelID using a background context. Prefer
