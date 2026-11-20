@@ -83,14 +83,8 @@ func TestLifecycle_DisconnectDuringRunReturnsNil(t *testing.T) {
 	}
 }
 
-// Run must tear down the connection it OWNS, not whatever b.conn currently points
-// at. When a reconnect supersedes Run's connection while Run is blocked, the
-// pre-fix teardown (b.Disconnect, which acts on the freshly-read b.conn) tore down
-// the live successor; the fix (b.disconnectConn(c), scoped to Run's captured
-// connection) leaves the successor untouched. This constructs the superseded state
-// directly — installing a distinct successor as b.conn without closing Run's
-// connection's runDone — so the wake source is irrelevant and the teardown choice
-// is what the assertions isolate.
+// Install a successor immediately after Run publishes its connection. Canceling
+// the original run must leave the successor available for its own caller.
 func TestLifecycle_RunTearsDownOwnConnectionNotSuccessor(t *testing.T) {
 	a := &watcherAdapter{}
 	b := New(SlackBotType, a)
@@ -100,25 +94,15 @@ func TestLifecycle_RunTearsDownOwnConnectionNotSuccessor(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- b.Run(runCtx) }()
 
-	// Run owns c1 and is now blocked in its select.
 	waitFor(t, func() bool { return b.currentConn() != nil }, "Run to connect")
-	c1 := b.currentConn()
 
-	// Supersede Run's connection: install a distinct, live successor as b.conn.
-	// c1's runDone stays open so Run is not woken through it — exactly the state the
-	// fix must survive, where Run's captured c1 is no longer the installed conn.
-	c2 := &connection{
-		cancel:  func() {},
-		done:    make(chan error, 1),
-		runDone: make(chan struct{}),
-		adapter: a,
-	}
+	successorCtx, stopSuccessor := context.WithCancel(context.Background())
+	defer stopSuccessor()
+	successor := &connection{cancel: stopSuccessor, stopped: successorCtx.Done(), adapter: a}
 	b.mu.Lock()
-	b.conn = c2
+	b.conn = successor
 	b.mu.Unlock()
-	asserts.True(t, c1 != c2, "successor is a distinct connection")
 
-	// Wake Run via ctx cancellation; it tears down the connection it owns (c1).
 	runCancel()
 
 	select {
@@ -128,17 +112,15 @@ func TestLifecycle_RunTearsDownOwnConnectionNotSuccessor(t *testing.T) {
 		t.Fatal("Run did not return after ctx cancel")
 	}
 
-	asserts.True(t, b.currentConn() == c2, "Run left the live successor installed")
+	asserts.True(t, b.currentConn() == successor, "Run left the live successor installed")
 	select {
-	case <-c2.runDone:
+	case <-successor.stopped:
 		t.Fatal("Run tore down the successor connection instead of its own")
 	default:
 	}
-	// Run's connection was superseded, so a correct teardown touches the shared
-	// adapter zero times; the buggy path disconnects the successor's adapter once.
+
 	asserts.Equal(t, a.disconnectCount(), 0, "Run must not disconnect the shared adapter on behalf of a superseded connection")
 
-	// Cleanup the successor we installed by hand.
 	b.mu.Lock()
 	b.conn = nil
 	b.mu.Unlock()
@@ -167,7 +149,7 @@ func TestLifecycle_StaleWatcherDoesNotCancelSuccessor(t *testing.T) {
 
 	asserts.True(t, b.currentConn() == c2, "successor still installed after stale watcher fired")
 	select {
-	case <-c2.runDone:
+	case <-c2.stopped:
 		t.Fatal("stale watcher tore down the successor connection")
 	default:
 	}
@@ -186,7 +168,7 @@ func TestLifecycle_StaleWatcherDoesNotCancelSuccessor(t *testing.T) {
 func TestConnection_SupersededTeardownDoesNotSwallowAdapterDisconnect(t *testing.T) {
 	a := &watcherAdapter{}
 	_, cancel := context.WithCancel(context.Background())
-	c := &connection{cancel: cancel, done: make(chan error, 1), runDone: make(chan struct{}), adapter: a}
+	c := &connection{cancel: cancel, loopResult: make(chan error, 1), adapter: a}
 
 	asserts.NoError(t, c.teardown(false), "superseded teardown first")
 	asserts.NoError(t, c.teardown(true), "true teardown second")
@@ -198,11 +180,11 @@ func TestConnection_SupersededTeardownDoesNotSwallowAdapterDisconnect(t *testing
 // adapter Disconnect. b.conn is uninstalled only after teardown returns (so a
 // Connect racing a slow drain gets ErrAlreadyConnected), which means two
 // Bot.Disconnect callers can both observe themselves current and both pass
-// disconnectAdapter=true — discOnce is what keeps the adapter call single.
+// disconnectAdapter=true — disconnectOnce is what keeps the adapter call single.
 func TestConnection_ConcurrentTrueTeardownsDisconnectOnce(t *testing.T) {
 	a := &watcherAdapter{}
 	_, cancel := context.WithCancel(context.Background())
-	c := &connection{cancel: cancel, done: make(chan error, 1), runDone: make(chan struct{}), adapter: a}
+	c := &connection{cancel: cancel, loopResult: make(chan error, 1), adapter: a}
 
 	const callers = 8
 	var wg sync.WaitGroup

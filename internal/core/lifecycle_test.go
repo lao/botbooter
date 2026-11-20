@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 
 	"github.com/lao/botbooter/internal/asserts"
 )
@@ -129,6 +130,15 @@ func TestBot_Run_ContextCanceled(t *testing.T) {
 	asserts.Equal(t, fake.disconnectCalls, 1, "adapter disconnected exactly once")
 }
 
+func TestBot_Run_AdapterReportsCancellation(t *testing.T) {
+	adapter := &fakeAdapter{onConnect: func(_ context.Context, deps AdapterDeps) {
+		deps.Done(context.Canceled)
+	}}
+	bot := New(SlackBotType, adapter)
+	asserts.NoError(t, bot.Run(t.Context()), "adapter cancellation is a clean shutdown")
+	asserts.Equal(t, adapter.disconnectCalls, 1, "adapter disconnected")
+}
+
 func TestBot_Run_LoopEnds(t *testing.T) {
 	sentinel := errors.New("loop ended")
 	fake := &fakeAdapter{onConnect: func(_ context.Context, deps AdapterDeps) {
@@ -137,6 +147,22 @@ func TestBot_Run_LoopEnds(t *testing.T) {
 	bot := New(SlackBotType, fake)
 
 	asserts.ErrorIs(t, bot.Run(context.Background()), sentinel, "Run returns the loop error")
+}
+
+func TestBot_Run_DuplicateDone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		first := errors.New("first terminal event")
+		var done func(error)
+		adapter := &fakeAdapter{onConnect: func(_ context.Context, deps AdapterDeps) {
+			done = deps.Done
+			done(first)
+			done(nil)
+		}}
+		bot := New(SlackBotType, adapter)
+		asserts.ErrorIs(t, bot.Run(t.Context()), first, "Run returns the first result")
+		done(nil)
+		done(nil)
+	})
 }
 
 func TestBot_Run_DisconnectErrorCleanLoop(t *testing.T) {

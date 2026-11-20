@@ -334,7 +334,7 @@ func TestBot_GetAttachments_UnknownBotType(t *testing.T) {
 // connection without an adapter), so exercise it directly.
 func TestConnection_TeardownNilAdapter(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())
-	c := &connection{cancel: cancel, runDone: make(chan struct{})}
+	c := &connection{cancel: cancel}
 
 	err := c.teardown(true)
 

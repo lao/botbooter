@@ -257,12 +257,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 		return ErrClosed
 	}
 
-	// whatsmeow can deliver more than one terminal event for a single connection
-	// (a pairing failure and a logout can both fire, and both the event handler
-	// and the QR channel observe a logout during pairing), but core's run loop
-	// reads the connection-ended signal exactly once — a surplus send would block
-	// a whatsmeow dispatch goroutine. Collapse them with a fresh per-connection
-	// once-guard, mirroring core's own per-connection teardown Once.
+	// Both the event handler and the QR channel can report the same logout.
 	var doneOnce sync.Once
 	reportDone := func(err error) { doneOnce.Do(func() { deps.Done(err) }) }
 
