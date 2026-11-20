@@ -71,9 +71,14 @@ func (b *Bot) connect(ctx context.Context) (*connection, error) {
 		Dispatch:            b.dispatch,
 		DispatchReaction:    b.dispatchReaction,
 		HasReactionHandlers: len(b.reactionHandlers) > 0,
-		Done:                func(err error) { c.loopResult <- err },
-		Disconnect:          func() error { return b.disconnectConn(c) },
-		Logger:              b.log(),
+		Done: func(err error) {
+			select {
+			case c.loopResult <- err:
+			default:
+			}
+		},
+		Disconnect: func() error { return b.disconnectConn(c) },
+		Logger:     b.log(),
 	}
 
 	// Keep Disconnect behind this lock until adapter setup succeeds or fails.

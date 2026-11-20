@@ -214,7 +214,7 @@ type AdapterDeps struct {
 	DispatchReaction func(ctx context.Context, r *Reaction)
 	// HasReactionHandlers is a snapshot at Connect. Polling adapters can skip unused work.
 	HasReactionHandlers bool
-	// Call Done at most once per connection. A second send can block after Run exits.
+	// Done reports the loop result. Run observes only the first report.
 	Done       func(err error)
 	Disconnect func() error
 	Logger     *slog.Logger // always non-nil
