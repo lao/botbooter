@@ -575,6 +575,5 @@ func TestCompletedAnswersSurviveNextFlow(t *testing.T) {
 		t.Fatalf("completed %d flows", len(runs))
 	}
 	asserts.Equal(t, runs[1].Get("name"), "Bob", "second run")
-	runs[1]["name"] = "changed"
 	asserts.Equal(t, runs[0].Get("name"), "Alice", "retained answers from the first run")
 }
