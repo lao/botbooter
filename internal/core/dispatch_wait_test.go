@@ -25,6 +25,14 @@ func TestWaitForDispatch(t *testing.T) {
 		}
 
 		inflight.Add(1)
+		canceled, stop := context.WithCancel(t.Context())
+		stop()
+		start = time.Now()
+		WaitForDispatch(canceled, &inflight)
+		if time.Since(start) != 0 || inflight.Load() != 1 {
+			t.Fatal("canceled drain waited or changed the pending count")
+		}
+
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 		WaitForDispatch(ctx, &inflight)

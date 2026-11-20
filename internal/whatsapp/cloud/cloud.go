@@ -147,17 +147,9 @@ type adapter struct {
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
 	logger         *slog.Logger // set from AdapterDeps at Connect; guarded by mu
-	// dispatchSlots is a counting semaphore (capacity maxConcurrentDispatch) that
-	// bounds concurrent dispatch goroutines. A non-blocking acquire before acking
-	// returns 503 on saturation; the slot is released when the goroutine returns.
-	// Re-created per Connect and captured at acquire, so a slot a context-ignoring
-	// handler never releases is confined to that connection rather than leaking for
-	// the adapter's lifetime.
+	// A stuck handler holds a slot only on its own connection.
 	dispatchSlots chan struct{}
-	// readSlots bounds concurrent inbound request processing so a flood of large
-	// bodies can't buffer unbounded memory before signature verification (see
-	// maxConcurrentReads); separate from dispatchSlots, which bounds dispatch
-	// goroutines. Allocated once in newAdapter and never reassigned.
+	// Read slots bound buffered request bodies across connections.
 	readSlots chan struct{}
 }
 

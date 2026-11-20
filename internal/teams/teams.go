@@ -82,16 +82,9 @@ type adapter struct {
 	// after the drain window so a stuck handler or reply cannot leak.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
-	// dispatchSlots is a counting semaphore (capacity maxConcurrentDispatch) that
-	// bounds in-flight dispatch goroutines: the handler acquires a slot before
-	// acking and sheds load with 503 when it is full. Re-created per Connect and
-	// captured at acquire, so a slot a context-ignoring handler never releases is
-	// confined to that connection rather than leaking for the adapter's lifetime.
+	// A stuck handler holds a slot only on its own connection.
 	dispatchSlots chan struct{}
-	// readSlots bounds concurrent inbound request processing so a flood of large
-	// bodies can't buffer unbounded memory before JWT verification (see
-	// maxConcurrentReads); separate from dispatchSlots, which bounds dispatch
-	// goroutines. Allocated once in newAdapter and never reassigned.
+	// Read slots bound buffered request bodies across connections.
 	readSlots chan struct{}
 	convs     map[string]conversation // conversationID -> reply routing info
 	convOrder []string                // FIFO insertion order for bounded eviction
