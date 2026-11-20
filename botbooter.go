@@ -1,32 +1,6 @@
-// Package botbooter holds the platform-agnostic shared types for building chat
-// bots that behave the same way across Slack, Discord, Telegram, WhatsApp,
-// Microsoft Teams, GitHub, GitLab, Bitbucket, Signal and a local CLI.
-//
-// This package is SDK-free: it imports no platform SDK and only re-exports the
-// shared types from internal/core. Construct a bot from one of the per-platform
-// packages — botbooter/slack, botbooter/discord, botbooter/telegram,
-// botbooter/whatsapp/cloud, botbooter/whatsapp/whatsmeow, botbooter/teams,
-// botbooter/github, botbooter/gitlab, botbooter/bitbucket, botbooter/signal or
-// botbooter/cli — each of which pulls in only its own platform SDK (WhatsApp
-// Cloud API and Teams speak REST APIs over plain HTTP and need none; GitHub
-// pulls google/go-github plus bradleyfalzon/ghinstallation for GitHub App auth;
-// GitLab pulls gitlab.com/gitlab-org/api/client-go; Bitbucket pulls
-// ktrysmt/go-bitbucket for its Cloud REST 2.0 client and speaks plain HTTP to
-// Data Center; Signal speaks REST plus a receive
-// WebSocket to a signal-cli-rest-api container and pulls only the
-// gorilla/websocket transport), then drive it through the shared types
-// re-exported here. A bot that uses one platform never compiles the other
-// platforms' SDKs into its binary.
-//
-// WhatsApp comes in two flavors selected by import path: whatsapp/cloud (Meta
-// Cloud API webhook, needs a Meta Business account and a public HTTPS URL) and
-// whatsapp/whatsmeow (WhatsApp Web multidevice protocol via whatsmeow, QR-linked
-// to a phone, no Meta account or webhook needed).
-//
-// Every type here is a re-exported alias of its [internal/core] counterpart, so
-// the full method and field documentation lives on the core types (pkg.go.dev
-// resolves the [core.Bot]-style links to them). The summaries below capture the
-// contracts most consumers need from the public import path.
+// Package botbooter provides shared handlers, middleware and conversation flows
+// for chat bots. Create a Bot with a platform package such as slack, discord,
+// whatsapp/cloud or whatsapp/whatsmeow. Each imports only its own dependencies.
 package botbooter
 
 import "github.com/lao/botbooter/internal/core"
@@ -55,19 +29,23 @@ type BotType = core.BotType
 
 // Supported bot types.
 const (
-	SlackBotType    = core.SlackBotType
-	DiscordBotType  = core.DiscordBotType
-	CLIBotType      = core.CLIBotType
-	TelegramBotType = core.TelegramBotType
-	WhatsAppBotType = core.WhatsAppBotType
-	TeamsBotType    = core.TeamsBotType
-	// WhatsMeowBotType is the WhatsApp Web (whatsmeow) flavor; WhatsAppBotType is
-	// the Meta Cloud API flavor.
-	WhatsMeowBotType = core.WhatsMeowBotType
-	GitHubBotType    = core.GitHubBotType
-	GitLabBotType    = core.GitLabBotType
-	BitbucketBotType = core.BitbucketBotType
-	SignalBotType    = core.SignalBotType
+	SlackBotType         = core.SlackBotType
+	DiscordBotType       = core.DiscordBotType
+	CLIBotType           = core.CLIBotType
+	TelegramBotType      = core.TelegramBotType
+	WhatsAppCloudBotType = core.WhatsAppCloudBotType
+	TeamsBotType         = core.TeamsBotType
+	WhatsAppWebBotType   = core.WhatsAppWebBotType
+	GitHubBotType        = core.GitHubBotType
+	GitLabBotType        = core.GitLabBotType
+	BitbucketBotType     = core.BitbucketBotType
+	SignalBotType        = core.SignalBotType
+)
+
+// Earlier names for the WhatsApp transports.
+const (
+	WhatsAppBotType  = WhatsAppCloudBotType
+	WhatsMeowBotType = WhatsAppWebBotType
 )
 
 type (

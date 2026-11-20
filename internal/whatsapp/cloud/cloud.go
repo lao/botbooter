@@ -1,15 +1,6 @@
-// Package cloud is the Meta Cloud API flavor of botbooter's WhatsApp adapter.
-// It receives messages from the Meta WhatsApp Business Cloud API over an
-// inbound webhook and sends replies back through the Cloud API. It implements
-// core.Adapter. (The whatsmeow-backed WhatsApp Web flavor lives in the sibling
-// internal/whatsapp/whatsmeow package.)
-//
-// Unlike the dial-out adapters (Slack, Discord), the Cloud API delivers inbound
-// messages as HTTP webhook callbacks, so this adapter runs its own HTTP server:
-// Connect binds a listener and serves until the run context is canceled, and
-// Disconnect shuts the server down. Bind a local Addr, put a TLS-terminating
-// reverse proxy in front, and register the public HTTPS URL in Meta's webhook
-// settings.
+// Package cloud receives WhatsApp Business Cloud API webhooks and sends
+// messages through the Graph API. Register the HTTPS endpoint with Meta and
+// terminate TLS at a reverse proxy in front of the listener.
 package cloud
 
 import (
@@ -193,7 +184,7 @@ func New(cfg Config) (*core.Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return core.New(core.WhatsAppBotType, a), nil
+	return core.New(core.WhatsAppCloudBotType, a), nil
 }
 
 func newAdapter(cfg Config) (*adapter, error) {

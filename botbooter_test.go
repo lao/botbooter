@@ -444,7 +444,7 @@ func TestSessionAccessors(t *testing.T) {
 		Token: "t", PhoneNumberID: "p", AppSecret: "s", VerifyToken: "v", Addr: ":0",
 	})
 	asserts.NoError(t, err, "cloud.New")
-	asserts.Equal(t, whatsappBot.BotType, botbooter.WhatsAppBotType, "WhatsApp bot type")
+	asserts.Equal(t, whatsappBot.BotType, botbooter.WhatsAppCloudBotType, "WhatsApp bot type")
 
 	teamsBot, err := teams.New(teams.Config{
 		AppID: "app", AppPassword: "secret", Addr: ":0",
@@ -531,4 +531,19 @@ func TestHandleFlow_RootSentinel(t *testing.T) {
 	bot := cli.New(emptyReader{}, &syncBuffer{})
 	noComplete := botbooter.NewFlow("x").Ask("a", "a?")
 	asserts.ErrorIs(t, bot.HandleFlow("^x$", noComplete), botbooter.ErrFlowNoOnComplete, "missing OnComplete sentinel via root package")
+}
+
+func TestWhatsAppTransportCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		transport, legacy botbooter.BotType
+		number            int
+		name              string
+	}{
+		{botbooter.WhatsAppCloudBotType, botbooter.WhatsAppBotType, 4, "whatsapp"},
+		{botbooter.WhatsAppWebBotType, botbooter.WhatsMeowBotType, 6, "whatsmeow"},
+	} {
+		asserts.Equal(t, tc.transport, tc.legacy, tc.name+" alias")
+		asserts.Equal(t, int(tc.transport), tc.number, tc.name+" numeric value")
+		asserts.Equal(t, tc.transport.String(), tc.name, "platform name")
+	}
 }

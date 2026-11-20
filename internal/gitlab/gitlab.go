@@ -1,30 +1,6 @@
-// Package gitlab is the GitLab adapter for botbooter. It receives issue and
-// merge-request comments as Note Hook webhook events over an inbound HTTP
-// server and replies by creating notes through the GitLab REST API
-// (gitlab.com/gitlab-org/api/client-go). It implements core.Adapter. Optional
-// Config callbacks (OnMergeRequest, OnPush) additionally route Merge Request
-// and Push deliveries on the same webhook endpoint; unset, those deliveries are
-// acked and dropped.
-//
-// Like the WhatsApp, Teams and GitHub adapters, Connect binds a listener and
-// serves until the run context is canceled; Disconnect shuts it down and drains
-// in-flight dispatch. Bind a local Addr, put a TLS-terminating proxy in front,
-// and register the public HTTPS URL as the project (or group) webhook URL, with
-// the Comments trigger enabled — and Confidential comments too, to also answer
-// on confidential issues (internal notes are dropped: the reply path can only
-// create a plain note) — (plus Merge request and Push events when the matching
-// callback is set) and a Secret token.
-//
-// Unlike GitHub (which signs the body with an HMAC), GitLab authenticates a
-// delivery with a plain X-Gitlab-Token header compared against Config.Secret, so
-// the adapter can reject an unauthenticated request BEFORE buffering its body —
-// a stronger pre-auth posture than the sibling webhook adapters can offer.
-//
-// Implementation split (mirrors GitHub/Teams): gitlab.go (config, client wiring,
-// accessors), server.go (webhook lifecycle), send.go (replies), message.go
-// (payload mapping). GitLab reactions ride a native Emoji webhook rather than
-// the REST-poll GitHub needs, so reaction ingress is deliberately left to a
-// future slice; v1 has none (like the Teams adapter).
+// Package gitlab receives issue and merge request notes over a webhook and
+// replies through the GitLab API. Internal notes are ignored because replies
+// are public. The webhook token is checked before reading the request body.
 package gitlab
 
 import (

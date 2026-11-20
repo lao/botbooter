@@ -1,21 +1,6 @@
-// Package github is the GitHub adapter for botbooter. It receives issue and PR
-// comments as issue_comment webhook events over an inbound HTTP server and
-// replies by creating issue comments through the GitHub REST API (go-github).
-// It implements core.Adapter. Optional Config callbacks (OnPullRequest,
-// OnPush) additionally route pull_request and push deliveries on the same
-// webhook endpoint; unset, those deliveries are acked and dropped.
-//
-// Like the WhatsApp and Teams adapters, Connect binds a listener and serves
-// until the run context is canceled; Disconnect shuts it down and drains
-// in-flight dispatch. Bind a local Addr, put a TLS-terminating proxy in front,
-// and register the public HTTPS URL as the repository or App webhook URL
-// (content type application/json, events: issue_comment plus pull_request
-// and/or push when the matching callback is set, with a secret).
-//
-// Implementation split (mirrors Teams): github.go (config, auth wiring,
-// accessors), server.go (webhook lifecycle), send.go (replies), message.go
-// (payload mapping), reactions.go (opt-in polled reaction ingress — GitHub
-// sends no webhook for reactions).
+// Package github receives issue and pull request comments over a webhook and
+// replies through the GitHub API. Config enables pull request and push callbacks
+// and optional reaction polling.
 package github
 
 import (

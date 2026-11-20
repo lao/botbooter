@@ -21,7 +21,7 @@ func (foreignAdapter) Attachments(*core.Message) ([]core.Attachment, error)     
 func TestNew(t *testing.T) {
 	bot, err := New(Config{Token: "t", PhoneNumberID: "p", AppSecret: "s", VerifyToken: "v", Addr: ":0"})
 	asserts.NoError(t, err, "new whatsapp bot")
-	asserts.Equal(t, bot.BotType, botbooter.WhatsAppBotType, "bot type")
+	asserts.Equal(t, bot.BotType, botbooter.WhatsAppCloudBotType, "bot type")
 }
 
 func TestNewMissingConfig(t *testing.T) {

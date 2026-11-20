@@ -361,7 +361,7 @@ func TestNew(t *testing.T) {
 
 	bot, err := New(Config{DBPath: db})
 	asserts.NoError(t, err, "New opens the store")
-	asserts.Equal(t, bot.BotType, core.WhatsMeowBotType, "bot type")
+	asserts.Equal(t, bot.BotType, core.WhatsAppWebBotType, "bot type")
 	asserts.NotNil(t, Client(bot), "client escape hatch resolves")
 
 	// The session store is a credential: it must not be group/world accessible.

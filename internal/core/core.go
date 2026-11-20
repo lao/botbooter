@@ -34,9 +34,9 @@ const (
 	DiscordBotType
 	CLIBotType
 	TelegramBotType
-	WhatsAppBotType
+	WhatsAppCloudBotType
 	TeamsBotType
-	WhatsMeowBotType
+	WhatsAppWebBotType
 	GitHubBotType
 	GitLabBotType
 	BitbucketBotType
@@ -55,11 +55,11 @@ func (t BotType) String() string {
 		return "cli"
 	case TelegramBotType:
 		return "telegram"
-	case WhatsAppBotType:
+	case WhatsAppCloudBotType:
 		return "whatsapp"
 	case TeamsBotType:
 		return "teams"
-	case WhatsMeowBotType:
+	case WhatsAppWebBotType:
 		return "whatsmeow"
 	case GitHubBotType:
 		return "github"

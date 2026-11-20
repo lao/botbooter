@@ -236,7 +236,7 @@ func TestNew(t *testing.T) {
 
 	asserts.NoError(t, err, "New with full config should succeed")
 	asserts.NotNil(t, bot, "bot should be initialized")
-	asserts.Equal(t, bot.BotType, core.WhatsAppBotType, "bot type should be WhatsApp")
+	asserts.Equal(t, bot.BotType, core.WhatsAppCloudBotType, "bot type should be WhatsApp")
 	asserts.Equal(t, bot.BotType.String(), "whatsapp", "bot type string should be whatsapp")
 }
 
@@ -728,7 +728,7 @@ func TestResolveAttachmentURL(t *testing.T) {
 	a.cfg.Token = "tok"
 
 	// Resolve through the unified entry point to prove the adapter is routed to.
-	b := core.New(core.WhatsAppBotType, a)
+	b := core.New(core.WhatsAppCloudBotType, a)
 	url, err := b.ResolveAttachmentURL(context.Background(),
 		core.Attachment{ExtraData: &Media{ID: "MID", MimeType: "image/jpeg"}})
 
@@ -865,7 +865,7 @@ func (foreignAdapter) Attachments(*core.Message) ([]core.Attachment, error) {
 }
 
 func TestAddr_WrongBot(t *testing.T) {
-	b := core.New(core.WhatsAppBotType, foreignAdapter{})
+	b := core.New(core.WhatsAppCloudBotType, foreignAdapter{})
 	asserts.Equal(t, Addr(b), "", "Addr returns \"\" when the adapter is not the WhatsApp adapter")
 }
 
@@ -874,7 +874,7 @@ func TestAddr_ExposesBoundListener(t *testing.T) {
 	defer cancel()
 
 	a := testAdapter() // cfg.Addr is 127.0.0.1:0
-	b := core.New(core.WhatsAppBotType, a)
+	b := core.New(core.WhatsAppCloudBotType, a)
 	deps := core.AdapterDeps{Done: func(error) {}, Disconnect: func() error { return nil }}
 
 	asserts.Equal(t, Addr(b), "", "no bound address before Connect")
