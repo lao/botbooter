@@ -2,6 +2,7 @@ package botbooter_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -60,11 +61,15 @@ func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 // hermetic: discordgo request/response handling runs but never reaches the
 // Discord API.
 type stubRoundTripper struct {
-	status int
-	body   string
+	inspect func(*http.Request)
+	status  int
+	body    string
 }
 
 func (s stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if s.inspect != nil {
+		s.inspect(req)
+	}
 	// The RoundTripper contract requires closing the request body.
 	if req.Body != nil {
 		_ = req.Body.Close()
@@ -531,4 +536,31 @@ func TestHandleFlow_RootSentinel(t *testing.T) {
 	bot := cli.New(emptyReader{}, &syncBuffer{})
 	noComplete := botbooter.NewFlow("x").Ask("a", "a?")
 	asserts.ErrorIs(t, bot.HandleFlow("^x$", noComplete), botbooter.ErrFlowNoOnComplete, "missing OnComplete sentinel via root package")
+}
+
+func TestPublicReplyOptionsReachDiscord(t *testing.T) {
+	bot := newDiscordBot(t)
+	msg := &botbooter.Message{ID: "parent"}
+	for _, tc := range []struct {
+		want string
+		opts []botbooter.SendOption
+	}{
+		{"parent", []botbooter.SendOption{botbooter.InReplyTo(msg)}},
+		{"explicit", []botbooter.SendOption{botbooter.InReplyTo(msg), botbooter.WithThreadID("explicit")}},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			var payload discordgo.MessageSend
+			discord.Session(bot).Client.Transport = stubRoundTripper{status: 200, body: `{"id":"sent"}`, inspect: func(req *http.Request) {
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Errorf("decode Discord request: %v", err)
+				}
+			}}
+			if err := bot.SendMessageContext(t.Context(), "channel", "reply", tc.opts...); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Reference == nil || payload.Reference.MessageID != tc.want {
+				t.Fatalf("message reference = %+v, want %s", payload.Reference, tc.want)
+			}
+		})
+	}
 }

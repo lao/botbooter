@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"go.mau.fi/whatsmeow/store"
+
 	wm "go.mau.fi/whatsmeow"
 	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
@@ -425,4 +427,43 @@ func TestAdapterDisconnect(t *testing.T) {
 	// Safe and store-closing when never connected, and idempotent.
 	asserts.NoError(t, a.Disconnect(), "first disconnect closes the owned store")
 	asserts.NoError(t, a.Disconnect(), "disconnect is idempotent")
+}
+
+func TestConnectFailureRemovesHandler(t *testing.T) {
+	a, err := newAdapter(Config{DBPath: filepath.Join(t.TempDir(), "session.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Disconnect() })
+	a.client.Store.Deleted = true
+	err = a.Connect(t.Context(), core.AdapterDeps{})
+	if !errors.Is(err, store.ErrDeviceDeleted) {
+		t.Fatalf("Connect error = %v", err)
+	}
+	if a.handlerSet {
+		t.Fatal("failed connection left an event handler installed")
+	}
+}
+
+func TestAttachmentPreservesMediaPayload(t *testing.T) {
+	sticker := &waProto.StickerMessage{}
+	video := &waProto.VideoMessage{}
+	audio := &waProto.AudioMessage{}
+	for _, tc := range []struct {
+		name  string
+		msg   *waProto.Message
+		media any
+		image bool
+	}{
+		{"sticker", &waProto.Message{StickerMessage: sticker}, sticker, true},
+		{"video", &waProto.Message{VideoMessage: video}, video, false},
+		{"audio", &waProto.Message{AudioMessage: audio}, audio, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := (&adapter{}).Attachments(&core.Message{Raw: &events.Message{Message: tc.msg}})
+			if err != nil || len(got) != 1 || got[0].ExtraData != tc.media || got[0].IsImage != tc.image {
+				t.Fatalf("Attachments = %+v, %v", got, err)
+			}
+		})
+	}
 }
