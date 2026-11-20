@@ -1,6 +1,7 @@
 package teams
 
 import (
+	"net"
 	"testing"
 
 	"github.com/lao/botbooter"
@@ -26,4 +27,24 @@ func TestRawMessage(t *testing.T) {
 
 	asserts.True(t, ok, "raw message present")
 	asserts.Equal(t, got, want, "raw message")
+}
+
+func TestAddrTracksConnection(t *testing.T) {
+	bot, err := New(Config{AppID: "app", AppPassword: "secret", Addr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	asserts.Equal(t, Addr(bot), "", "before connecting")
+	if err := bot.Connect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bot.Disconnect() })
+	host, port, err := net.SplitHostPort(Addr(bot))
+	if err != nil || host != "127.0.0.1" || port == "0" || port == "" {
+		t.Fatalf("bound address = %q", Addr(bot))
+	}
+	if err := bot.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	asserts.Equal(t, Addr(bot), "", "after disconnecting")
 }

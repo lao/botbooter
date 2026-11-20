@@ -2,8 +2,10 @@ package slack
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -424,4 +426,16 @@ func TestResolveAttachmentURL_FallsBackToURL(t *testing.T) {
 		core.Attachment{URL: "https://files.slack/url_private", ExtraData: "not-a-file"})
 	asserts.NoError(t, err, "slack resolve with unrelated ExtraData")
 	asserts.Equal(t, wrongExtra, "https://files.slack/url_private", "falls back to att.URL for unrelated ExtraData")
+}
+
+func TestRunReportsSocketAuthenticationFailure(t *testing.T) {
+	client := slackapi.New("xoxb-test", slackapi.OptionAppLevelToken("xapp-test"),
+		slackapi.OptionHTTPClient(&http.Client{Transport: stubRoundTripper{status: 200, body: `{"ok":false,"error":"invalid_auth"}`}}))
+	bot := core.New(core.SlackBotType, &adapter{client: client, socket: socketmode.New(client)})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	err := bot.Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "invalid_auth") {
+		t.Fatalf("Run error = %v, want invalid_auth", err)
+	}
 }
