@@ -129,6 +129,15 @@ func TestBot_Run_ContextCanceled(t *testing.T) {
 	asserts.Equal(t, fake.disconnectCalls, 1, "adapter disconnected exactly once")
 }
 
+func TestBot_Run_AdapterReportsCancellation(t *testing.T) {
+	adapter := &fakeAdapter{onConnect: func(_ context.Context, deps AdapterDeps) {
+		deps.Done(context.Canceled)
+	}}
+	bot := New(SlackBotType, adapter)
+	asserts.NoError(t, bot.Run(t.Context()), "adapter cancellation is a clean shutdown")
+	asserts.Equal(t, adapter.disconnectCalls, 1, "adapter disconnected")
+}
+
 func TestBot_Run_LoopEnds(t *testing.T) {
 	sentinel := errors.New("loop ended")
 	fake := &fakeAdapter{onConnect: func(_ context.Context, deps AdapterDeps) {
