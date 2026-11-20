@@ -179,6 +179,33 @@ func TestBot_SendMessage(t *testing.T) {
 	})
 }
 
+func TestPublicReplyOptionsReachDiscord(t *testing.T) {
+	bot := newDiscordBot(t)
+	msg := &botbooter.Message{ID: "parent"}
+	for _, tc := range []struct {
+		want string
+		opts []botbooter.SendOption
+	}{
+		{"parent", []botbooter.SendOption{botbooter.InReplyTo(msg)}},
+		{"explicit", []botbooter.SendOption{botbooter.InReplyTo(msg), botbooter.WithThreadID("explicit")}},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			var payload discordgo.MessageSend
+			discord.Session(bot).Client.Transport = stubRoundTripper{status: 200, body: `{"id":"sent"}`, inspect: func(req *http.Request) {
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Errorf("decode Discord request: %v", err)
+				}
+			}}
+			if err := bot.SendMessageContext(t.Context(), "channel", "reply", tc.opts...); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Reference == nil || payload.Reference.MessageID != tc.want {
+				t.Fatalf("message reference = %+v, want %s", payload.Reference, tc.want)
+			}
+		})
+	}
+}
+
 func TestBot_GetAttachments(t *testing.T) {
 	t.Run("DiscordBot", func(t *testing.T) {
 		bot := newDiscordBot(t)
@@ -536,31 +563,4 @@ func TestHandleFlow_RootSentinel(t *testing.T) {
 	bot := cli.New(emptyReader{}, &syncBuffer{})
 	noComplete := botbooter.NewFlow("x").Ask("a", "a?")
 	asserts.ErrorIs(t, bot.HandleFlow("^x$", noComplete), botbooter.ErrFlowNoOnComplete, "missing OnComplete sentinel via root package")
-}
-
-func TestPublicReplyOptionsReachDiscord(t *testing.T) {
-	bot := newDiscordBot(t)
-	msg := &botbooter.Message{ID: "parent"}
-	for _, tc := range []struct {
-		want string
-		opts []botbooter.SendOption
-	}{
-		{"parent", []botbooter.SendOption{botbooter.InReplyTo(msg)}},
-		{"explicit", []botbooter.SendOption{botbooter.InReplyTo(msg), botbooter.WithThreadID("explicit")}},
-	} {
-		t.Run(tc.want, func(t *testing.T) {
-			var payload discordgo.MessageSend
-			discord.Session(bot).Client.Transport = stubRoundTripper{status: 200, body: `{"id":"sent"}`, inspect: func(req *http.Request) {
-				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
-					t.Errorf("decode Discord request: %v", err)
-				}
-			}}
-			if err := bot.SendMessageContext(t.Context(), "channel", "reply", tc.opts...); err != nil {
-				t.Fatal(err)
-			}
-			if payload.Reference == nil || payload.Reference.MessageID != tc.want {
-				t.Fatalf("message reference = %+v, want %s", payload.Reference, tc.want)
-			}
-		})
-	}
 }

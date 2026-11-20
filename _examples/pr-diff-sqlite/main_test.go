@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,5 +72,57 @@ func TestArchiveUpdatesDiffAndFallsBackToFilePatches(t *testing.T) {
 	}
 	if rows != 1 || diff != "updated diff" {
 		t.Fatalf("rows = %d, diff = %q", rows, diff)
+	}
+}
+
+func TestWatcherRetriesAndArchivesOnce(t *testing.T) {
+	var polls, fetches atomic.Int32
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/pulls":
+			if polls.Add(1) == 4 {
+				cancel()
+				return
+			}
+			created := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+			fmt.Fprintf(w, `[{"number":1,"created_at":%q},{"number":2,"draft":true,"created_at":%q}]`, created, created)
+		case "/repos/o/r/pulls/1":
+			if fetches.Add(1) == 1 {
+				http.Error(w, "temporary error", 500)
+				return
+			}
+			fmt.Fprint(w, "raw diff")
+		case "/repos/o/r/pulls/1/files":
+			http.Error(w, "temporary error", 500)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := gogithub.NewClient(gogithub.WithURLs(&server.URL, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "watch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	watch(ctx, client, db, "o", "r", 100*time.Millisecond)
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatal("watcher did not complete four polls")
+	}
+	if got := fetches.Load(); got != 2 {
+		t.Fatalf("raw diff fetches = %d, want one retry", got)
+	}
+	var diff string
+	if err = db.QueryRow("SELECT diff FROM pr_diffs WHERE repo='o/r' AND number=1").Scan(&diff); err != nil || diff != "raw diff" {
+		t.Fatalf("archived diff = %q, %v", diff, err)
 	}
 }

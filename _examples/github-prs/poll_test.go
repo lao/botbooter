@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -36,8 +37,16 @@ func TestPollWatcherWelcomesEachEligiblePROnce(t *testing.T) {
 				if !strings.Contains(r.URL.Query().Get("q"), "org:org") {
 					t.Errorf("search query = %q", r.URL.RawQuery)
 				}
-				body = `{"items":[{"number":2,"repository_url":"https://api.github.com/repos/org/repo","user":{"login":"dev","type":"User"}},{"number":3,"repository_url":"https://api.github.com/repos/org/repo","user":{"type":"Bot"}},{"number":4,"repository_url":"https://api.github.com/repos/org/retired","user":{"type":"User"}}]}`
+				body = `{"items":[
+{"number":2,"repository_url":"https://api.github.com/repos/org/repo","user":{"login":"dev","type":"User"}},
+{"number":3,"repository_url":"https://api.github.com/repos/org/repo","user":{"type":"Bot"}},
+{"number":4,"repository_url":"https://api.github.com/repos/org/retired","user":{"type":"User"}}
+]}`
 			case "/repos/org/repo/issues/2/comments":
+				if r.Method != http.MethodPost || r.Body == nil {
+					t.Errorf("unexpected %s %s, want POST with a body", r.Method, r.URL.Path)
+					return nil, fmt.Errorf("invalid welcome request")
+				}
 				comments++
 				text, err := io.ReadAll(r.Body)
 				if err != nil || !strings.Contains(string(text), "@dev") {

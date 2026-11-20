@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/lao/botbooter/cli"
@@ -28,12 +29,7 @@ func TestRunAllStopsPeersOnError(t *testing.T) {
 	defer writer.Close()
 	peer := namedBot{"peer", cli.New(reader, io.Discard)}
 	failure := errors.New("input closed")
-	brokenReader, brokenWriter := io.Pipe()
-	defer brokenReader.Close()
-	if err := brokenWriter.CloseWithError(failure); err != nil {
-		t.Fatal(err)
-	}
-	broken := namedBot{"broken", cli.New(brokenReader, io.Discard)}
+	broken := namedBot{"broken", cli.New(iotest.ErrReader(failure), io.Discard)}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	if err := runAll(ctx, []namedBot{peer, broken}); !errors.Is(err, failure) {
