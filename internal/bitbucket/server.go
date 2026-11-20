@@ -187,7 +187,7 @@ func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 // dispatchAsync runs f on a dispatch goroutine tracked by the inflight counter.
 // Callers pass work bound to the detached context so an acked reply finishes
 // during the shutdown drain; the increment lands before Shutdown returns, so
-// drainDispatch always observes it.
+// the drain always observes it.
 func (a *adapter) dispatchAsync(f func()) {
 	a.inflight.Add(1)
 	go func() {
@@ -307,7 +307,7 @@ func (a *adapter) Disconnect() error {
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), a.drainBudget)
 	defer drainCancel()
-	a.drainDispatch(drainCtx)
+	core.WaitForDispatch(drainCtx, &a.inflight)
 
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
@@ -335,17 +335,4 @@ func (a *adapter) Disconnect() error {
 		return err
 	}
 	return drainErr
-}
-
-// drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so an
-// acked message is processed rather than dropped at shutdown. It polls an atomic
-// counter rather than a WaitGroup: an Add racing Wait would risk a misuse panic.
-func (a *adapter) drainDispatch(ctx context.Context) {
-	for a.inflight.Load() > 0 {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
 }

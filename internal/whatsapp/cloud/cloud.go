@@ -351,7 +351,7 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 
 	// Dispatch on the detached context: core cancels runCtx *before* Disconnect's
 	// drain waits for this handler, so a reply threaded onto runCtx would fail
-	// mid-drain. The increment lands before Shutdown returns, so drainDispatch
+	// mid-drain. The increment lands before Shutdown returns, so the drain
 	// always observes it.
 	a.inflight.Add(1)
 	go func() {
@@ -390,7 +390,7 @@ func (a *adapter) Disconnect() error {
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
-	a.drainDispatch(drainCtx)
+	core.WaitForDispatch(drainCtx, &a.inflight)
 
 	// If the drain timed out, surface it: cancelDispatch below force-aborts
 	// already-acked messages, which is operationally significant.
@@ -420,19 +420,6 @@ func (a *adapter) Disconnect() error {
 		return err
 	}
 	return drainErr
-}
-
-// drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so an
-// acked message is processed rather than dropped at shutdown. It polls an atomic
-// counter rather than a WaitGroup: an Add racing Wait would risk a misuse panic.
-func (a *adapter) drainDispatch(ctx context.Context) {
-	for a.inflight.Load() > 0 {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
 }
 
 // Send POSTs text to channelID. With a threading option it quotes a message via

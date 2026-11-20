@@ -197,8 +197,8 @@ func drainInflight(t *testing.T, a *adapter) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	a.drainDispatch(ctx)
-	// drainDispatch returns silently on timeout; a hung dispatch must fail the
+	core.WaitForDispatch(ctx, &a.inflight)
+	// The drain returns silently on timeout; a hung dispatch must fail the
 	// test, not let a "nothing dispatched" assertion false-pass.
 	asserts.Equal(t, a.inflight.Load(), int64(0), "dispatch goroutines settled within the drain window")
 }
@@ -515,7 +515,7 @@ func TestPollRepoOnce_DispatchCountsInflight(t *testing.T) {
 	close(release)
 	drainCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	a.drainDispatch(drainCtx)
+	core.WaitForDispatch(drainCtx, &a.inflight)
 	asserts.Equal(t, a.inflight.Load(), int64(0), "counter returns to zero after the handler finishes")
 }
 

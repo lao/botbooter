@@ -186,7 +186,7 @@ func (a *adapter) handleMessages(dispatchCtx context.Context, w http.ResponseWri
 	msg := toMessage(&act, body)
 	// Dispatch on the detached context: core cancels runCtx before Disconnect's
 	// drain waits for this handler, so a reply on runCtx would fail mid-drain.
-	// The increment lands before Shutdown returns, so drainDispatch observes it.
+	// The increment lands before Shutdown returns, so the drain observes it.
 	// The semaphore slot is released when dispatch returns.
 	a.inflight.Add(1)
 	go func() {
@@ -213,7 +213,7 @@ func (a *adapter) Disconnect() error {
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer drainCancel()
-	a.drainDispatch(drainCtx)
+	core.WaitForDispatch(drainCtx, &a.inflight)
 
 	// If the drain timed out, surface it: cancelDispatch below force-aborts
 	// already-acked messages, which is operationally significant.
@@ -253,19 +253,6 @@ func (a *adapter) log() *slog.Logger {
 		return a.logger
 	}
 	return slog.Default()
-}
-
-// drainDispatch waits, bounded by ctx, for in-flight dispatch so an acked
-// message is not dropped at shutdown. It polls an atomic counter rather than a
-// WaitGroup: an Add racing Wait would risk a misuse panic.
-func (a *adapter) drainDispatch(ctx context.Context) {
-	for a.inflight.Load() > 0 {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
 }
 
 // recordConversation maps a conversation to its serviceUrl and the bot account,

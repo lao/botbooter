@@ -672,32 +672,6 @@ func TestConnect_ContextCancelDisconnects(t *testing.T) {
 	}
 }
 
-func TestDrainDispatch_ContextCancel(t *testing.T) {
-	a, err := newAdapter(validConfig())
-	asserts.NoError(t, err, "newAdapter")
-	a.inflight.Add(1) // never decremented
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	a.drainDispatch(ctx) // must return promptly on a canceled ctx
-	asserts.Equal(t, a.inflight.Load(), int64(1), "drain returns on ctx cancel without waiting")
-}
-
-func TestDrainDispatch_WaitsForInflight(t *testing.T) {
-	a, err := newAdapter(validConfig())
-	asserts.NoError(t, err, "newAdapter")
-	a.inflight.Add(1)
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		a.inflight.Add(-1)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	a.drainDispatch(ctx)
-
-	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
-}
-
 func TestRecordConversation_BoundedEviction(t *testing.T) {
 	a, err := newAdapter(validConfig())
 	asserts.NoError(t, err, "newAdapter")
