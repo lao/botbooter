@@ -49,13 +49,8 @@ type AskOption func(*flowStep)
 // engine re-prompts the same step — using err.Error() as the nudge when non-empty
 // — and neither stores the answer nor advances.
 //
-// The validator runs synchronously while the conversation holds its shard lock, so
-// keep it fast and non-blocking. It is meant for cheap in-process checks (length,
-// format, a regexp match). Do NOT perform I/O from it: a network or database call —
-// an email-uniqueness lookup, say — blocks the shard for its whole duration, stalling
-// not just this conversation but every other one whose key hashes to the same one of
-// the striped shards. Defer work like that to OnComplete, which runs after the lock
-// is released.
+// Validation holds the mutex for all conversations on this bot. Keep it fast.
+// Perform network or database work in OnComplete, which runs after unlocking.
 func Validate(fn func(string) error) AskOption {
 	return func(s *flowStep) { s.validate = fn }
 }
@@ -181,17 +176,8 @@ func (f *Flow) validate() error {
 // unique, it has no OnComplete, or another flow with the same id is already
 // registered. On any error nothing is registered.
 //
-// flow must not be mutated after it is registered: HandleFlow stores the pointer
-// and dispatch goroutines read its steps and callbacks concurrently, so a later
-// builder call (Ask, OnComplete, Timeout, …) on the same *Flow while the Bot is
-// connected is a data race. Finish building before calling HandleFlow.
-//
-// HandleFlow itself must also run before Connect. It writes the unsynchronized
-// b.flows map that dispatch reads on every message; unlike a slice-append race,
-// Go's runtime turns a concurrent map read/write into a fatal, unrecoverable
-// crash that dispatch's recover cannot catch. Registering a flow while connected
-// (e.g. from an admin command or config reload) is therefore process-fatal, not
-// merely racy.
+// Finish building and registering flows before Connect. Dispatch reads the
+// registry and steps concurrently, and a map write during dispatch can crash the process.
 func (b *Bot) HandleFlow(pattern string, flow *Flow) error {
 	if flow == nil {
 		return ErrFlowNil
