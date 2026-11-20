@@ -81,6 +81,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/lao/botbooter"
+	"github.com/lao/botbooter/_examples/internal/githubenv"
 	"github.com/lao/botbooter/cli"
 	"github.com/lao/botbooter/discord"
 	"github.com/lao/botbooter/github"
@@ -165,7 +166,6 @@ func splitRepos(env string) []string {
 // (GITHUB_TOKEN) or an App key triple (GITHUB_PRIVATE_KEY_FILE et al).
 func newGitHubBot() (*botbooter.Bot, error) {
 	cfg := github.Config{
-		Token:         os.Getenv("GITHUB_TOKEN"),
 		WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		Addr:          os.Getenv("GITHUB_ADDR"),
 		Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
@@ -190,22 +190,7 @@ func newGitHubBot() (*botbooter.Bot, error) {
 	} else {
 		fmt.Fprintln(os.Stderr, "note: set GITHUB_REPO (comma-separated \"owner/name\" or \"owner/*\" entries) to poll for reactions; without it OnReaction never fires.")
 	}
-	if keyFile := os.Getenv("GITHUB_PRIVATE_KEY_FILE"); keyFile != "" {
-		key, err := os.ReadFile(keyFile)
-		if err != nil {
-			return nil, fmt.Errorf("read GITHUB_PRIVATE_KEY_FILE: %w", err)
-		}
-		appID, err := strconv.ParseInt(os.Getenv("GITHUB_APP_ID"), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse GITHUB_APP_ID: %w", err)
-		}
-		installationID, err := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse GITHUB_INSTALLATION_ID: %w", err)
-		}
-		cfg.AppID, cfg.InstallationID, cfg.PrivateKey = appID, installationID, key
-	}
-	return github.New(cfg)
+	return githubenv.NewBot(cfg)
 }
 
 // autoIntervalDisabled parses GITHUB_POLL_AUTO_INTERVAL. Unset means the

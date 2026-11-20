@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 
 	gogithub "github.com/google/go-github/v88/github"
 	"github.com/lao/botbooter"
+	"github.com/lao/botbooter/_examples/internal/githubenv"
 	"github.com/lao/botbooter/github"
 )
 
@@ -31,7 +31,6 @@ func welcomeComment(login string) string {
 // placeholder secret, so the example runs with credentials alone.
 func newBot(onPullRequest func(context.Context, *gogithub.PullRequestEvent)) (*botbooter.Bot, error) {
 	cfg := github.Config{
-		Token:         os.Getenv("GITHUB_TOKEN"),
 		WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		Addr:          os.Getenv("GITHUB_ADDR"),
 		Path:          os.Getenv("GITHUB_PATH"), // optional; defaults to /webhook
@@ -46,20 +45,5 @@ func newBot(onPullRequest func(context.Context, *gogithub.PullRequestEvent)) (*b
 		cfg.WebhookSecret = cmp.Or(cfg.WebhookSecret, "github-prs-example-unused")
 		cfg.Addr = cmp.Or(cfg.Addr, "127.0.0.1:0")
 	}
-	if keyFile := os.Getenv("GITHUB_PRIVATE_KEY_FILE"); keyFile != "" {
-		key, err := os.ReadFile(keyFile)
-		if err != nil {
-			return nil, fmt.Errorf("read GITHUB_PRIVATE_KEY_FILE: %w", err)
-		}
-		appID, err := strconv.ParseInt(os.Getenv("GITHUB_APP_ID"), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse GITHUB_APP_ID: %w", err)
-		}
-		installationID, err := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse GITHUB_INSTALLATION_ID: %w", err)
-		}
-		cfg.AppID, cfg.InstallationID, cfg.PrivateKey = appID, installationID, key
-	}
-	return github.New(cfg)
+	return githubenv.NewBot(cfg)
 }
