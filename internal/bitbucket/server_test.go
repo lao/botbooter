@@ -197,8 +197,8 @@ func TestBodyOverCap(t *testing.T) {
 func TestReadSemaphoreSaturated(t *testing.T) {
 	disp := make(chan *core.Message, 1)
 	a := newCloudAdapter(t)
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // saturate
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // saturate
 	body := []byte(cloudPRComment)
 	rec := serveWebhook(a, discardDeps(disp), "pullrequest:comment_created", body, sign(testSecret, body))
 	asserts.Equal(t, rec.Code, http.StatusOK, "shed delivery acked")
@@ -208,8 +208,8 @@ func TestReadSemaphoreSaturated(t *testing.T) {
 func TestDispatchSemaphoreSaturated(t *testing.T) {
 	disp := make(chan *core.Message, 1)
 	a := newCloudAdapter(t)
-	a.sem = make(chan struct{}, 1)
-	a.sem <- struct{}{} // saturate
+	a.dispatchSlots = make(chan struct{}, 1)
+	a.dispatchSlots <- struct{}{} // saturate
 	body := []byte(cloudPRComment)
 	rec := serveWebhook(a, discardDeps(disp), "pullrequest:comment_created", body, sign(testSecret, body))
 	asserts.Equal(t, rec.Code, http.StatusOK, "shed delivery acked")

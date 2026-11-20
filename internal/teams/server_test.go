@@ -241,7 +241,7 @@ func TestHandleMessages_DropsBotMessage(t *testing.T) {
 // forced to a single slot so one blocked dispatch saturates it.
 func TestHandleMessages_SaturatedDispatchReturns503(t *testing.T) {
 	a := testAdapter(t)
-	a.dispatchSem = make(chan struct{}, 1) // force a single dispatch slot
+	a.dispatchSlots = make(chan struct{}, 1) // force a single dispatch slot
 
 	release := make(chan struct{})
 	defer close(release)
@@ -281,8 +281,8 @@ func (s *readSpy) Read([]byte) (int, error) { s.reads++; return 0, io.EOF }
 // check. Mirrors the github/gitlab sibling test.
 func TestHandleMessages_ReadSaturationReturns503(t *testing.T) {
 	a := testAdapter(t)
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // occupy the only inbound slot
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // occupy the only inbound slot
 
 	var got []*core.Message
 	spy := &readSpy{}
@@ -670,32 +670,6 @@ func TestConnect_ContextCancelDisconnects(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("context cancel did not trigger Disconnect")
 	}
-}
-
-func TestDrainDispatch_ContextCancel(t *testing.T) {
-	a, err := newAdapter(validConfig())
-	asserts.NoError(t, err, "newAdapter")
-	a.inflight.Add(1) // never decremented
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	a.drainDispatch(ctx) // must return promptly on a canceled ctx
-	asserts.Equal(t, a.inflight.Load(), int64(1), "drain returns on ctx cancel without waiting")
-}
-
-func TestDrainDispatch_WaitsForInflight(t *testing.T) {
-	a, err := newAdapter(validConfig())
-	asserts.NoError(t, err, "newAdapter")
-	a.inflight.Add(1)
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		a.inflight.Add(-1)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	a.drainDispatch(ctx)
-
-	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
 }
 
 func TestRecordConversation_BoundedEviction(t *testing.T) {

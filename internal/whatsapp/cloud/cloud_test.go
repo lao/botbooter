@@ -38,7 +38,7 @@ func validConfig() Config {
 func testAdapter() *adapter {
 	cfg := validConfig()
 	cfg.Path = defaultPath
-	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: http.DefaultClient, dispatchSem: make(chan struct{}, maxConcurrentDispatch), readSem: make(chan struct{}, maxConcurrentReads)}
+	return &adapter{cfg: cfg, baseURL: graphBaseURL, http: http.DefaultClient, dispatchSlots: make(chan struct{}, maxConcurrentDispatch), readSlots: make(chan struct{}, maxConcurrentReads)}
 }
 
 // sign returns the X-Hub-Signature-256 header value for body under secret.
@@ -140,7 +140,7 @@ func TestHandleWebhook_SkipsReactionRemoval(t *testing.T) {
 	// assert nothing was dispatched (empty emoji = removal, added-only scope).
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	a.drainDispatch(ctx)
+	core.WaitForDispatch(ctx, &a.inflight)
 	asserts.Equal(t, len(got), 0, "a reaction removal (empty emoji) is not dispatched")
 }
 
@@ -444,7 +444,7 @@ func TestHandleWebhook_RoutesBadSignatureWarningToInjectedLogger(t *testing.T) {
 // retries) rather than spawning an unbounded goroutine.
 func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	a := testAdapter()
-	a.dispatchSem = make(chan struct{}, 1) // capacity 1
+	a.dispatchSlots = make(chan struct{}, 1) // capacity 1
 
 	release := make(chan struct{})
 	started := make(chan struct{}, 1)
@@ -481,7 +481,7 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	close(release)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	a.drainDispatch(ctx)
+	core.WaitForDispatch(ctx, &a.inflight)
 }
 
 // readSpy counts Read calls so a test can prove a shed request's body was
@@ -495,8 +495,8 @@ func (s *readSpy) Read([]byte) (int, error) { s.reads++; return 0, io.EOF }
 // signature check. Mirrors the github/gitlab sibling test.
 func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
 	a := testAdapter()
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // occupy the only inbound slot
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // occupy the only inbound slot
 
 	var got []*core.Message
 	spy := &readSpy{}
@@ -956,30 +956,6 @@ func TestDisconnect_DrainTimeoutReturnsError(t *testing.T) {
 	}
 
 	asserts.Error(t, a.Disconnect(), "drain timeout should surface an error, not a clean nil")
-}
-
-func TestDrainDispatch_ContextCancel(t *testing.T) {
-	a := testAdapter()
-	a.inflight.Add(1) // never decremented
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	a.drainDispatch(ctx) // must return promptly on a canceled ctx
-	asserts.Equal(t, a.inflight.Load(), int64(1), "drain returns on ctx cancel without waiting")
-}
-
-func TestDrainDispatch_WaitsForInflight(t *testing.T) {
-	a := testAdapter()
-	a.inflight.Add(1)
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		a.inflight.Add(-1)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	a.drainDispatch(ctx)
-
-	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
 }
 
 type failingListener struct {

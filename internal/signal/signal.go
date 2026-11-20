@@ -545,7 +545,7 @@ func (a *adapter) Disconnect() error {
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer drainCancel()
-	c.drainDispatch(drainCtx)
+	core.WaitForDispatch(drainCtx, &c.inflight)
 
 	var drainErr error
 	if n := c.inflight.Load(); n > 0 {
@@ -564,21 +564,6 @@ func (a *adapter) Disconnect() error {
 	c.cancelDispatch()
 
 	return drainErr
-}
-
-// drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so a
-// received message finishes processing rather than being dropped at shutdown.
-// Replies still work during the drain — they go over REST, not the closed
-// receive socket. It polls an atomic counter rather than a WaitGroup: an Add
-// racing Wait would risk a misuse panic.
-func (c *wsConn) drainDispatch(ctx context.Context) {
-	for c.inflight.Load() > 0 {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
 }
 
 // Attachments returns the files attached to m. The container serves attachment

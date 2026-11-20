@@ -382,7 +382,7 @@ func TestHandleWebhook_Routes401ToInjectedLogger(t *testing.T) {
 func TestHandleWebhook_DispatchSaturationAcksAndDrops(t *testing.T) {
 	a, err := newAdapter(testConfig())
 	asserts.NoError(t, err, "new adapter")
-	a.sem = make(chan struct{}, 1) // force a one-slot bound
+	a.dispatchSlots = make(chan struct{}, 1) // force a one-slot bound
 	var buf bytes.Buffer
 	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -411,7 +411,7 @@ func TestHandleWebhook_DispatchSaturationAcksAndDrops(t *testing.T) {
 	close(release)
 	drainCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	a.drainDispatch(drainCtx)
+	core.WaitForDispatch(drainCtx, &a.inflight)
 	asserts.Equal(t, a.inflight.Load(), int64(0), "slot released after the handler returns")
 	asserts.Equal(t, len(entered), 0, "the shed delivery never dispatched")
 }
@@ -421,8 +421,8 @@ func TestHandleWebhook_DispatchSaturationAcksAndDrops(t *testing.T) {
 func TestHandleWebhook_ReadSaturationAcksAndDrops(t *testing.T) {
 	a, err := newAdapter(testConfig())
 	asserts.NoError(t, err, "new adapter")
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // occupy the only inbound slot
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // occupy the only inbound slot
 	var buf bytes.Buffer
 	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -1038,32 +1038,6 @@ func TestDisconnect_DrainsBeforeCancelingDetachedCtx(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for dispatch to finish")
 	}
-}
-
-func TestDrainDispatch_ContextCancel(t *testing.T) {
-	a, err := newAdapter(testConfig())
-	asserts.NoError(t, err, "new adapter")
-	a.inflight.Add(1) // never decremented
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	a.drainDispatch(ctx) // must return promptly on a canceled ctx
-	asserts.Equal(t, a.inflight.Load(), int64(1), "drain returns on ctx cancel without waiting")
-}
-
-func TestDrainDispatch_WaitsForInflight(t *testing.T) {
-	a, err := newAdapter(testConfig())
-	asserts.NoError(t, err, "new adapter")
-	a.inflight.Add(1)
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		a.inflight.Add(-1)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	a.drainDispatch(ctx)
-
-	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
 }
 
 func TestServe_ReportsUnexpectedError(t *testing.T) {

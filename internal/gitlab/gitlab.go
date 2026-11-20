@@ -23,36 +23,13 @@ import (
 const (
 	defaultPath = "/webhook"
 
-	// The endpoint is public and each delivery is buffered whole before it is
-	// parsed, so the body cap bounds attacker-controllable buffering. The
-	// effective cap is chosen per adapter by requestByteLimit. A Note payload
-	// carries the note plus the whole noteable, and GitLab caps a note body at
-	// ~1M characters and an issue/merge-request description at 1 MiB, so a
-	// legitimate comment on a long issue can approach a few MiB once JSON
-	// escaping and the rest of the object are counted: smallRequestBytes sits
-	// above that worst case (a dropped comment cannot be recovered — GitLab does
-	// not re-deliver) while still keeping a comment-only bot far below the tens of
-	// megabytes a large event can carry. Merge Request and Push deliveries (many
-	// commits, many changed paths) can be much larger, so a bot that registers
-	// OnMergeRequest/OnPush raises the cap to largeRequestBytes — it has opted
-	// into large events and the memory cost.
+	// A Note includes the issue or merge request description. Allow larger merge request and push payloads.
 	smallRequestBytes = 4 << 20  // 4 MiB (Note and unhandled events)
 	largeRequestBytes = 25 << 20 // 25 MiB (large Merge Request / Push deliveries)
 
-	// maxConcurrentReads bounds concurrent inbound processing (the body read +
-	// parse). Even though the token is verified before the body is read, a flood
-	// of authenticated large POSTs could each buffer the request cap; this caps
-	// peak read memory at maxConcurrentReads times the effective cap. A delivery
-	// arriving past the bound is logged and acked 200 without being read: GitLab
-	// never re-delivers it either way, and a 503 would additionally push the hook
-	// toward being auto-disabled. It is separate from maxConcurrentDispatch because
-	// a read is short-lived while a dispatch goroutine may run a slow handler.
+	// Concurrent reads bound buffered bodies to maxConcurrentReads times the request limit.
 	maxConcurrentReads = 16
 
-	// maxConcurrentDispatch bounds in-flight webhook dispatch goroutines. A
-	// delivery that would exceed it is logged and acked 200 without dispatching
-	// (see ackAndDispatch), instead of spawning an unbounded goroutine under a
-	// flood.
 	maxConcurrentDispatch = 256
 
 	shutdownTimeout = 5 * time.Second
@@ -143,20 +120,9 @@ type adapter struct {
 	// logger is the Bot's logger handed over at Connect; read via log().
 	logger   *slog.Logger
 	inflight atomic.Int64
-	// sem bounds concurrent webhook dispatch goroutines (see
-	// maxConcurrentDispatch). A non-blocking acquire before the ack turns a
-	// saturating flood into logged, acked drops instead of unbounded
-	// goroutines. Re-created per
-	// Connect and captured at acquire, so a slot that a context-ignoring handler
-	// never releases is confined to that one connection.
-	sem chan struct{}
-	// readSem bounds concurrent inbound request processing so a flood of large
-	// bodies can't buffer unbounded memory (see maxConcurrentReads); separate
-	// from sem, which bounds dispatch goroutines.
-	readSem chan struct{}
-	// maxRequestBytes is the inbound body cap, fixed at New by requestByteLimit:
-	// smallRequestBytes unless OnMergeRequest/OnPush is registered, then
-	// largeRequestBytes.
+	// Replaced on Connect so a stuck handler consumes only its own connection's slot.
+	dispatchSlots   chan struct{}
+	readSlots       chan struct{}
 	maxRequestBytes int64
 	// drainBudget is how long Disconnect waits for in-flight dispatch goroutines.
 	// Fixed at New to drainTimeout and never reassigned afterwards; it is a field
@@ -256,8 +222,8 @@ func newAdapter(cfg Config) (*adapter, error) {
 	return &adapter{
 		cfg:               cfg,
 		client:            client,
-		sem:               make(chan struct{}, maxConcurrentDispatch),
-		readSem:           make(chan struct{}, maxConcurrentReads),
+		dispatchSlots:     make(chan struct{}, maxConcurrentDispatch),
+		readSlots:         make(chan struct{}, maxConcurrentReads),
 		maxRequestBytes:   requestByteLimit(cfg),
 		drainBudget:       drainTimeout,
 		selfResolveBudget: selfResolveTimeout,

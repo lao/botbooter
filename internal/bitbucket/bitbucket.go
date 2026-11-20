@@ -185,8 +185,8 @@ type adapter struct {
 	detachedCancel    context.CancelFunc
 	logger            *slog.Logger
 	inflight          atomic.Int64
-	sem               chan struct{}
-	readSem           chan struct{}
+	dispatchSlots     chan struct{}
+	readSlots         chan struct{}
 	maxRequestBytes   int64
 	drainBudget       time.Duration
 	selfResolveBudget time.Duration
@@ -290,8 +290,8 @@ func newAdapter(cfg Config) (*adapter, error) {
 	a := &adapter{
 		cfg:               cfg,
 		dataCenter:        dataCenter,
-		sem:               make(chan struct{}, maxConcurrentDispatch),
-		readSem:           make(chan struct{}, maxConcurrentReads),
+		dispatchSlots:     make(chan struct{}, maxConcurrentDispatch),
+		readSlots:         make(chan struct{}, maxConcurrentReads),
 		maxRequestBytes:   requestByteLimit(cfg),
 		drainBudget:       drainTimeout,
 		selfResolveBudget: selfResolveTimeout,

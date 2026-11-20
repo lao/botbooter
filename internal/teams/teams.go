@@ -66,17 +66,10 @@ type adapter struct {
 	// after the drain window so a stuck handler or reply cannot leak.
 	detachedCancel context.CancelFunc
 	inflight       atomic.Int64
-	// dispatchSem is a counting semaphore (capacity maxConcurrentDispatch) that
-	// bounds in-flight dispatch goroutines: the handler acquires a slot before
-	// acking and sheds load with 503 when it is full. Re-created per Connect and
-	// captured at acquire, so a slot a context-ignoring handler never releases is
-	// confined to that connection rather than leaking for the adapter's lifetime.
-	dispatchSem chan struct{}
-	// readSem bounds concurrent inbound request processing so a flood of large
-	// bodies can't buffer unbounded memory before JWT verification (see
-	// maxConcurrentReads); separate from dispatchSem, which bounds dispatch
-	// goroutines. Allocated once in newAdapter and never reassigned.
-	readSem   chan struct{}
+	// A stuck handler holds a slot only on its own connection.
+	dispatchSlots chan struct{}
+	// Read slots bound buffered request bodies across connections.
+	readSlots chan struct{}
 	convs     map[string]conversation // conversationID -> reply routing info
 	convOrder []string                // FIFO insertion order for bounded eviction
 	token     cachedToken
@@ -141,11 +134,11 @@ func newAdapter(cfg Config) (*adapter, error) {
 		tenant = "botframework.com"
 	}
 	return &adapter{
-		cfg:         cfg,
-		http:        cfg.HTTPClient,
-		tokenURL:    "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token",
-		openIDURL:   openIDConfigURL,
-		dispatchSem: make(chan struct{}, maxConcurrentDispatch),
-		readSem:     make(chan struct{}, maxConcurrentReads),
+		cfg:           cfg,
+		http:          cfg.HTTPClient,
+		tokenURL:      "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token",
+		openIDURL:     openIDConfigURL,
+		dispatchSlots: make(chan struct{}, maxConcurrentDispatch),
+		readSlots:     make(chan struct{}, maxConcurrentReads),
 	}, nil
 }

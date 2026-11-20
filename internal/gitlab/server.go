@@ -46,17 +46,17 @@ func (a *adapter) handleWebhook(dispatchCtx context.Context, w http.ResponseWrit
 	// Bound concurrent inbound processing before reading the (up to
 	// a.maxRequestBytes) body, so an authenticated flood of large POSTs cannot
 	// buffer unbounded memory. Held only across read+parse (this function); the
-	// dispatch goroutine has its own bound (ackAndDispatch). a.readSem is
+	// dispatch goroutine has its own bound (ackAndDispatch). a.readSlots is
 	// allocated once in newAdapter and never reassigned, so this direct read
 	// races nothing.
 	select {
-	case a.readSem <- struct{}{}:
+	case a.readSlots <- struct{}{}:
 	default:
 		a.log().Warn("gitlab: inbound concurrency limit reached; acking and dropping delivery", "limit", maxConcurrentReads)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	defer func() { <-a.readSem }()
+	defer func() { <-a.readSlots }()
 
 	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, a.maxRequestBytes))
 	if err != nil {
@@ -265,14 +265,12 @@ func (a *adapter) handlePush(dispatchCtx context.Context, w http.ResponseWriter,
 // delivery — GitLab does not re-deliver it — and would push the hook toward
 // being auto-disabled, taking later deliveries with it.
 func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
-	// Snapshot this connection's semaphore once: Connect installs a fresh one per
-	// connection, and the acquire below and the release in the dispatch goroutine
-	// must target the SAME channel even if a later reconnect swaps a.sem.
+	// A reconnect installs new slots. Release the slot on the channel we acquired.
 	a.mu.Lock()
-	sem := a.sem
+	dispatchSlots := a.dispatchSlots
 	a.mu.Unlock()
 	select {
-	case sem <- struct{}{}:
+	case dispatchSlots <- struct{}{}:
 	default:
 		a.log().Warn("gitlab: dispatch concurrency limit reached; acking and dropping delivery", "limit", maxConcurrentDispatch)
 		w.WriteHeader(http.StatusOK)
@@ -280,7 +278,7 @@ func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 	}
 	w.WriteHeader(http.StatusOK)
 	a.dispatchAsync(func() {
-		defer func() { <-sem }()
+		defer func() { <-dispatchSlots }()
 		f()
 	})
 }
@@ -288,7 +286,7 @@ func (a *adapter) ackAndDispatch(w http.ResponseWriter, f func()) {
 // dispatchAsync runs f on a dispatch goroutine tracked by the inflight counter.
 // Callers pass work bound to the detached context: core cancels runCtx *before*
 // Disconnect's drain waits for the handler, so work threaded onto runCtx would
-// fail mid-drain. The increment lands before Shutdown returns, so drainDispatch
+// fail mid-drain. The increment lands before Shutdown returns, so the drain
 // always observes it.
 func (a *adapter) dispatchAsync(f func()) {
 	a.inflight.Add(1)
@@ -344,7 +342,7 @@ func (a *adapter) Connect(ctx context.Context, deps core.AdapterDeps) error {
 	a.logger = deps.Logger
 	// Fresh per-connection dispatch semaphore: a slot a hung handler never
 	// releases dies with this connection instead of leaking across reconnects.
-	a.sem = make(chan struct{}, maxConcurrentDispatch)
+	a.dispatchSlots = make(chan struct{}, maxConcurrentDispatch)
 	a.mu.Unlock()
 
 	go func() {
@@ -428,7 +426,7 @@ func (a *adapter) Disconnect() error {
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), a.drainBudget)
 	defer drainCancel()
-	a.drainDispatch(drainCtx)
+	core.WaitForDispatch(drainCtx, &a.inflight)
 
 	var drainErr error
 	if n := a.inflight.Load(); n > 0 {
@@ -456,19 +454,6 @@ func (a *adapter) Disconnect() error {
 		return err
 	}
 	return drainErr
-}
-
-// drainDispatch waits, bounded by ctx, for in-flight dispatch goroutines so an
-// acked message is processed rather than dropped at shutdown. It polls an atomic
-// counter rather than a WaitGroup: an Add racing Wait would risk a misuse panic.
-func (a *adapter) drainDispatch(ctx context.Context) {
-	for a.inflight.Load() > 0 {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
 }
 
 // Attachments implements core.Adapter. GitLab notes carry markdown, not an

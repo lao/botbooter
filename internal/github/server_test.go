@@ -319,7 +319,7 @@ func TestHandleWebhook_Routes403ToInjectedLogger(t *testing.T) {
 func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	a, err := newAdapter(patConfig())
 	asserts.NoError(t, err, "new adapter")
-	a.sem = make(chan struct{}, 1) // force a one-slot bound
+	a.dispatchSlots = make(chan struct{}, 1) // force a one-slot bound
 
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -346,7 +346,7 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 	close(release)
 	drainCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	a.drainDispatch(drainCtx)
+	core.WaitForDispatch(drainCtx, &a.inflight)
 	asserts.Equal(t, a.inflight.Load(), int64(0), "slot released after the handler returns")
 }
 
@@ -356,8 +356,8 @@ func TestHandleWebhook_SaturationReturns503(t *testing.T) {
 func TestHandleWebhook_ReadSaturationReturns503(t *testing.T) {
 	a, err := newAdapter(patConfig())
 	asserts.NoError(t, err, "new adapter")
-	a.readSem = make(chan struct{}, 1)
-	a.readSem <- struct{}{} // occupy the only inbound slot
+	a.readSlots = make(chan struct{}, 1)
+	a.readSlots <- struct{}{} // occupy the only inbound slot
 
 	var got []*core.Message
 	w := httptest.NewRecorder()
@@ -973,32 +973,6 @@ func TestHandleWebhook_CallbackCoveredByDrain(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	asserts.Equal(t, a.inflight.Load(), int64(0), "callback return releases the counter")
-}
-
-func TestDrainDispatch_ContextCancel(t *testing.T) {
-	a, err := newAdapter(patConfig())
-	asserts.NoError(t, err, "new adapter")
-	a.inflight.Add(1) // never decremented
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	a.drainDispatch(ctx) // must return promptly on a canceled ctx
-	asserts.Equal(t, a.inflight.Load(), int64(1), "drain returns on ctx cancel without waiting")
-}
-
-func TestDrainDispatch_WaitsForInflight(t *testing.T) {
-	a, err := newAdapter(patConfig())
-	asserts.NoError(t, err, "new adapter")
-	a.inflight.Add(1)
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		a.inflight.Add(-1)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	a.drainDispatch(ctx)
-
-	asserts.Equal(t, a.inflight.Load(), int64(0), "drain should wait until in-flight dispatch reaches zero")
 }
 
 // TestDisconnect_DrainTimeoutReturnsError guards that a drain which cannot finish

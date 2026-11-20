@@ -23,36 +23,14 @@ import (
 const (
 	defaultPath = "/webhook"
 
-	// The endpoint is public and the body must be buffered whole before its HMAC
-	// can be checked, so the body cap bounds attacker-controllable pre-auth
-	// buffering. The effective cap is chosen per adapter by requestByteLimit:
-	// issue_comment payloads (the core path) are tens of KB, so a bot that
-	// handles only them caps at smallRequestBytes and never buffers megabytes it
-	// cannot use; push and pull_request deliveries (many commits, large PR
-	// bodies) can reach GitHub's 25 MiB webhook ceiling, so a bot that registers
-	// OnPush/OnPullRequest raises the cap to largeRequestBytes — it has opted
-	// into large events and the memory maxConcurrentReads of them costs. Capping
-	// a large-event bot lower silently dropped real push/PR deliveries at the
-	// body reader.
+	// Buffer up to GitHub’s webhook ceiling only for PR and push handlers.
 	smallRequestBytes = 1 << 20  // 1 MiB (issue_comment and unhandled events)
 	largeRequestBytes = 25 << 20 // 25 MiB (GitHub's webhook payload ceiling)
 
-	// maxConcurrentReads bounds concurrent inbound processing (the body read +
-	// HMAC verify + parse). The body must be read before its signature can be
-	// checked, so without this an unauthenticated flood of large POSTs could each
-	// buffer the request cap with no limit; this caps peak read memory at
-	// maxConcurrentReads times the effective cap — 16 MiB for an issue_comment
-	// bot, and up to ~400 MiB only for one that opted into large events. It is
-	// kept well above realistic GitHub delivery concurrency, and a saturating
-	// burst is shed with 503 (GitHub retries), so legitimate traffic is not
-	// dropped. It is separate from maxConcurrentDispatch because a read is
-	// short-lived while a dispatch goroutine may run a slow handler.
+	// Concurrent reads bound buffered bodies to maxConcurrentReads times the request limit.
 	maxConcurrentReads = 16
 
-	// maxConcurrentDispatch bounds in-flight webhook dispatch goroutines. A
-	// delivery that would exceed it is answered 503 (GitHub retries) instead of
-	// spawning an unbounded goroutine under a flood. The reaction poller is
-	// excluded — its cadence is self-bounded and it has no HTTP response to 503.
+	// The limit applies to webhook handlers. Polled reactions bypass it.
 	maxConcurrentDispatch = 256
 
 	shutdownTimeout = 5 * time.Second
@@ -191,23 +169,9 @@ type adapter struct {
 	// logger is the Bot's logger handed over at Connect; read via log().
 	logger   *slog.Logger
 	inflight atomic.Int64
-	// sem bounds concurrent webhook dispatch goroutines (see
-	// maxConcurrentDispatch). A non-blocking acquire before the ack turns a
-	// saturating flood into 503s instead of unbounded goroutines. Re-created per
-	// Connect and captured at acquire, so a slot that a context-ignoring handler
-	// never releases is confined to that one connection rather than leaking for the
-	// adapter's whole lifetime; the reaction poller does not use it.
-	sem chan struct{}
-	// readSem bounds concurrent inbound request processing so a flood of large
-	// bodies can't buffer unbounded memory before the HMAC check (see
-	// maxConcurrentReads); separate from sem, which bounds dispatch goroutines.
-	readSem chan struct{}
-	// maxRequestBytes is the inbound body cap, fixed at New by requestByteLimit:
-	// smallRequestBytes unless OnPush/OnPullRequest is registered, then
-	// largeRequestBytes. The body is buffered whole before its HMAC is checked,
-	// so this bounds attacker-controllable pre-auth memory together with
-	// maxConcurrentReads; keeping it small when large events are not handled
-	// stops a plain issue_comment bot from buffering 25 MiB it never parses.
+	// Replaced on Connect so a stuck handler consumes only its own connection's slot.
+	dispatchSlots   chan struct{}
+	readSlots       chan struct{}
 	maxRequestBytes int64
 }
 
@@ -323,8 +287,8 @@ func newAdapter(cfg Config) (*adapter, error) {
 		cfg:             cfg,
 		pollRepos:       pollRepos,
 		wildcardOwners:  wildcardOwners,
-		sem:             make(chan struct{}, maxConcurrentDispatch),
-		readSem:         make(chan struct{}, maxConcurrentReads),
+		dispatchSlots:   make(chan struct{}, maxConcurrentDispatch),
+		readSlots:       make(chan struct{}, maxConcurrentReads),
 		maxRequestBytes: requestByteLimit(cfg),
 	}
 	if a.pollingConfigured() {
