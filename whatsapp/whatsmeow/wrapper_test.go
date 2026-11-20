@@ -14,7 +14,7 @@ import (
 func TestNew(t *testing.T) {
 	bot, err := New(Config{DBPath: filepath.Join(t.TempDir(), "wa.db")})
 	asserts.NoError(t, err, "new whatsmeow bot")
-	asserts.Equal(t, bot.BotType, botbooter.WhatsMeowBotType, "bot type")
+	asserts.Equal(t, bot.BotType, botbooter.WhatsAppWebBotType, "bot type")
 	asserts.NotNil(t, Client(bot), "client accessor")
 }
 

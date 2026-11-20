@@ -163,7 +163,7 @@ func New(cfg Config) (*core.Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return core.New(core.WhatsMeowBotType, a), nil
+	return core.New(core.WhatsAppWebBotType, a), nil
 }
 
 // newAdapter resolves cfg into a whatsmeow client and applies defaults. When

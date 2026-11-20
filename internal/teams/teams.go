@@ -1,23 +1,7 @@
-// Package teams is the Microsoft Teams adapter for botbooter. It implements
-// core.Adapter, receiving messages from the Azure Bot Framework over an inbound
-// webhook and replying through the Bot Connector REST API.
-//
-// Like the WhatsApp adapter, the Bot Framework pushes inbound messages as HTTP
-// callbacks, so this adapter runs its own server: Connect binds a listener and
-// serves until the run context is canceled; Disconnect shuts it down. Bind a local
-// Addr, put a TLS-terminating proxy in front, and register the public HTTPS URL as
-// your Azure Bot resource's messaging endpoint.
-//
-// Security: every inbound request is authenticated against the Bot Connector JWT
-// (signature, audience, issuer, serviceurl claim, channel endorsement), and
-// replies go only to allowlisted Bot Framework hosts. The Activity body itself is
-// channel-trusted, not individually signed, with no replay tracking: terminate
-// TLS at a trusted proxy, never expose the bind Addr in cleartext, and rate-limit
-// at the proxy.
-//
-// Implementation split: server.go (webhook lifecycle), auth.go (JWT/JWKS + SSRF
-// checks), send.go (reply + token), message.go (parsing), attachments.go
-// (attachment mapping), http.go (HTTP plumbing).
+// Package teams receives Azure Bot Framework activities and sends replies
+// through the Bot Connector REST API. Terminate TLS and rate-limit at a trusted
+// proxy. The adapter checks the Connector JWT and restricts outbound hosts.
+// Activities are trusted to the channel and can be replayed.
 package teams
 
 import (

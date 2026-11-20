@@ -1,31 +1,6 @@
-// Package bitbucket is the Bitbucket adapter for botbooter. It receives pull
-// request and issue comments as webhook deliveries over an inbound HTTP server
-// and replies by creating comments through the Bitbucket REST API. It implements
-// core.Adapter and, since Bitbucket threads a reply via a comment's parent id on
-// both flavors, core.ThreadedSender. Optional Config callbacks (OnPullRequest,
-// OnPush) additionally route PR and push deliveries on the same endpoint; unset,
-// those deliveries are acked and dropped.
-//
-// One package serves both flavors, selected by Config.BaseURL: empty targets
-// Bitbucket Cloud (REST 2.0 via ktrysmt/go-bitbucket), a value targets a Data
-// Center instance (REST 1.0 via plain net/http). Cloud and Data Center share the
-// webhook framing — X-Event-Key routing and the X-Hub-Signature HMAC — and
-// nothing else: different event keys, different payload shapes, different reply
-// bodies, different self-identity. That divergence lives behind the unexported
-// flavor interface, so server.go never branches on flavor.
-//
-// Like the WhatsApp, Teams, GitHub and GitLab adapters, Connect binds a listener
-// and serves until the run context is canceled; Disconnect shuts it down and
-// drains in-flight dispatch. Bind a local Addr, put a TLS-terminating proxy in
-// front, and register the public HTTPS URL as the repository webhook with a
-// Secret and the comment trigger enabled (plus PR/push triggers when the matching
-// callback is set).
-//
-// Bitbucket removed app passwords platform-wide on 2026-07-28, so the adapter
-// authenticates as an Atlassian API token (HTTP Basic email:token) or a
-// repository/project/workspace access token (Bearer). Access tokens are not bound
-// to a user account, so GET /2.0/user 401s for them and Config.Self is required;
-// Data Center has no whoami at all, so Self is required there too.
+// Package bitbucket handles Bitbucket comment, pull request and push webhooks.
+// Config.BaseURL selects Cloud or Data Center. Each has its own payloads,
+// authentication and reply format behind the flavor interface.
 package bitbucket
 
 import (
