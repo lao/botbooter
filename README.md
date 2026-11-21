@@ -40,7 +40,7 @@ Inspired by [Gin](https://gin-gonic.com/): you register pattern-matched command 
 go get github.com/lao/botbooter
 ```
 
-Requires Go 1.25+.
+Requires Go 1.26+.
 
 ## Quickstart
 
