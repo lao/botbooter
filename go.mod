@@ -1,10 +1,8 @@
 module github.com/lao/botbooter
 
-go 1.25.0
+go 1.26.0
 
-// Pinned to the latest 1.25 patch release so CI (setup-go reads this file) and
-// govulncheck run against a stdlib with all published fixes applied.
-toolchain go1.25.11
+toolchain go1.26.11
 
 require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
@@ -12,7 +10,7 @@ require (
 	github.com/go-telegram/bot v1.21.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/go-github/v88 v88.0.0
-	github.com/gorilla/websocket v1.5.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/ktrysmt/go-bitbucket v0.10.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/slack-go/slack v0.12.1
@@ -43,14 +41,14 @@ require (
 	github.com/vektah/gqlparser/v2 v2.5.27 // indirect
 	go.mau.fi/libsignal v0.2.2 // indirect
 	go.mau.fi/util v0.9.10 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
-	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/term v0.44.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
